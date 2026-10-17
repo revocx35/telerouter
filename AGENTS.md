@@ -98,6 +98,13 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   your session limit · resets …" and ends the turn (transcript: assistant text + `system`/`turn_duration`).
   `AgentRuntime._watch_turn_end` tails the transcript during a voice request and answers with that text,
   instead of leaving the caller waiting for `reply_timeout`.
+- **Claude Code records the system prompt at a conversation's first request and reuses it on every
+  `--resume`** (`--system-prompt-snapshot`, default on): changed voice instructions never reached Jarvis's
+  existing conversation (verified: APPLE stayed APPLE after resuming with PEAR). start.sh passes
+  `--system-prompt-snapshot off` when the installed claude knows the flag.
+- Agents had Claude Code's own peer-session tools (ListAgents/SendMessage) and used them for "connect me to the
+  X session"; the instructions now say voice goes through telerouter's connect_call. `mcp.fuzzy_pick` matches
+  garbled spoken names ("Tether Outer T-Max" -> telerouter).
 - Foreign tmux sessions (not started by telerouter) have no hooks: `~/.claude/sessions/<pid>.json` (pid of
   the pane's claude, or a child of the pane's shell) gives the session id -> transcript. Read it from the
   line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.

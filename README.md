@@ -121,7 +121,7 @@ rejected by default; set a DTMF PIN in *Voice & calls* if your PBX takes outside
 | `TELEROUTER_TRUSTED_PROXIES` | none | `private` or CIDRs whose X-Forwarded-For is trusted |
 | `TELEROUTER_SETUP_CODE` | random | fixed first-setup code |
 | `WHISPER_MODEL` | small-int8 | tiny/base/small/medium-int8 |
-| `WHISPER_PROMPT` | "Hey Jarvis. Call dad…" | names Whisper should expect |
+| `WHISPER_PROMPT` | "Hey Jarvis. Call dad…" | names Whisper should expect, e.g. your tmux session names ("Connect me to the wa_logger tmux.") |
 | `PIPER_VOICE` | en_US-lessac-medium | default voice |
 | `WAKE_THRESHOLD` | 0.5 | openWakeWord sensitivity |
 

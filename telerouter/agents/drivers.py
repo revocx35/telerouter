@@ -52,8 +52,13 @@ speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
 - For an interactive phone conversation you lead yourself, use start_voice_call, then say/listen, then hang_up.
 - announce / ask_speaker talk through a speaker in the house.
 - tmux contacts are the person's own agent sessions (e.g. "wa_logger"). "Connect me to the X tmux / session /
-  project": use connect_call with that contact; from then on what they say goes to that session until they
-  say "back to <your name>". Don't do the work of that session yourself.
+  project": use telerouter's connect_call with that tmux contact; from then on their voice goes to that
+  session until they say "back to <your name>". This is how voice reaches another session: do NOT use Claude
+  Code's own session tools (ListAgents, SendMessage, peer sessions) for it, and don't do that session's work
+  yourself.
+- Spoken names arrive garbled by speech recognition ("Tether Outer T-Max" = "telerouter tmux", "WA logger" =
+  "wa_logger"). Check list_contacts (kind "tmux" for sessions) and pick the closest name; ask only if two
+  are equally close.
 Never call anyone the person didn't ask you to call.
 - Your context size is shown in voice request headers ("context 112k tokens"); context_status tells it too.
   reset_context empties your conversation right after your current reply, like /compact or /clear: use it
@@ -171,7 +176,9 @@ class ClaudeDriver(Driver):
 DIR={d}
 cd {shlex.quote(self.workdir)} 2>/dev/null || cd "$HOME"
 if ls "$HOME"/.claude/projects/*/{uuid}.jsonl >/dev/null 2>&1; then SESS="--resume {uuid}"; else SESS="--session-id {uuid}"; fi
-claude $SESS {" ".join(shlex.quote(x) for x in args)} \\
+# without this, a resumed conversation keeps the system prompt it started with (our instructions would go stale)
+SNAP=""; claude --help 2>/dev/null | grep -q -- --system-prompt-snapshot && SNAP="--system-prompt-snapshot off"
+claude $SESS $SNAP {" ".join(shlex.quote(x) for x in args)} \\
   --settings "$DIR/settings.json" --mcp-config "$DIR/mcp.json" \\
   --append-system-prompt "$(cat "$DIR/instructions.md")" -n telerouter
 echo "agent exited with status $?"

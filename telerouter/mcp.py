@@ -8,7 +8,9 @@ trm_...`; the token's scopes and contact/speaker lists limit what its tools see 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
+import re
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -98,6 +100,9 @@ class McpServer:
             if len(hits) > 1:
                 raise ToolError(f"'{ref}' matches several contacts: " + ", ".join(f"{c.label} ({c.id})" for c in hits)
                                 + ". Use the id.")
+        best = fuzzy_pick(ref, cs)
+        if best is not None:
+            return best
         raise ToolError(f"no contact '{ref}' (see list_contacts)")
 
     def _find_speaker(self, tok: McpToken, ref: str):
@@ -423,3 +428,31 @@ def _err(mid, code: int, message: str) -> dict:
 def _brief(args: dict) -> str:
     s = json.dumps(args, ensure_ascii=False)
     return s if len(s) < 200 else s[:200] + "..."
+
+
+_FILLER = {"the", "my", "a", "tmux", "t", "max", "session", "sessions", "terminal", "project", "contact", "please",
+           "to", "me", "connect", "call", "with"}
+
+
+def _squash(text: str) -> str:
+    words = re.findall(r"[a-z0-9]+", text.lower().replace("_", " "))
+    return "".join(w for w in words if w not in _FILLER)
+
+
+def fuzzy_pick(ref: str, contacts: list[Contact]) -> Contact | None:
+    """Speech recognition mangles names ("Tether Outer T-Max" for the telerouter tmux): the closest name
+    wins when it is clearly closer than the next one."""
+    target = _squash(ref)
+    if len(target) < 3:
+        return None
+    scored = []
+    for c in contacts:
+        best = max(difflib.SequenceMatcher(None, target, _squash(n)).ratio() for n in {c.label, c.name} if _squash(n))\
+            if _squash(c.label) or _squash(c.name) else 0.0
+        scored.append((best, c))
+    scored.sort(key=lambda x: -x[0])
+    if not scored or scored[0][0] < 0.72:
+        return None
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.08:
+        return None
+    return scored[0][1]

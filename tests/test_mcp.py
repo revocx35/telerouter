@@ -164,3 +164,17 @@ async def test_context_tools_only_for_agent_tokens(mcp):
     _, r = await call(mcp, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                             "params": {"name": "reset_context", "arguments": {"mode": "clear"}}}, token=agent_tok)
     assert r["result"]["isError"]                     # the fake engine runs no agent a1
+
+
+async def test_garbled_spoken_names_find_the_connection(mcp):
+    from telerouter.mcp import fuzzy_pick
+    cs = [Contact(id=f"t{i}", kind="tmux", name=n) for i, n in enumerate(
+        ["telerouter", "wa_logger", "pokerbalance", "truenas", "calls", "checker", "insta_logger"])]
+    for said, want in (("Tether Outer T-Max", "telerouter"), ("Teller Outer", "telerouter"), ("WA logger", "wa_logger"),
+                       ("poker balance session", "pokerbalance"), ("the true NAS tmux", "truenas")):
+        got = fuzzy_pick(said, cs)
+        assert got and got.name == want, (said, got and got.name)
+    assert fuzzy_pick("kitchen lights", cs) is None
+    mcp.engine.store.config.contacts = cs
+    tok = mcp.engine.store.config.mcp_tokens[0]
+    assert mcp._find_contact(tok, "Tether Outer T-Max").name == "telerouter"
