@@ -121,13 +121,36 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
-## Status (v0.1.0, 2026-10-17)
+- **Quiet hours** (`quiet.py`): checked in the agent call path, `on_incoming` (603) and the MCP `_quiet_gate`
+  (connect_call/phone_message/start_voice_call/announce/ask_speaker unless the user asked by voice). Blocked
+  results start with "quiet hours" - phone-alert relies on that prefix (exit 2, no baresip fallback). Desk
+  presence = any selected HA binary sensor `on` or changed within `desk_hold_minutes` (HA REST `/api/states`,
+  using the URL+token of an agent's HA extra MCP server unless `quiet.ha_url/token` are set; cached 20 s).
+- `phone_message` with `wait_for_reply`: message read once (repeat defaults to 1), then only the start blip,
+  then listen. Reading it twice before the beep confused the user.
+- A speaker connected to a tmux session stays connected across wake words: "Hey Jarvis" + a short exit phrase
+  (`machine.is_exit`: "back to Jarvis", "disconnect", "leave the session") ends it; also 15 idle min or a restart.
+  A phone call on a speaker ends with just the wake word.
+- **Deploying while a speaker turn is in flight cuts the spoken answer**: when the request came by voice,
+  schedule the deploy (`docker compose pull && up -d` in CT 118) in a background job that starts after replying.
+- Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
+  lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
+
+## Status (v0.5.0, 2026-10-17)
+
+Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
+`TELEROUTER_VERSION=0.5` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
+leak check (gitleaks + git grep over history) before every push.
 
 Verified: speaker turn end to end with real Whisper/Piper/openWakeWord (WAV-driven client); agent
 plumbing over SSH/tmux/hooks/reverse-tunnel MCP with the fake agent; outbound and inbound calls through
 Asterisk; wa2sip (simulated WhatsApp) both directions. In production (FreePBX 17, real Claude Code with
 Sonnet 5.5): "Hey Jarvis, call the echo test" -> connect_call -> *43 bridged to a speaker; an inbound call
-through the PBX talking to the agent; phone_message with a transcribed reply; wa2sip/cam2sip linked and
-synced (no real WhatsApp contact or camera was called during testing).
+through the PBX talking to the agent; phone_message with a transcribed two-way reply; voice connection to a
+foreign tmux Claude session; Home Assistant lights via Jarvis's HA MCP server; the Raqqa speaker LXC (ALSA
+backend) in daily use; wa2sip/cam2sip linked and synced (no real WhatsApp contact or camera was called).
 Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
-Hermes install; echo cancellation on real hardware.
+Hermes install; echo cancellation on real hardware; quiet hours with real desk sensors (off in prod until the
+user enables them under Voice & calls -> Quiet hours).
+Open idea (not confirmed by the user, don't build unasked): a distinct listening blip / announcement while a
+speaker is routed to a tmux session.
