@@ -22,7 +22,7 @@ from ..media import pcm as pcmmod
 from ..models import Contact
 from ..sip.message import SipUri
 from ..sip.ua import Account, AccountConfig, Call
-from ..voice.vad import EndpointConfig, Endpointer
+from ..voice.vad import MAX_CONTINUATIONS, EndpointConfig, Endpointer, continuation, looks_unfinished
 from .sipaudio import SipAudio
 
 if TYPE_CHECKING:
@@ -148,7 +148,7 @@ class CallManager:
     def _endpoint_cfg(self, start_timeout: float | None = None) -> EndpointConfig:
         v = self.engine.store.config.voice
         return EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
-                              end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
+                              end_silence_ms=v.phone_end_silence_ms, max_ms=int(v.max_utterance * 1000),
                               threshold=v.vad_threshold)
 
     async def _tts(self, text: str) -> bytes:
@@ -168,22 +168,41 @@ class CallManager:
         if cue:
             s.audio.play(pcmmod.cue("start", vol))
             await s.audio.drained()
-        s.ep_done.clear()
-        s.endpointer = Endpointer(self._endpoint_cfg(timeout))
-        done = asyncio.create_task(s.ep_done.wait())
-        gone = asyncio.create_task(s.call.ended.wait())
-        try:
-            await asyncio.wait({done, gone}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            done.cancel()
-            gone.cancel()
-        ep, s.endpointer = s.endpointer, None
-        if s.call.state != "active" or not ep or ep.result == "timeout" or not ep.started:
+        cfg = self._endpoint_cfg(timeout)
+
+        async def record(ep: Endpointer) -> Endpointer:
+            s.ep_done.clear()
+            s.endpointer = ep
+            done = asyncio.create_task(s.ep_done.wait())
+            gone = asyncio.create_task(s.call.ended.wait())
+            try:
+                await asyncio.wait({done, gone}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                done.cancel()
+                gone.cancel()
+            return ep
+
+        ep = await record(Endpointer(cfg))
+        if s.call.state != "active" or ep.result == "timeout" or not ep.started:
+            s.endpointer = None
             return ""
-        if cue:
+        audio = bytes(ep.audio)
+        lang, names = self.engine.store.config.voice.language, self.engine.contact_names()
+        for rounds in range(MAX_CONTINUATIONS + 1):
+            more = continuation(cfg)
+            waiter = asyncio.create_task(record(more))       # keep recording while Whisper works
+            text = await self.engine.speech.transcribe(audio, lang, names)
+            if rounds == MAX_CONTINUATIONS or not (looks_unfinished(text) or more.started) or s.call.state != "active":
+                waiter.cancel()
+                break
+            await waiter
+            if not more.started:
+                break
+            log.info("[call %s] the sentence went on after a pause", s.id)
+            audio += bytes(more.audio)
+        s.endpointer = None
+        if cue and s.call.state == "active":
             s.audio.play(pcmmod.cue("end", vol))
-        text = await self.engine.speech.transcribe(bytes(ep.audio), self.engine.store.config.voice.language,
-                                                   self.engine.contact_names())
         if text:
             s.transcript.append({"who": s.label, "text": text})
         log.info("[call %s] heard from %s: %s", s.id, s.label, text or "(nothing)")

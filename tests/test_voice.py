@@ -71,3 +71,12 @@ def test_g711_roundtrip_and_resampling():
     out = b"".join(rs(down[i:i + 320]) for i in range(0, len(down), 320))
     assert len(out) > len(down)
     assert pcm.gain(tone, 50) != tone and pcm.gain(tone, 100) == tone
+
+
+def test_unfinished_transcripts_are_recognised():
+    from telerouter.voice.vad import looks_unfinished
+    for t in ("Since it takes so long, I usually close my...", "Call my", "Turn on the lights and",
+              "Can you also add a rule to your", "I want to", "Connect me to the,"):
+        assert looks_unfinished(t), t
+    for t in ("Turn off all of the lights.", "What time is it?", "Call my dad.", "Goodbye!", ""):
+        assert not looks_unfinished(t), t

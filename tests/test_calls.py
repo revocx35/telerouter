@@ -185,3 +185,29 @@ async def test_pbx_numbers_are_dialed_as_entered(settings, tmp_path):
         assert got and got[0].startswith("sip:*43@")
     finally:
         await rig.stop()
+
+
+async def test_a_pause_mid_sentence_does_not_cut_it_off(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        call = await rig.phone().dial(f"{rig.store.config.pbx.contact_user}@127.0.0.1:{settings.sip_port}")
+        await asyncio.wait_for(call.answered.wait(), 5)
+        audio = SipAudio(call, on_audio=lambda b: None)
+        audio.start()
+        await asyncio.sleep(2.0)                             # greeting + start blip
+        speech = speech_16k()
+        part = speech[: len(speech) // 2]
+        for chunk in (part, bytes(64000), speech):          # speech, a 2 s pause, more speech
+            for i in range(0, len(chunk), 640):
+                audio.send(chunk[i:i + 640])
+                await asyncio.sleep(0.02)
+        for _ in range(200):
+            if rig.agent.asked:
+                break
+            await asyncio.sleep(0.05)
+        assert len(rig.agent.asked) == 1                     # one request, not two halves
+        heard = rig.engine.speech.heard
+        assert len(heard) >= 2 and heard[-1] > heard[0]      # re-transcribed with the continuation
+        await call.hangup()
+    finally:
+        await rig.stop()

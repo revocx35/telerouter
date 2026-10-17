@@ -105,6 +105,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Agents had Claude Code's own peer-session tools (ListAgents/SendMessage) and used them for "connect me to the
   X session"; the instructions now say voice goes through telerouter's connect_call. `mcp.fuzzy_pick` matches
   garbled spoken names ("Tether Outer T-Max" -> telerouter).
+- **0.9 s of silence cut people off mid-sentence** ("…I usually close my…"). Endpointing now keeps a second
+  listener running while Whisper transcribes; if the text looks unfinished (`vad.looks_unfinished`) or more
+  speech arrived within 3 s, the parts are joined and re-transcribed (max 2 times). Defaults: 1.2 s on
+  speakers, 1.5 s on phone calls, 45 s per request; old stored defaults are bumped by `store.migrate`.
 - Foreign tmux sessions (not started by telerouter) have no hooks: `~/.claude/sessions/<pid>.json` (pid of
   the pane's claude, or a child of the pane's shell) gives the session id -> transcript. Read it from the
   line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.

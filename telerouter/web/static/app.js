@@ -647,7 +647,8 @@ async function voice(main) {
       field("Voice", voices),
       field("Blip volume %", num("beep_volume", v.beep_volume, { min: 0, max: 100 })),
       field("Wait for speech after the blip (s)", num("listen_timeout", v.listen_timeout, { step: 0.5 })),
-      field("Pause that ends a request (ms)", num("end_silence_ms", v.end_silence_ms, { step: 100 })),
+      field("Pause that ends a request (ms)", num("end_silence_ms", v.end_silence_ms, { step: 100 }), "Speakers. If more speech follows within 3 s, or the sentence sounds unfinished, it is joined."),
+      field("…on phone calls (ms)", num("phone_end_silence_ms", v.phone_end_silence_ms, { step: 100 })),
       field("Longest request (s)", num("max_utterance", v.max_utterance)),
       field("Speech detection threshold", num("vad_threshold", v.vad_threshold, { step: 0.05, min: 0.1, max: 0.95 }))),
     el("p", { class: "hint" }, "Names Whisper often mishears can be listed in WHISPER_PROMPT in the server's .env (restart the whisper container)."),
@@ -655,7 +656,7 @@ async function voice(main) {
     el("div", { class: "row" }, el("button", { class: "primary", onclick: async () => {
       const d = formData(vf);
       const ww = Object.keys(d).filter(k => k.startsWith("ww_") && d[k]).map(k => k.slice(3));
-      const body = { wake_words: ww }; for (const k of ["language", "tts_voice", "beep_volume", "listen_timeout", "end_silence_ms", "max_utterance", "vad_threshold", "follow_up", "thinking_cue"]) body[k] = d[k];
+      const body = { wake_words: ww }; for (const k of ["language", "tts_voice", "beep_volume", "listen_timeout", "end_silence_ms", "phone_end_silence_ms", "max_utterance", "vad_threshold", "follow_up", "thinking_cue"]) body[k] = d[k];
       await act(() => api("PUT", "/api/settings", { voice: body }), "Saved");
     } }, "Save"), el("button", { onclick: async () => {
       const blob = await act(() => api("POST", "/api/speech/preview", { text: "Hello! This is how I sound." }));

@@ -20,7 +20,7 @@ from ..agents.runtime import AgentError, Source
 from ..media import pcm as pcmmod
 from .client_conn import ClientConn
 from .speech import SpeechError, WakeStream
-from .vad import EndpointConfig, Endpointer
+from .vad import MAX_CONTINUATIONS, EndpointConfig, Endpointer, continuation, looks_unfinished
 
 if TYPE_CHECKING:
     from ..engine import Engine
@@ -184,32 +184,50 @@ class VoiceAssistant:
         conn.set_state("listening")
         conn.play(pcmmod.cue("start", v.beep_volume))
         await conn.drained(0.05)
-        ev = asyncio.Event()
-        ep = Endpointer(EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
-                                       end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
-                                       threshold=v.vad_threshold))
-        self._listen_done[conn.id] = ev
-        self._listeners[conn.id] = ep
+        cfg = EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
+                             end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
+                             threshold=v.vad_threshold)
+
+        async def record(ep: Endpointer, wait: float) -> Endpointer:
+            ev = asyncio.Event()
+            self._listen_done[conn.id] = ev
+            self._listeners[conn.id] = ep
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ev.wait(), wait)
+            return ep
+
         try:
-            await asyncio.wait_for(ev.wait(), v.max_utterance + v.listen_timeout + 5)
-        except TimeoutError:
-            pass
+            ep = await record(Endpointer(cfg), v.max_utterance + v.listen_timeout + 5)
+            if ep.result == "timeout" or not ep.started:
+                conn.set_state("idle")
+                return None
+            audio = bytes(ep.audio)
+            t0 = time.monotonic()
+            for rounds in range(MAX_CONTINUATIONS + 1):
+                # keep recording while Whisper works: a pause is not always the end of the sentence
+                more = continuation(cfg)
+                waiter = asyncio.create_task(record(more, v.max_utterance + 5))
+                try:
+                    text = await e.speech.transcribe(audio, v.language, e.contact_names())
+                except SpeechError as ex:
+                    waiter.cancel()
+                    log.warning("speech-to-text failed: %s", ex)
+                    await self.say_error(conn, "Speech recognition is not available.")
+                    return ""
+                if rounds == MAX_CONTINUATIONS or not (looks_unfinished(text) or more.started):
+                    waiter.cancel()
+                    break
+                more = await waiter
+                if not more.started:
+                    break
+                log.info("[%s] the sentence went on after a pause (%s)", conn.name, text[-40:])
+                audio += bytes(more.audio)
         finally:
             self._listeners.pop(conn.id, None)
             self._listen_done.pop(conn.id, None)
-        if ep.result == "timeout" or not ep.started:
-            conn.set_state("idle")
-            return None
         conn.set_state("thinking")
         conn.play(pcmmod.cue("end", v.beep_volume))
-        t0 = time.monotonic()
-        try:
-            text = await e.speech.transcribe(bytes(ep.audio), v.language, e.contact_names())
-        except SpeechError as ex:
-            log.warning("speech-to-text failed: %s", ex)
-            await self.say_error(conn, "Speech recognition is not available.")
-            return ""
-        log.info("[%s] heard (%.1f s audio, %.2f s stt): %s", conn.name, len(ep.audio) / 32000,
+        log.info("[%s] heard (%.1f s audio, %.2f s stt): %s", conn.name, len(audio) / 32000,
                  time.monotonic() - t0, text)
         conn.last_text = text
         return text

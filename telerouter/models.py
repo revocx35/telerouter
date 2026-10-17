@@ -355,8 +355,9 @@ class VoiceSettings(BaseModel):
     tts_voice: str = "en_US-lessac-medium"
     beep_volume: int = Field(default=40, ge=0, le=100)
     listen_timeout: float = Field(default=6.0, ge=2, le=30)     # wait for speech after the start beep
-    max_utterance: float = Field(default=20.0, ge=3, le=120)
-    end_silence_ms: int = Field(default=900, ge=300, le=4000)
+    max_utterance: float = Field(default=45.0, ge=3, le=120)
+    end_silence_ms: int = Field(default=1200, ge=300, le=4000)        # speakers
+    phone_end_silence_ms: int = Field(default=1500, ge=300, le=4000)  # phone calls (narrowband, people pause more)
     vad_threshold: float = Field(default=0.5, ge=0.1, le=0.95)
     follow_up: bool = False           # listen again (no wake word) right after a reply
     thinking_cue: bool = True         # soft tick while the agent works (every few seconds)

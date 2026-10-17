@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from pysilero_vad import SileroVoiceActivityDetector
@@ -70,3 +71,28 @@ class Endpointer:
             self.result = "speech"
         elif self.elapsed_ms >= c.max_ms:
             self.result = "max"
+
+
+CONTINUE_WAIT_MS = 3000      # after an end-of-speech, how long more speech may still join the utterance
+MAX_CONTINUATIONS = 2
+_DANGLING = {"and", "or", "but", "so", "because", "my", "the", "a", "an", "to", "of", "for", "with", "that",
+             "if", "i", "in", "on", "at", "your", "his", "her", "our", "their", "is", "are", "was", "when", "then",
+             "can", "could", "would", "should", "will", "also", "um", "uh", "like"}
+
+
+def looks_unfinished(text: str) -> bool:
+    """A transcript that probably stops mid-sentence (the speaker only paused)."""
+    t = text.strip()
+    if not t:
+        return False
+    if t.endswith(("...", "\u2026", ",", "-", ":")):
+        return True
+    words = re.findall(r"[a-z']+", t.lower())
+    if words and words[-1] in _DANGLING:
+        return True
+    return t[-1] not in ".?!"
+
+
+def continuation(cfg: EndpointConfig) -> "Endpointer":
+    return Endpointer(EndpointConfig(start_timeout_ms=CONTINUE_WAIT_MS, end_silence_ms=cfg.end_silence_ms,
+                                     max_ms=cfg.max_ms, threshold=cfg.threshold, pre_roll_ms=200))
