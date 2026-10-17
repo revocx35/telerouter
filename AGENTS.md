@@ -101,6 +101,8 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Foreign tmux sessions (not started by telerouter) have no hooks: `~/.claude/sessions/<pid>.json` (pid of
   the pane's claude, or a child of the pane's shell) gives the session id -> transcript. Read it from the
   line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.
+- Over SSH (no terminal) tmux prints control characters in `-F` formats as `_`: tab-separated
+  `list-sessions` output arrives as `calls_claude_/root`. Use a printable separator (`|~|`).
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 

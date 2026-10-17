@@ -46,8 +46,9 @@ async def test_tmux_listing_skips_telerouter_sessions():
     rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u"))
 
     async def fake_sh(cmd, input=None, timeout=30):
-        return ("wa_logger\tclaude\t/root\ntelerouter-0a82\tsh\t/root/jarvis\nbad name!\tx\ty\n"
-                "pokerbalance\tclaude\t/root/pokerbalance\n")
+        assert "|~|" in cmd
+        return ("wa_logger|~|claude|~|/root\ntelerouter-0a82|~|sh|~|/root/jarvis\nbad name!|~|x|~|y\n"
+                "pokerbalance|~|claude|~|/root/pokerbalance\ncalls_claude_/root/wa_logger\n")
     rt._sh = fake_sh
     found = await rt.list_sessions()
     assert [s["name"] for s in found] == ["wa_logger", "pokerbalance"]

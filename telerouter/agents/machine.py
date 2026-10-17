@@ -108,12 +108,13 @@ class MachineRuntime:
         return f"{_paths()}; tmux " + " ".join(ssh.q(x) for x in args)
 
     async def list_sessions(self) -> list[dict]:
+        # printable separator: without a terminal tmux turns control characters (tabs) into "_"
         out = await self._sh(self._tmux("list-sessions", "-F",
-                                        "#{session_name}\t#{pane_current_command}\t#{pane_current_path}")
+                                        "#{session_name}|~|#{pane_current_command}|~|#{pane_current_path}")
                              + " 2>/dev/null")
         found = []
         for line in out.splitlines():
-            parts = line.split("\t")
+            parts = line.split("|~|")
             if len(parts) != 3 or not SESSION_RE.match(parts[0]) or parts[0].startswith(INTERNAL_PREFIX):
                 continue
             found.append({"name": parts[0], "command": parts[1], "path": parts[2]})
