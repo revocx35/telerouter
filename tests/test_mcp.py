@@ -37,6 +37,11 @@ class FakeEngine:
     def same_origin(self, origin, request):
         return origin == "https://telerouter.lan"
 
+    class quiet:                       # quiet hours off
+        @staticmethod
+        async def calls_allowed():
+            return True, ""
+
 
 def req(body, token="", origin=None):
     headers = [(b"content-type", b"application/json")]

@@ -69,6 +69,15 @@ services listen on `127.0.0.1` only.
 
 Then say *"Hey Jarvis"*: a blip means it listens, a second blip means it got you.
 
+## Quiet hours (do not disturb)
+
+*Voice & calls → Quiet hours*: pick a time range. Speakers still answer quick requests (lights, mail,
+questions), but an answer that takes longer than 5 minutes (adjustable) is not spoken: the agent keeps
+working silently, so asking it to build an app before going to sleep won't wake you. Calls are blocked:
+incoming calls are rejected and agents can't call you or talk through a speaker on their own, unless one of
+your Home Assistant desk sensors (motion/occupancy) says you're at your desk. Calls you ask for yourself still
+work. Each speaker can also turn the thinking beeps off (*Speakers → Beeps while the agent works*).
+
 ## Home Assistant (lights, switches, …)
 
 Give your agent Home Assistant's own tools:

@@ -50,6 +50,8 @@ class Engine:
         self.ssh_keys = SshKeys(settings.data_dir)
         self.clients: dict[str, ClientConn] = {}
         self.voice = VoiceAssistant(self)
+        from .quiet import Quiet
+        self.quiet = Quiet(self)
         self.calls = CallManager(self)
         self.ua.on_incoming = self.calls.on_incoming
         self.agent_rts: dict[str, AgentRuntime] = {}

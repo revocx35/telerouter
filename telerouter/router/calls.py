@@ -375,6 +375,11 @@ class CallManager:
         else:
             policy = cfg.unknown_callers
         log.info("incoming call from %s (%s) -> %s", label, call.remote_user, policy)
+        if policy != "reject":
+            allowed, why = await e.quiet.calls_allowed()
+            if not allowed:
+                log.info("incoming call from %s rejected: %s", label, why)
+                policy = "reject"
         if policy == "reject":
             call.reject(603, "Decline")
             e.store.add_history({"type": "call", "direction": "in", "label": label, "result": "rejected",

@@ -28,7 +28,7 @@ from ..agents import ssh as sshmod
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, Client, Contact, Enrollment, Integration, Machine,
-                      McpToken, Pbx, SecuritySettings, VoiceSettings)
+                      McpToken, Pbx, QuietHours, SecuritySettings, VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_certificate
 from ..settings import Settings
@@ -445,6 +445,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     async def get_settings():
         return {"voice": cfg.voice.model_dump(), "calls": cfg.calls.model_dump(),
                 "security": cfg.security.model_dump(), "default_agent_id": cfg.default_agent_id,
+                "quiet": redact(cfg.quiet),
                 "sip_port": settings.sip_port}
 
     @app.put("/api/settings")
@@ -453,6 +454,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             cfg.voice = merge(VoiceSettings, cfg.voice, payload["voice"])
         if "calls" in payload:
             cfg.calls = merge(CallSettings, cfg.calls, payload["calls"])
+        if "quiet" in payload:
+            cfg.quiet = merge(QuietHours, cfg.quiet, payload["quiet"])
         if "security" in payload:
             cfg.security = merge(SecuritySettings, cfg.security, payload["security"])
             sessions.idle_s = cfg.security.session_idle_minutes * 60
@@ -465,6 +468,17 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         store.save()
         await engine.apply_config()
         return await get_settings()
+
+    @app.get("/api/quiet/status")
+    async def quiet_status():
+        return await engine.quiet.status()
+
+    @app.get("/api/quiet/sensors")
+    async def quiet_sensors():
+        try:
+            return {"sensors": await engine.quiet.sensors()}
+        except Exception as e:
+            raise HTTPException(502, f"Home Assistant: {e}") from e
 
     @app.get("/api/speech")
     async def speech_info():

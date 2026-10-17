@@ -254,10 +254,11 @@ async function speakers(main) {
         field("Name (what agents see)", inp("name", c.name)), field("Room", inp("room", c.room)),
         field("Agent", sel("agent_id", c.agent_id, [["", "default agent"], ...agentsCfg.agents.map(a => [a.id, a.name])])),
         field("Wake word", sel("wake_word", (c.wake_words || [])[0] || "", [["", `default (${settings.voice.wake_words.join(", ")})`], ...wakeModels.map(m => [m.name, m.phrase])])),
-        field("Volume %", num("volume", c.volume, { min: 0, max: 200 })));
+        field("Volume %", num("volume", c.volume, { min: 0, max: 200 })),
+        field("Beeps while the agent works", sel("thinking_cue", c.thinking_cue || "default", [["default", `default (${settings.voice.thinking_cue ? "on" : "off"})`], ["on", "on"], ["off", "off"]])));
       const save = async () => {
         const d = formData(f);
-        const body = { name: d.name, room: d.room, agent_id: d.agent_id, volume: d.volume,
+        const body = { name: d.name, room: d.room, agent_id: d.agent_id, volume: d.volume, thinking_cue: d.thinking_cue,
           wake_words: d.wake_word ? [d.wake_word] : [], enabled: $("input[name=enabled]", card).checked,
           visible_to_agents: $("input[name=visible_to_agents]", card).checked };
         await act(() => api("PUT", `/api/clients/${c.id}`, body), "Saved");
@@ -673,8 +674,46 @@ async function voice(main) {
       field("Longest call (min)", num("max_call_minutes", c.max_call_minutes))),
     chk("announce_calls", c.announce_calls, "Say \"Calling …\" on the speaker before ringing"),
     el("div", {}, el("button", { class: "primary", onclick: async () => { await act(() => api("PUT", "/api/settings", { calls: formData(cf) }), "Saved"); } }, "Save")));
+  const q = settings.quiet;
+  const qStatus = el("div", { class: "hint" }, "…");
+  const sensorBox = el("div", {}, (q.desk_sensors || []).map(id => chk("ds_" + id, true, id)));
+  const qf = el("div", {},
+    el("div", { class: "row" }, chk("enabled", q.enabled, "Quiet hours on"), chk("block_calls", q.block_calls, "Block calls (unless I'm at my desk)")),
+    el("div", { class: "form2" },
+      field("From", el("input", { type: "time", name: "start", value: q.start })),
+      field("To", el("input", { type: "time", name: "end", value: q.end })),
+      field("Time zone", inp("timezone", q.timezone), "e.g. Europe/Istanbul"),
+      field("Don't speak answers that take longer than (min)", num("long_task_minutes", q.long_task_minutes, { min: 1 })),
+      field("At the desk = motion within (min)", num("desk_hold_minutes", q.desk_hold_minutes, { min: 0 }))),
+    el("h3", {}, "Desk sensors (Home Assistant)"),
+    el("p", { class: "hint" }, "Motion/occupancy sensors that mean you're at your desk. telerouter uses the Home Assistant connection of your agent (Agents → Edit → Extra MCP servers)."),
+    sensorBox,
+    el("button", { class: "small", onclick: async () => {
+      const r = await act(() => api("GET", "/api/quiet/sensors"));
+      const chosen = new Set([...sensorBox.querySelectorAll("input:checked")].map(i => i.name.slice(3)));
+      sensorBox.replaceChildren(...r.sensors.map(s => chk("ds_" + s.entity_id, chosen.has(s.entity_id), `${s.name} (${s.entity_id}, ${s.state})`)));
+    } }, "Load sensors from Home Assistant"),
+    el("div", { class: "row" }, el("button", { class: "primary", onclick: async () => {
+      const d = formData(qf);
+      const body = { enabled: d.enabled, block_calls: d.block_calls, start: d.start, end: d.end, timezone: d.timezone,
+        long_task_minutes: d.long_task_minutes, desk_hold_minutes: d.desk_hold_minutes,
+        desk_sensors: Object.keys(d).filter(k => k.startsWith("ds_") && d[k]).map(k => k.slice(3)) };
+      await act(() => api("PUT", "/api/settings", { quiet: body }), "Saved"); refreshQ();
+    } }, "Save"), qStatus));
+  async function refreshQ() {
+    try {
+      const s = await api("GET", "/api/quiet/status");
+      qStatus.textContent = (s.active ? "Quiet hours now. " : "Not quiet hours now. ") +
+        (s.at_desk ? `At the desk (${s.desk_reason}). ` : s.desk_reason ? `Not at the desk (${s.desk_reason}). ` : "") +
+        (s.calls_allowed ? "Calls ring." : "Calls are blocked.");
+    } catch (x) { qStatus.textContent = x.message; }
+  }
+  refreshQ();
   main.replaceChildren(el("h1", {}, "Voice & calls"),
     el("div", { class: "card" }, el("h2", {}, "Voice"), el("div", { class: "row" }, ["stt", "tts", "wake"].map(k => el("span", {}, stateDot(sp.health[k] ? "ready" : "down"), { stt: "Whisper", tts: "Piper", wake: "openWakeWord" }[k]))), vf),
+    el("div", { class: "card" }, el("h2", {}, "Quiet hours"),
+      el("p", { class: "hint" }, "During quiet hours speakers still answer quick requests (lights, mail, questions), but an answer that takes longer is not spoken: the agent keeps working silently. Calls are blocked: incoming calls are rejected and agents can't call you or talk through a speaker on their own, unless a desk sensor says you're at your desk. Calls you ask for yourself still work."),
+      qf),
     el("div", { class: "card" }, el("h2", {}, "Calls"), el("p", { class: "hint" }, "Who may reach your agent by phone: set it per contact on the Contacts page. Caller IDs can be spoofed on some networks, so use a PIN if the PBX is reachable from outside."), cf));
 }
 

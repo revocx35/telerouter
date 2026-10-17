@@ -377,6 +377,7 @@ class AgentRuntime:
                 raise AgentError(f"{a.name} did not answer within {a.reply_timeout} s") from e
             finally:
                 self.pending = None
+                self.current_source = None      # later tool calls of this turn are no longer "asked by voice"
 
     async def _type(self, text: str) -> None:
         s = self._pane

@@ -246,10 +246,11 @@ class VoiceAssistant:
             conn.set_state("thinking")
             ticker = asyncio.create_task(self._think_ticks(conn))
             try:
-                reply = await e.ask_route(route, text, f"{conn.name} speaker")
+                reply = await self._quiet_wait(conn, e.ask_route(route, text, f"{conn.name} speaker"))
             finally:
                 ticker.cancel()
-            conn.last_reply = reply
+            if reply is not None:
+                conn.last_reply = reply
             return reply
         rt = e.agents.get(agent.id) if agent else None
         if not agent or not rt:
@@ -264,18 +265,36 @@ class VoiceAssistant:
         try:
             src = Source("speaker", f"{conn.name} speaker" + (f" in {conn.client.room}" if conn.client.room else ""),
                          client_id=conn.id)
-            reply = await rt.ask(text, src, on_note=note)
+            reply = await self._quiet_wait(conn, rt.ask(text, src, on_note=note))
         except AgentError as ex:
             log.warning("[%s] agent: %s", conn.name, ex)
             reply = f"Sorry, {ex}."
         finally:
             ticker.cancel()
-        conn.last_reply = reply
+        if reply is not None:
+            conn.last_reply = reply
         return reply
+
+    async def _quiet_wait(self, conn: ClientConn, coro) -> str | None:
+        """During quiet hours a long task is not answered on the speaker: stop waiting (and ticking) after
+        long_task_minutes and stay silent; the agent keeps working. None = say nothing."""
+        q = self.engine.quiet
+        if not q.active():
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, q.cfg.long_task_minutes * 60)
+        except TimeoutError:
+            log.info("[%s] quiet hours: the answer takes longer than %d min - it won't be spoken",
+                     conn.name, q.cfg.long_task_minutes)
+            return None
+
+    def ticks_on(self, conn: ClientConn) -> bool:
+        pref = conn.client.thinking_cue
+        return self.engine.store.config.voice.thinking_cue if pref == "default" else pref == "on"
 
     async def _think_ticks(self, conn: ClientConn) -> None:
         v = self.engine.store.config.voice
-        if not v.thinking_cue:
+        if not self.ticks_on(conn):
             return
         tick = pcmmod.cue("think", v.beep_volume)
         while True:

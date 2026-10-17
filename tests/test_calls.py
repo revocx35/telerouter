@@ -211,3 +211,26 @@ async def test_a_pause_mid_sentence_does_not_cut_it_off(settings, tmp_path):
         await call.hangup()
     finally:
         await rig.stop()
+
+
+async def test_incoming_calls_rejected_in_quiet_hours(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        q = rig.store.config.quiet
+        q.enabled, q.start, q.end, q.timezone = True, "00:00", "23:59", "UTC"
+
+        async def away():
+            return False, "no motion at the desk"
+        rig.engine.quiet.at_desk = away
+        call = await rig.phone().dial(f"{rig.store.config.pbx.contact_user}@127.0.0.1:{settings.sip_port}")
+        await asyncio.wait_for(call.ended.wait(), 5)
+        assert "603" in call.end_reason and not rig.agent.asked
+
+        async def here():
+            return True, "binary_sensor.desk is on"
+        rig.engine.quiet.at_desk = here
+        call = await rig.phone().dial(f"{rig.store.config.pbx.contact_user}@127.0.0.1:{settings.sip_port}")
+        await asyncio.wait_for(call.answered.wait(), 5)       # at the desk: the call goes through
+        await call.hangup()
+    finally:
+        await rig.stop()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import time
@@ -144,6 +145,7 @@ class Client(BaseModel):
     wake_words: list[str] = Field(default_factory=list)   # [] = global setting
     volume: int = Field(default=100, ge=0, le=200)
     visible_to_agents: bool = True
+    thinking_cue: Literal["default", "on", "off"] = "default"   # ticks while the agent works ("default" = Voice setting)
 
     @field_validator("name")
     @classmethod
@@ -405,6 +407,58 @@ class CallSettings(BaseModel):
         return v
 
 
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+ENTITY_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
+
+
+class QuietHours(BaseModel):
+    """Do-not-disturb: quiet speakers for long tasks and no calls, unless you're at your desk."""
+    enabled: bool = False
+    start: str = "23:00"
+    end: str = "08:00"
+    timezone: str = Field(default_factory=lambda: os.environ.get("TZ") or "UTC")
+    long_task_minutes: int = Field(default=5, ge=1, le=240)   # longer answers are not spoken on speakers
+    block_calls: bool = True
+    desk_sensors: list[str] = Field(default_factory=list)     # Home Assistant entity ids ("binary_sensor.desk_motion")
+    desk_hold_minutes: int = Field(default=10, ge=0, le=240)  # motion seen this recently = still at the desk
+    ha_url: str = ""          # Home Assistant base URL; "" = taken from an agent's Home Assistant MCP server
+    token: str = ""           # its long-lived token (write-only); "" = from that MCP server
+
+    @field_validator("start", "end")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        if not HHMM_RE.match(v.strip()):
+            raise ValueError("HH:MM (24 h)")
+        return v.strip()
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        from zoneinfo import ZoneInfo
+        try:
+            ZoneInfo(v)
+        except Exception as e:
+            raise ValueError("unknown time zone (e.g. Europe/Istanbul)") from e
+        return v
+
+    @field_validator("desk_sensors")
+    @classmethod
+    def _sensors(cls, v: list[str]) -> list[str]:
+        v = [x.strip() for x in v if x.strip()]
+        for x in v:
+            if not ENTITY_RE.match(x):
+                raise ValueError(f"invalid entity id: {x}")
+        return v[:20]
+
+    @field_validator("ha_url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not re.match(r"^https://[A-Za-z0-9.\-\[\]:]+(:\d+)?$", v):
+            raise ValueError("https://host[:port] (no path)")
+        return v
+
+
 class SecuritySettings(BaseModel):
     session_idle_minutes: int = Field(default=30, ge=5, le=24 * 60)
     session_absolute_hours: int = Field(default=12, ge=1, le=24 * 30)
@@ -425,5 +479,6 @@ class Config(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     calls: CallSettings = Field(default_factory=CallSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    quiet: QuietHours = Field(default_factory=QuietHours)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

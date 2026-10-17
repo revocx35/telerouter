@@ -174,6 +174,8 @@ class McpServer:
             src = self._source(tok)
             if c.kind == "tmux":
                 return self._connect_tmux(tok, c, src, speaker)
+            if not src:                                   # placed by an agent on its own, not asked by voice now
+                await self._quiet_gate("calls")
             if speaker:
                 conn = self._find_speaker(tok, speaker)
             elif src and src.kind == "speaker" and src.client_id:
@@ -202,6 +204,7 @@ class McpServer:
                                "description": "how often to read it; default 1 when waiting for a reply, else 2"}},
                    ["contact", "message"]))
         async def phone_message(tok, contact: str, message: str, wait_for_reply: bool = False, repeat: int = 0):
+            await self._quiet_gate("calls")
             repeat = repeat or (1 if wait_for_reply else 2)
             e = self.engine
             c = self._find_contact(tok, contact)
@@ -216,6 +219,7 @@ class McpServer:
               "Call a contact and keep the line open for you to talk: then use say / listen / hang_up. "
               "Returns once answered.", _obj({"contact": S}, ["contact"]))
         async def start_voice_call(tok, contact: str):
+            await self._quiet_gate("calls")
             c = self._find_contact(tok, contact)
             s = await self.engine.calls.start_voice_call(c, tok.id, tok.agent_id)
             return {"call_id": s.id, "status": "answered", "to": c.label}
@@ -282,6 +286,7 @@ class McpServer:
         @tool("announce", "speak", "Say something out loud on a speaker (e.g. a reminder or a notification).",
               _obj({"speaker": S, "text": S}, ["speaker", "text"]))
         async def announce(tok, speaker: str, text: str):
+            await self._quiet_gate("speaker announcements")
             conn = self._find_speaker(tok, speaker)
             try:
                 await self.engine.voice.announce(conn, text[:2000])
@@ -295,6 +300,7 @@ class McpServer:
                     "timeout": {"type": "number", "minimum": 3, "maximum": 30, "default": 8}},
                    ["speaker", "question"]))
         async def ask_speaker(tok, speaker: str, question: str, timeout: float = 8):
+            await self._quiet_gate("speaker questions")
             conn = self._find_speaker(tok, speaker)
             try:
                 heard = await self.engine.voice.ask_speaker(conn, question[:1000], timeout)
@@ -324,6 +330,12 @@ class McpServer:
         return {"connected": c.label, "where": where,
                 "note": f"From the next sentence on, the person talks to the {c.label} session directly. Tell them "
                         f"in a few words, and that saying '{back}' returns to you."}
+
+    async def _quiet_gate(self, what: str) -> None:
+        allowed, why = await self.engine.quiet.calls_allowed()
+        if not allowed:
+            raise ToolError(f"quiet hours: no {what} now ({why}). Don't retry until the quiet hours end; "
+                            "tell the person later instead.")
 
     def _own_agent(self, tok: McpToken):
         rt = self.engine.agents.get(tok.agent_id) if tok.agent_id else None

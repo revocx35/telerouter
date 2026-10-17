@@ -177,6 +177,16 @@ Start-up dialogs (workspace trust, permission-mode confirmations) are recognised
 answered. Changing model/effort/permissions/instructions restarts the session (Claude resumes the same
 conversation by its session id; "New conversation" starts a fresh one).
 
+### 4.0 Quiet hours (`quiet.py`)
+
+`Quiet.active()` checks the local time window (crossing midnight). During it, `VoiceAssistant._quiet_wait`
+stops waiting for an agent answer after `long_task_minutes` and says nothing (ticks stop too; the agent keeps
+working). `Quiet.calls_allowed()` blocks incoming calls (`CallManager.on_incoming` rejects them) and the MCP
+tools that would ring or talk on their own (`phone_message`, `start_voice_call`, `announce`, `ask_speaker`,
+`connect_call` without a live voice request), unless Home Assistant says the owner is at the desk: a chosen
+motion/occupancy sensor is on, or was on within `desk_hold_minutes` (`/api/states`, cached 20 s, using an
+agent's Home Assistant MCP server URL + token unless set explicitly).
+
 ### 4.1 Machines and tmux sessions
 
 A **Machine** (`models.Machine`) is an SSH target with a pinned host key and the agent type its tmux
