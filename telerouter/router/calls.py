@@ -622,8 +622,7 @@ class CallManager:
                     break
                 await asyncio.sleep(0.6)
             if wait_reply and s.call and s.call.state == "active":
-                await self._say(s, "Please answer after the beep.")
-                reply = await self._listen(s, 12.0)
+                reply = await self._listen(s, 12.0)          # the start blip is the cue, like in a conversation
                 await self._say(s, "Thank you. Goodbye." if reply else "Goodbye.")
         finally:
             await self.hangup(s, "message delivered")

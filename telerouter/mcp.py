@@ -198,9 +198,11 @@ class McpServer:
               "then hang up. Blocks until done (up to ~2 minutes). Use for notifications and quick questions.",
               _obj({"contact": S, "message": S,
                     "wait_for_reply": {"type": "boolean", "default": False},
-                    "repeat": {"type": "integer", "minimum": 1, "maximum": 3, "default": 2}},
+                    "repeat": {"type": "integer", "minimum": 1, "maximum": 3,
+                               "description": "how often to read it; default 1 when waiting for a reply, else 2"}},
                    ["contact", "message"]))
-        async def phone_message(tok, contact: str, message: str, wait_for_reply: bool = False, repeat: int = 2):
+        async def phone_message(tok, contact: str, message: str, wait_for_reply: bool = False, repeat: int = 0):
+            repeat = repeat or (1 if wait_for_reply else 2)
             e = self.engine
             c = self._find_contact(tok, contact)
             if c.kind == "camera":
