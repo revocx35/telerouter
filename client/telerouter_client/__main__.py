@@ -64,7 +64,7 @@ def _device(v):
 
 
 def cmd_run(a) -> None:
-    from .audio import FileIO, Player, SoundDeviceIO, make_echo
+    from .audio import AlsaIO, FileIO, Player, SoundDeviceIO, make_echo
     from .net import Session
     cfg = load_config()
     player = Player()
@@ -72,11 +72,20 @@ def cmd_run(a) -> None:
     aec_wanted = cfg.get("aec", True) and not a.no_aec and not use_files
     echo = make_echo(aec_wanted, 60)
     sess = Session(cfg, player, aec=echo is not None)
+    backend = a.backend or cfg.get("backend") or "auto"
+    ind, outd = _device(a.input_device or cfg.get("input_device")), _device(a.output_device or cfg.get("output_device"))
     if use_files:
         io = FileIO(sess.mic, player, a.input_wav, a.output_wav, a.start_delay)
+    elif backend == "alsa":
+        io = AlsaIO(sess.mic, player, ind, outd, echo)
     else:
-        io = SoundDeviceIO(sess.mic, player, _device(a.input_device or cfg.get("input_device")),
-                           _device(a.output_device or cfg.get("output_device")), echo)
+        try:
+            io = SoundDeviceIO(sess.mic, player, ind, outd, echo)
+        except Exception as e:                   # e.g. PortAudio built with PulseAudio but no sound server
+            if backend == "portaudio" or not AlsaIO.available():
+                raise
+            log.warning("PortAudio is not usable (%s); using ALSA directly", str(e).splitlines()[0][:120])
+            io = AlsaIO(sess.mic, player, ind, outd, echo)
 
     async def main():
         loop = asyncio.get_running_loop()
@@ -114,6 +123,8 @@ def cmd_set(a) -> None:
             cfg[k] = v
     if a.aec is not None:
         cfg["aec"] = a.aec == "on"
+    if a.backend is not None:
+        cfg["backend"] = a.backend
     save_config(cfg)
     print("saved; restart the client (systemctl --user restart telerouter-client, or launchctl kickstart)")
 
@@ -156,6 +167,8 @@ def main() -> None:
     r.add_argument("--input-device")
     r.add_argument("--output-device")
     r.add_argument("--no-aec", action="store_true", help="no echo cancellation")
+    r.add_argument("--backend", choices=["auto", "portaudio", "alsa"], help="audio backend (default auto: "
+                   "PortAudio, else ALSA's arecord/aplay)")
     r.add_argument("--input-wav", help="test: use a 16 kHz mono WAV as the microphone")
     r.add_argument("--output-wav", help="test: record what would be played")
     r.add_argument("--start-delay", type=float, default=2.0, help="test: seconds before --input-wav starts")
@@ -167,6 +180,7 @@ def main() -> None:
     s.add_argument("--input-device")
     s.add_argument("--output-device")
     s.add_argument("--aec", choices=["on", "off"])
+    s.add_argument("--backend", choices=["auto", "portaudio", "alsa"])
     s.set_defaults(fn=cmd_set)
     t = sub.add_parser("test-audio", help="record and play back a few seconds")
     t.add_argument("--seconds", type=float, default=4)

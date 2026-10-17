@@ -134,6 +134,9 @@ rejected by default; set a DTMF PIN in *Voice & calls* if your PBX takes outside
 - Wake word too sensitive / deaf: `WAKE_THRESHOLD`, microphone level (Speakers page shows dBFS).
 - Echo during calls: install the client with echo cancellation (default when available), or use a
   speakerphone with hardware echo cancelling.
+- Headless Linux box without PulseAudio/PipeWire (e.g. a Proxmox LXC with /dev/snd passed through): the
+  client uses ALSA directly (`arecord`/`aplay`, install `alsa-utils`); force it with
+  `telerouter-client set --backend alsa`.
 - macOS doesn't ask for the microphone: run `~/.local/share/telerouter-client/venv/bin/telerouter-client
   test-audio` in Terminal once and allow it.
 

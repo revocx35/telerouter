@@ -10,7 +10,9 @@ canceller as the reverse stream, so the server doesn't hear its own voice back (
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import threading
 import time
 import wave
@@ -287,3 +289,75 @@ class FileIO:
             self._thread.join(2)
         if self._out:
             self._out.close()
+
+
+class AlsaIO:
+    """Plain ALSA through `arecord` / `aplay` (alsa-utils): for headless Linux without PulseAudio/PipeWire,
+    where PortAudio builds that include the PulseAudio host API refuse to start at all."""
+
+    def __init__(self, on_mic: Callable[[bytes], None], player: Player, input_device=None, output_device=None,
+                 echo: Echo | None = None):
+        self.on_mic = on_mic
+        self.player = player
+        self.echo = echo
+        self.input_device = str(input_device) if input_device not in (None, "") else "default"
+        self.output_device = str(output_device) if output_device not in (None, "") else "default"
+        self._rec = self._play = None
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    @staticmethod
+    def available() -> bool:
+        import shutil
+        return bool(shutil.which("arecord") and shutil.which("aplay"))
+
+    def _cmd(self, tool: str, device: str) -> list[str]:
+        return [tool, "-q", "-D", device, "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw",
+                "--buffer-time=100000", "--period-time=20000"]
+
+    def start(self) -> None:
+        import subprocess
+        self._rec = subprocess.Popen(self._cmd("arecord", self.input_device), stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL)
+        self._play = subprocess.Popen(self._cmd("aplay", self.output_device), stdin=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL)
+        for fn in (self._read_loop, self._write_loop):
+            t = threading.Thread(target=fn, daemon=True)
+            t.start()
+            self._threads.append(t)
+        log.info("audio through ALSA (arecord/aplay) on %s / %s", self.input_device, self.output_device)
+
+    def _read_loop(self) -> None:
+        f = self._rec.stdout
+        while not self._stop.is_set():
+            block = f.read(BLOCK_BYTES)
+            if not block or len(block) < BLOCK_BYTES:
+                if self._stop.is_set():
+                    return
+                log.error("arecord stopped")
+                os._exit(3)                       # let the service manager restart us
+            if self.echo:
+                block = self.echo.capture(block)
+            self.on_mic(block)
+
+    def _write_loop(self) -> None:
+        f = self._play.stdin
+        while not self._stop.is_set():
+            chunk = self.player.take(BLOCK_BYTES)    # aplay blocks when its buffer is full: that paces us
+            if self.echo:
+                self.echo.reverse(chunk)
+            try:
+                f.write(chunk)
+                f.flush()
+            except (BrokenPipeError, OSError):
+                if self._stop.is_set():
+                    return
+                log.error("aplay stopped")
+                os._exit(3)
+
+    def stop(self) -> None:
+        self._stop.set()
+        for p in (self._rec, self._play):
+            if p is not None:
+                with contextlib.suppress(Exception):
+                    p.terminate()

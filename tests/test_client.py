@@ -65,3 +65,28 @@ def test_enrollment_refuses_a_ca_with_the_wrong_fingerprint(monkeypatch, tmp_pat
     assert net.fetch_ca("https://x:8443", good).startswith("-----BEGIN CERTIFICATE")
     with pytest.raises(SystemExit):
         net.fetch_ca("https://x:8443", "00" * 32)
+
+
+def test_alsa_backend_streams_blocks_both_ways(tmp_path, monkeypatch):
+    import time
+    from telerouter_client.audio import AlsaIO, Player
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "arecord").write_text("#!/bin/sh\nwhile true; do head -c 640 /dev/zero; sleep 0.02; done\n")   # silence
+    played = tmp_path / "played.raw"
+    (bin_ / "aplay").write_text(f"#!/bin/sh\nexec cat > {played}\n")
+    for f in bin_.iterdir():
+        f.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}:" + __import__("os").environ["PATH"])
+    assert AlsaIO.available()
+    got = []
+    player = Player()
+    player.feed(b"\x01\x02" * 1600)
+    io = AlsaIO(got.append, player)
+    io._stop.clear()
+    io.start()
+    time.sleep(0.5)
+    io._stop.set()
+    io.stop()
+    assert got and all(len(b) == 640 for b in got)
+    assert played.exists() and played.stat().st_size >= 3200

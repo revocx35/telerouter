@@ -109,6 +109,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   listener running while Whisper transcribes; if the text looks unfinished (`vad.looks_unfinished`) or more
   speech arrived within 3 s, the parts are joined and re-transcribed (max 2 times). Defaults: 1.2 s on
   speakers, 1.5 s on phone calls, 45 s per request; old stored defaults are bumped by `store.migrate`.
+- **Headless Linux speakers (no PulseAudio/PipeWire)**: Ubuntu's PortAudio includes the PulseAudio host API and
+  fails to initialise at all without a sound server (`import sounddevice` raises). The client then falls back
+  to `AlsaIO` (arecord/aplay, alsa-utils). Proxmox LXC: pass /dev/snd/controlC0, pcmC0D0p, pcmC0D0c, timer
+  with `devN: …,gid=29,mode=0660`; set mixer levels in the service's ExecStartPre (no udev/alsa-restore).
 - Foreign tmux sessions (not started by telerouter) have no hooks: `~/.claude/sessions/<pid>.json` (pid of
   the pane's claude, or a child of the pane's shell) gives the session id -> transcript. Read it from the
   line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.
