@@ -243,6 +243,31 @@ class McpServer:
                             "direction": s.direction})
             return {"calls": out}
 
+        @tool("context_status", "agent",
+              "Your own conversation size in tokens (measured after your last finished turn) and whether a "
+              "context reset is already scheduled.", _obj({}))
+        async def context_status(tok):
+            rt = self._own_agent(tok)
+            return {"context_tokens": rt.context_tokens, "reset_scheduled": bool(rt.pending_reset),
+                    "note": "0 means not measured yet"}
+
+        @tool("reset_context", "agent",
+              "Empty your own conversation right after your current reply, like typing /compact or /clear in your "
+              "terminal. mode 'compact' summarizes and keeps what `keep` names (projects in progress, open tasks); "
+              "mode 'clear' drops everything. Only do this when the user asked you to manage your context.",
+              _obj({"mode": {"type": "string", "enum": ["compact", "clear"]},
+                    "keep": {**S, "description": "compact: what the summary must keep (e.g. 'the Proxmox backup work in progress')"}},
+                   ["mode"]))
+        async def reset_context(tok, mode: str, keep: str = ""):
+            rt = self._own_agent(tok)
+            from .agents.runtime import AgentError
+            try:
+                when = rt.request_reset(mode, keep)
+            except AgentError as ex:
+                raise ToolError(str(ex)) from ex
+            return {"scheduled": mode, "when": when,
+                    "note": "Finish your reply normally; the reset happens right after it."}
+
         @tool("announce", "speak", "Say something out loud on a speaker (e.g. a reminder or a notification).",
               _obj({"speaker": S, "text": S}, ["speaker", "text"]))
         async def announce(tok, speaker: str, text: str):
@@ -266,6 +291,12 @@ class McpServer:
                 raise ToolError(str(ex)) from ex
             return {"heard": heard}
 
+    def _own_agent(self, tok: McpToken):
+        rt = self.engine.agents.get(tok.agent_id) if tok.agent_id else None
+        if not rt:
+            raise ToolError("only agents that telerouter runs can manage their context")
+        return rt
+
     def _own_call(self, tok: McpToken, call_id: str):
         s = self.engine.calls.get(call_id)
         if not s or s.mode != "mcp" or s.token_id != tok.id:
@@ -273,8 +304,12 @@ class McpServer:
         return s
 
     # -- JSON-RPC -------------------------------------------------------------------------------------------
+    @staticmethod
+    def _allowed(t: Tool, tok: McpToken) -> bool:
+        return t.scope in tok.scopes or (t.scope == "agent" and bool(tok.agent_id))
+
     def _visible(self, tok: McpToken) -> list[Tool]:
-        return [t for t in self.tools.values() if t.scope in tok.scopes]
+        return [t for t in self.tools.values() if self._allowed(t, tok)]
 
     async def handle(self, request: Request) -> Response:
         if request.method != "POST":
@@ -324,7 +359,7 @@ class McpServer:
             name = str(params.get("name") or "")
             args = params.get("arguments") or {}
             t = self.tools.get(name)
-            if not t or t.scope not in tok.scopes:
+            if not t or not self._allowed(t, tok):
                 return _err(mid, -32602, f"unknown tool: {name}")
             if not isinstance(args, dict) or set(args) - set(t.schema["properties"]):
                 return _err(mid, -32602, "invalid arguments")

@@ -49,7 +49,12 @@ speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
 - To deliver a message by phone yourself, use phone_message (it rings, speaks, can wait for a reply).
 - For an interactive phone conversation you lead yourself, use start_voice_call, then say/listen, then hang_up.
 - announce / ask_speaker talk through a speaker in the house.
-Never call anyone the person didn't ask you to call."""
+Never call anyone the person didn't ask you to call.
+- Your context size is shown in voice request headers ("context 112k tokens"); context_status tells it too.
+  reset_context empties your conversation right after your current reply, like /compact or /clear: use it
+  only when the user asked you to manage your context, and follow their rules. Prefer mode "compact" with
+  `keep` naming everything still in progress (projects, open tasks, preferences that matter); use "clear"
+  only when nothing is ongoing. Save anything you must remember long-term to memory before a clear."""
     extra = [s for s in agent.mcp_servers if s.enabled]
     if extra:
         text += "\n\nYou also have these MCP servers:"
@@ -105,15 +110,28 @@ class Driver:
         """Keys to press for a start-up dialog visible on screen, or None."""
         return None
 
+    def reset_keys(self, mode: str, keep: str) -> list[str]:
+        """Text/keys that clear or compact the agent's context ([] = not supported)."""
+        return []
+
 
 class ClaudeDriver(Driver):
     kind = "claude"
+
+    def reset_keys(self, mode: str, keep: str) -> list[str]:
+        if mode == "clear":
+            return ["/clear", "Enter"]
+        if mode == "compact":
+            keep = " ".join(keep.split())[:500]
+            return [f"/compact {keep}".strip(), "Enter"]
+        return []
 
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         hook = shlex.quote(self.hook_path)
         handler = [{"hooks": [{"type": "command", "command": hook, "timeout": 10}]}]
         settings = {
-            "hooks": {"UserPromptSubmit": handler, "Stop": handler, "Notification": handler},
+            "hooks": {"UserPromptSubmit": handler, "Stop": handler, "Notification": handler,
+                      "SessionStart": handler},
             "permissions": {"allow": ["mcp__telerouter"] + [f"mcp__{s.name}" for s in self.extra_servers
                                                               if s.auto_approve]},
         }
@@ -183,6 +201,12 @@ def menu_keys(screen: str, target: str) -> list[str]:
 
 class HermesDriver(Driver):
     kind = "hermes"
+
+    def reset_keys(self, mode: str, keep: str) -> list[str]:
+        if mode == "compact":                        # gateway CLI: /compress [<focus>]
+            keep = " ".join(keep.split())[:500]
+            return [f"/compress {keep}".strip(), "Enter"]
+        return []
 
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         out = super().files(mcp_token)

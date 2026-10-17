@@ -27,7 +27,7 @@ def test_claude_launch_uses_model_effort_hooks_and_mcp():
     assert "--model claude-sonnet-5-5" in script and "--effort medium" in script
     assert "--permission-mode auto" in script and "--session-id u-1" in script and "--resume u-1" in script
     settings = json.loads(files["/home/me/.telerouter/x/settings.json"][0])
-    assert set(settings["hooks"]) == {"UserPromptSubmit", "Stop", "Notification"}
+    assert set(settings["hooks"]) == {"UserPromptSubmit", "Stop", "Notification", "SessionStart"}
     assert settings["permissions"]["allow"] == ["mcp__telerouter"]
     mcp = json.loads(files["/home/me/.telerouter/x/mcp.json"][0])
     assert mcp["mcpServers"]["telerouter"]["headers"]["Authorization"] == "Bearer trm_secret"
@@ -83,7 +83,7 @@ class _Eng:
 
 
 def runtime(kind="claude"):
-    rt = AgentRuntime(_Eng(), agent(kind=kind))
+    rt = AgentRuntime(_Engine2(), agent(kind=kind))
     return rt
 
 
@@ -192,3 +192,63 @@ def test_hermes_configure_adds_and_removes_extra_servers(tmp_path):
     assert set(s) == {"mine", "telerouter", "home-assistant"}
     s = run({})
     assert set(s) == {"mine", "telerouter"}                  # ours removed, the owner's kept
+
+
+def test_reset_keys():
+    c = make_driver(agent(), "/d", "/w", "http://x")
+    assert c.reset_keys("clear", "") == ["/clear", "Enter"]
+    assert c.reset_keys("compact", "the  Proxmox\nwork") == ["/compact the Proxmox work", "Enter"]
+    h = make_driver(agent(kind="hermes"), "/d", "/w", "http://x")
+    assert h.reset_keys("compact", "x") == ["/compress x", "Enter"] and h.reset_keys("clear", "") == []
+
+
+class _Store:
+    def __init__(self):
+        self.saved = 0
+
+    def save(self):
+        self.saved += 1
+
+
+class _Engine2:
+    def __init__(self):
+        self.store = _Store()
+
+
+async def test_reset_runs_after_the_turn_and_session_id_follows_clear():
+    rt = AgentRuntime(_Engine2(), agent())
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+    sent = []
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        sent.append(cmd)
+        if cmd.startswith("tail"):
+            return json.dumps({"type": "assistant", "message": {"usage": {
+                "input_tokens": 10, "cache_read_input_tokens": 100000, "cache_creation_input_tokens": 2000,
+                "output_tokens": 300}}}) + "\n"
+        return ""
+    rt._sh = fake_sh
+    rt.request_reset("clear", "")
+    assert rt.pending_reset and not any("send-keys" in c for c in sent)      # nothing typed mid-turn
+    await rt._on_event({"hook_event_name": "Stop", "session_id": "u-1", "transcript_path": "/r/.claude/x.jsonl",
+                        "last_assistant_message": "ok"})
+    await asyncio.sleep(2.2)
+    typed = [c for c in sent if "send-keys" in c]
+    assert any("/clear" in c for c in typed) and typed[-1].endswith("Enter")
+    assert rt.pending_reset is None
+    # after /clear the agent reports a new session id: resume that one from now on
+    await rt._on_event({"hook_event_name": "UserPromptSubmit", "session_id": "u-2", "prompt": "hi"})
+    assert rt.agent.session_uuid == "u-2" and rt.engine.store.saved == 1
+
+
+async def test_context_size_is_measured_after_each_turn():
+    rt = AgentRuntime(_Engine2(), agent())
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        return json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 5, "cache_read_input_tokens": 111000, "output_tokens": 95}}}) + "\n"
+    rt._sh = fake_sh
+    await rt._on_event({"hook_event_name": "Stop", "session_id": "u-1", "transcript_path": "/r/.claude/x.jsonl"})
+    await asyncio.sleep(0.05)
+    assert rt.context_tokens == 111100

@@ -155,6 +155,12 @@ installer creates a systemd user service (Linux) or a launchd agent (macOS).
 | MCP | `mcp.json` (0600) with a per-start `trm_` token; `permissions.allow: mcp__telerouter` | `mcp_servers.telerouter` in config.yaml |
 | voice rules | `--append-system-prompt` | appended to each request |
 
+**Context management**: after every turn telerouter reads the context size from the transcript's last
+`usage` (input + cache + output tokens) and puts it in the next voice request's header ("context 112k
+tokens"). The agent-only MCP tools `context_status` and `reset_context(mode, keep)` let the agent decide to
+compact (keeping what it names) or clear; telerouter types `/compact <keep>` / `/clear` (Hermes:
+`/compress`) into the pane right after the current turn's Stop hook, never during a voice request.
+
 **Extra MCP servers** (`Agent.mcp_servers`, e.g. Home Assistant's `/api/mcp`): added to Claude's
 `mcp.json` (with `permissions.allow: mcp__<name>` when auto-approve is on) or to Hermes' `mcp_servers`
 (telerouter remembers which names it added in `hermes-managed.json` and removes them again). HTTPS only
@@ -215,6 +221,7 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | phone_message | calls | ring, speak a message (repeat), optionally record a spoken reply, hang up |
 | start_voice_call, say, listen, hang_up, list_calls | calls | agent-led conversation |
 | announce, ask_speaker | speak | talk/ask through a speaker |
+| context_status, reset_context | (agents telerouter runs) | own context size; compact/clear after the current reply |
 
 The SDK's FastMCP API changed in mcp 2.x; the protocol surface needed here (initialize, ping,
 tools/list, tools/call, notifications) is small, so it is implemented directly and tested.

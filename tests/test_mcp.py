@@ -151,3 +151,16 @@ async def test_list_contacts_filters_by_kind_and_kind_words(mcp):
         _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                 "params": {"name": "list_contacts", "arguments": args}})
         assert [c["name"] for c in r["result"]["structuredContent"]["contacts"]] == ["C212"], args
+
+
+async def test_context_tools_only_for_agent_tokens(mcp):
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    names = {t["name"] for t in r["result"]["tools"]}
+    assert "reset_context" not in names and "context_status" not in names      # a normal user token
+    agent_tok = new_token("trm_")
+    mcp.engine.store.config.mcp_tokens.append(McpToken(name="agent", token_hash=token_hash(agent_tok), agent_id="a1"))
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, token=agent_tok)
+    assert {"reset_context", "context_status"} <= {t["name"] for t in r["result"]["tools"]}
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                            "params": {"name": "reset_context", "arguments": {"mode": "clear"}}}, token=agent_tok)
+    assert r["result"]["isError"]                     # the fake engine runs no agent a1

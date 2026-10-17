@@ -90,6 +90,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Home Assistant's MCP server (`/api/mcp`) answers 404 until the "Model Context Protocol Server"
   integration is added in HA; it accepts a long-lived access token as Bearer. Extra MCP servers are agent
   settings (`Agent.mcp_servers`), not telerouter tools.
+- Context management (MCP `reset_context`): typing `/compact <keep>` or `/clear` with `tmux send-keys -l`
+  then Enter works in Claude Code 2.1.302. `/compact` keeps the session id (SessionStart source "compact");
+  `/clear` starts a new session id (SessionStart source "clear"), which `AgentRuntime._track` stores as
+  `session_uuid` so restarts `--resume` the cleared conversation. The reset waits for the turn's Stop hook.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 ## Status (v0.1.0, 2026-10-17)

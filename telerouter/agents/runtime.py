@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import asyncssh
 
+from .. import __version__
 from ..models import Agent, McpToken
 from ..security import new_token, token_hash
 from . import ssh
@@ -71,6 +72,8 @@ class AgentRuntime:
         self._listener = None
         self._ready = asyncio.Event()
         self._restart = asyncio.Event()
+        self.context_tokens = 0                      # size of the agent's context after its last turn
+        self.pending_reset: tuple[str, str, float] | None = None   # (mode, keep, requested_at)
 
     # -- lifecycle --------------------------------------------------------------------------
     def start(self) -> None:
@@ -158,6 +161,11 @@ class AgentRuntime:
             self.session_alive = await self._has_session()
             if not self.session_alive and a.autostart:
                 await self.start_session()
+            elif self.session_alive and a.autostart and await self._stale_session():
+                log.info("[%s] its session was started by an older telerouter - restarting it (same conversation)",
+                         a.name)
+                await self._kill_session()
+                await self.start_session()
             elif self.session_alive:
                 await self._handle_startup()      # it may sit in a dialog (e.g. we restarted mid-start)
                 self.state = "ready"
@@ -214,6 +222,11 @@ class AgentRuntime:
         out = await self._sh(self._tmux("has-session", "-t", "=" + self.agent.session_name) + " 2>/dev/null && echo yes")
         return out.strip() == "yes"
 
+    async def _stale_session(self) -> bool:
+        """True when the running session got its hooks/MCP config from another telerouter version."""
+        out = await self._sh(f"cat {ssh.q(self.dir + '/version')} 2>/dev/null")
+        return out.strip() != __version__
+
     async def _kill_session(self) -> None:
         await self._sh(self._tmux("kill-session", "-t", "=" + self.agent.session_name) + " 2>/dev/null")
 
@@ -235,6 +248,7 @@ class AgentRuntime:
         token = self._issue_mcp_token()
         for path, (content, mode) in self.driver.files(token).items():
             await self._write_file(path, content, mode)
+        await self._write_file(f"{self.dir}/version", __version__, 0o600)
         await self._sh(f": >> {ssh.q(self.driver.events_path)}; "
                        f"[ $(wc -c < {ssh.q(self.driver.events_path)}) -gt {EVENTS_MAX_BYTES} ] && "
                        f": > {ssh.q(self.driver.events_path)}; true")
@@ -316,6 +330,8 @@ class AgentRuntime:
             assert self.driver
             nonce = secrets.token_hex(3)
             header = f"telerouter #{nonce} · {source.label}"
+            if self.context_tokens:
+                header += f" · context {round(self.context_tokens / 1000)}k tokens"
             prompt = self.driver.prompt_text(" ".join(text.split()), header)
             fut = asyncio.get_running_loop().create_future()
             self.pending = Pending(nonce, text, source, fut)
@@ -370,8 +386,9 @@ class AgentRuntime:
                         log.exception("[%s] event handling failed", self.agent.name)
 
     async def _on_event(self, ev: dict) -> None:
-        p = self.pending
         name = ev.get("hook_event_name") or ""
+        await self._track(name, ev)
+        p = self.pending
         if not p or p.future.done():
             return
         if self.agent.kind == "claude":
@@ -399,6 +416,69 @@ class AgentRuntime:
                     and (extra.get("failed") or extra.get("interrupted")):
                 p.future.set_exception(AgentError("the agent's turn failed"))
 
+    # -- context management (MCP reset_context / context_status) --------------------------------------
+    async def _track(self, name: str, ev: dict) -> None:
+        """Bookkeeping on every hook event: current session id, context size, a requested reset."""
+        a = self.agent
+        sid = str(ev.get("session_id") or "")
+        turn_end = name == "Stop" if a.kind == "claude" else name in ("post_llm_call", "on_session_end")
+        if a.kind == "claude" and sid and sid != a.session_uuid and name in ("UserPromptSubmit", "Stop", "SessionStart"):
+            # /clear (by the owner or reset_context) starts a new session: resume that one after restarts
+            a.session_uuid = sid
+            self.engine.store.save()
+        if not turn_end or ev.get("stop_hook_active"):
+            return
+        if a.kind == "claude":
+            asyncio.create_task(self._update_context_size(str(ev.get("transcript_path") or "")))
+        if self.pending_reset:
+            mode, keep, _at = self.pending_reset
+            self.pending_reset = None
+            asyncio.create_task(self._do_reset(mode, keep))
+
+    async def _update_context_size(self, path: str) -> None:
+        if not path or not re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path):
+            return
+        try:
+            out = await self._sh(f"tail -n 80 {ssh.q(path)}", timeout=10)
+        except Exception:
+            return
+        for line in reversed(out.splitlines()):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
+            if isinstance(u, dict):
+                self.context_tokens = sum(int(u.get(k) or 0) for k in (
+                    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+                return
+
+    def request_reset(self, mode: str, keep: str) -> str:
+        """Called by the agent through MCP; runs right after its current turn ends."""
+        assert self.driver
+        if not self.driver.reset_keys(mode, keep):
+            raise AgentError(f"{self.agent.kind} has no '{mode}' command; use mode compact")
+        self.pending_reset = (mode, keep, time.time())
+        log.info("[%s] context %s requested (%s)", self.agent.name, mode, keep[:80] or "nothing kept")
+        return "after this reply"
+
+    async def _do_reset(self, mode: str, keep: str) -> None:
+        assert self.driver
+        await asyncio.sleep(1.5)                     # let the TUI return to its prompt
+        async with self._lock:                       # never in the middle of a voice request
+            for k in self.driver.reset_keys(mode, keep):
+                if k == "Enter":
+                    await self._sh(self._tmux("send-keys", "-t", self._pane, "Enter"))
+                else:
+                    await self._sh(self._tmux("send-keys", "-t", self._pane, "-l", "--", k))
+                    await asyncio.sleep(0.5)
+            if mode == "clear":
+                self.context_tokens = 0
+            self.log.append({"at": time.time(), "source": "agent", "text": f"/{mode} {keep}".strip(),
+                             "reply": "context reset"})
+            log.info("[%s] context %s done", self.agent.name, mode)
+            await asyncio.sleep(3 if mode == "clear" else 30)   # /compact takes a while
+
     async def _last_reply_from_transcript(self, path: str) -> str:
         """Fallback for Claude Code versions whose Stop hook has no last_assistant_message."""
         if not path or not re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path):
@@ -421,6 +501,7 @@ class AgentRuntime:
     def info(self) -> dict:
         a = self.agent
         return {"id": a.id, "state": self.state, "error": self.error, "session_alive": self.session_alive,
+                "context_tokens": self.context_tokens,
                 "busy": self.pending is not None,
                 "attach": f"ssh -t {a.username}@{a.host}{' -p ' + str(a.port) if a.port != 22 else ''} "
                           f"tmux attach -t {a.session_name}",
