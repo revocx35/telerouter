@@ -167,3 +167,21 @@ async def test_direct_address_only_from_linked_integrations(settings, tmp_path):
         assert "404" in wrong.end_reason
     finally:
         await rig.stop()
+
+
+async def test_pbx_numbers_are_dialed_as_entered(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        got = []
+
+        async def on_incoming(call):
+            got.append(call.invite.uri)
+            call.reject(486, "Busy Here")
+        rig.ua.on_incoming = on_incoming
+        rig.phone("*43")                      # the "PBX" side takes calls for *43
+        c = Contact(kind="pbx", name="Echo", number="*43")
+        call = await rig.engine.calls._dial(c)
+        await asyncio.wait_for(call.ended.wait(), 5)
+        assert got and got[0].startswith("sip:*43@")
+    finally:
+        await rig.stop()

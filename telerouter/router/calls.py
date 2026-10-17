@@ -199,7 +199,8 @@ class CallManager:
                 raise CallError("no PBX account is configured")
             if acc.state != "registered":
                 raise CallError("the PBX account is not registered")
-            return await acc.dial(digits(contact.number) or contact.number, display_name=e.store.config.pbx.display_name or name)
+            # dial as entered: feature codes (*43) and # are part of the number
+            return await acc.dial(contact.number, display_name=e.store.config.pbx.display_name or name)
         client = e.integrations.client(contact.source)
         if not client:
             raise CallError(f"the {contact.kind} connection for {contact.label} is not set up")
