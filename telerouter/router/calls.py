@@ -473,13 +473,22 @@ class CallManager:
             if re.fullmatch(r"(good ?bye|bye|bye bye|hang up|that'?s all|thanks?,? bye)[.!]?", text.lower()):
                 await self._say(s, "Goodbye.")
                 return
-            if not rt:
+            if not rt and getattr(s, "route", None) is None:
                 await self._say(s, "The assistant is not available right now.")
                 return
+            from ..agents.machine import is_exit
             from ..agents.runtime import AgentError, Source
+            route = getattr(s, "route", None)
+            if route is not None and is_exit(text, name):
+                s.route = None                         # type: ignore[attr-defined]
+                await self._say(s, f"Back to {name}.")
+                continue
             ticker = asyncio.create_task(self._think_ticks(s))
             try:
-                reply = await rt.ask(text, Source("phone", f"phone call from {s.label}", call_id=s.id))
+                if route is not None:
+                    reply = await e.ask_route(route, text, f"phone call from {s.label}")
+                else:
+                    reply = await rt.ask(text, Source("phone", f"phone call from {s.label}", call_id=s.id))
             except AgentError as ex:
                 reply = f"Sorry, {ex}."
             finally:

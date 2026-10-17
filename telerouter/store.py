@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from .models import Agent, Client, Config, Contact, Integration, McpToken
+from .models import Agent, Client, Config, Contact, Integration, Machine, McpToken
 
 log = logging.getLogger("telerouter.store")
 
@@ -36,6 +36,23 @@ def write_private(path: Path, data: str | bytes) -> None:
         raise
 
 
+def migrate(cfg: Config) -> bool:
+    """0.3 -> 0.4: agents carried their own SSH target; now they run on a Machine."""
+    changed = False
+    for a in cfg.agents:
+        if a.machine_id and any(m.id == a.machine_id for m in cfg.machines):
+            continue
+        m = next((m for m in cfg.machines if (m.host, m.port, m.username) == (a.host, a.port, a.username)), None)
+        if m is None and a.host and a.username:
+            m = Machine(name=a.host, host=a.host, port=a.port, username=a.username, host_key=a.host_key,
+                        agent_kind=a.kind)
+            cfg.machines.append(m)
+        if m is not None:
+            a.machine_id = m.id
+            changed = True
+    return changed
+
+
 class Store:
     def __init__(self, data_dir: str):
         self.dir = Path(data_dir)
@@ -53,7 +70,12 @@ class Store:
     def _load(self) -> Config:
         if self.path.exists():
             try:
-                return Config.model_validate_json(self.path.read_text())
+                raw = self.path.read_text()
+                cfg = Config.model_validate_json(raw)
+                if migrate(cfg):
+                    write_private(self.path.with_name(f"config.json.bak-{int(time.time())}"), raw)
+                    self._write(cfg)
+                return cfg
             except Exception as e:
                 # never silently start empty over a broken file: keep a copy for the owner
                 backup = self.path.with_suffix(f".broken-{int(time.time())}")
@@ -107,6 +129,9 @@ class Store:
 
     def integration(self, iid: str) -> Integration | None:
         return next((i for i in self.config.integrations if i.id == iid), None)
+
+    def machine(self, mid: str) -> Machine | None:
+        return next((m for m in self.config.machines if m.id == mid), None)
 
     def mcp_token(self, tid: str) -> McpToken | None:
         return next((t for t in self.config.mcp_tokens if t.id == tid), None)

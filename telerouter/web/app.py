@@ -27,8 +27,8 @@ from .. import security
 from ..agents import ssh as sshmod
 from ..engine import Engine
 from ..logbuffer import LogBuffer
-from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, Client, Contact, Enrollment, Integration, McpToken,
-                      Pbx, SecuritySettings, VoiceSettings)
+from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, Client, Contact, Enrollment, Integration, Machine,
+                      McpToken, Pbx, SecuritySettings, VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_certificate
 from ..settings import Settings
@@ -597,12 +597,69 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             raise HTTPException(502, f"could not reach {body.host}:{body.port}: {e}") from e
         return {"host_key": key, "fingerprint": sshmod.fingerprint(key)}
 
-    AGENT_PROTECTED = {"id", "session_uuid", "mcp_token_id"}
+    # -- machines ------------------------------------------------------------------------------------------
+    @app.get("/api/machines")
+    async def list_machines():
+        return {"machines": [{**m.model_dump(), "host_key_fingerprint": sshmod.fingerprint(m.host_key) if m.host_key else "",
+                              "runtime": engine.machine_rts[m.id].info() if m.id in engine.machine_rts else None,
+                              "agents": [a.name for a in cfg.agents if a.machine_id == m.id]}
+                             for m in cfg.machines],
+                "ssh_public_key": engine.ssh_keys.public}
+
+    @app.post("/api/machines")
+    async def create_machine(payload: dict):
+        m = merge(Machine, None, payload, protected={"id"})
+        cfg.machines.append(m)
+        store.save()
+        await engine.apply_config()
+        return m.model_dump()
+
+    @app.put("/api/machines/{mid}")
+    async def update_machine(mid: str, payload: dict):
+        m = find(cfg.machines, mid)
+        if payload.get("host", m.host) != m.host or int(payload.get("port", m.port)) != m.port:
+            if payload.get("host_key", m.host_key) == m.host_key:
+                payload["host_key"] = ""            # a new host needs its key confirmed again
+        new = merge(Machine, m, payload, protected={"id"})
+        replace(cfg.machines, new)
+        store.save()
+        await engine.apply_config()
+        return new.model_dump()
+
+    @app.delete("/api/machines/{mid}")
+    async def delete_machine(mid: str):
+        m = find(cfg.machines, mid)
+        users = [a.name for a in cfg.agents if a.machine_id == mid]
+        if users:
+            raise HTTPException(409, f"agents run on it: {', '.join(users)}")
+        cfg.machines.remove(m)
+        store.save()
+        await engine.apply_config()
+        return {"ok": True}
+
+    @app.post("/api/machines/{mid}/refresh")
+    async def refresh_machine(mid: str):
+        find(cfg.machines, mid)
+        rt = engine.machine_rts.get(mid)
+        if not rt:
+            raise HTTPException(409, "the machine is disabled or its host key is not confirmed")
+        try:
+            sessions = await rt.list_sessions()
+        except Exception as e:
+            raise HTTPException(502, str(e)) from e
+        return {"sessions": sessions}
+
+    AGENT_PROTECTED = {"id", "session_uuid", "mcp_token_id", "host", "port", "username", "host_key"}
+
+    def check_machine(a: Agent) -> None:
+        if not store.machine(a.machine_id):
+            raise HTTPException(422, "pick the machine the agent runs on")
 
     @app.post("/api/agents")
     async def create_agent(payload: dict):
         a = merge(Agent, None, {k: v for k, v in payload.items() if k not in AGENT_PROTECTED})
-        if any(x.mcp_remote_port == a.mcp_remote_port and x.host == a.host for x in cfg.agents):
+        check_machine(a)
+        if any(x.mcp_remote_port == a.mcp_remote_port and x.machine_id == a.machine_id for x in cfg.agents):
             a.mcp_remote_port = max(x.mcp_remote_port for x in cfg.agents) + 1
         cfg.agents.append(a)
         if not cfg.default_agent_id:
@@ -614,9 +671,6 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.put("/api/agents/{aid}")
     async def update_agent(aid: str, payload: dict):
         a = find(cfg.agents, aid)
-        if payload.get("host", a.host) != a.host or int(payload.get("port", a.port)) != a.port:
-            if payload.get("host_key", a.host_key) == a.host_key:
-                payload["host_key"] = ""            # a new host needs its key confirmed again
         if isinstance(payload.get("mcp_servers"), list):
             old = {s.name: s for s in a.mcp_servers}
             for s in payload["mcp_servers"]:
@@ -626,6 +680,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                 if isinstance(s, dict):
                     s.pop("token_set", None)
         new = merge(Agent, a, payload, protected=AGENT_PROTECTED)
+        check_machine(new)
         replace(cfg.agents, new)
         store.save()
         await engine.apply_config()
@@ -698,6 +753,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.get("/api/contacts")
     async def list_contacts():
         names = {i.id: i.name or i.kind for i in cfg.integrations}
+        names.update({m.id: m.name for m in cfg.machines})
         return {"contacts": [{**c.model_dump(), "source_name": names.get(c.source, "manual")} for c in cfg.contacts]}
 
     @app.post("/api/contacts")
@@ -709,6 +765,28 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         cfg.contacts.append(c)
         store.save()
         return c.model_dump()
+
+    CONTACT_EDITABLE = {"alias", "description", "enabled", "inbound", "inbound_client", "inbound_agent"}
+
+    @app.put("/api/contacts")
+    async def update_contacts(payload: dict):
+        """Save many contacts at once: {"changes": [{"id", ...fields}]} (all or nothing)."""
+        changes = payload.get("changes")
+        if not isinstance(changes, list) or len(changes) > 2000:
+            raise HTTPException(422, "changes must be a list")
+        updated = []
+        for ch in changes:
+            if not isinstance(ch, dict):
+                raise HTTPException(422, "invalid change")
+            c = find(cfg.contacts, str(ch.get("id", "")))
+            fields = {k: v for k, v in ch.items() if k in CONTACT_EDITABLE}
+            if c.source == "manual":
+                fields.update({k: v for k, v in ch.items() if k in ("name", "number")})
+            updated.append(merge(Contact, c, fields, protected={"id", "source", "source_ref", "kind", "missing"}))
+        for new in updated:
+            replace(cfg.contacts, new)
+        store.save()
+        return {"saved": len(updated)}
 
     @app.put("/api/contacts/{cid}")
     async def update_contact(cid: str, payload: dict):
@@ -724,6 +802,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.delete("/api/contacts/{cid}")
     async def delete_contact(cid: str):
         c = find(cfg.contacts, cid)
+        if c.kind == "tmux" and not c.missing:
+            raise HTTPException(409, "running tmux sessions can be hidden (untick 'visible'), not deleted")
         if c.source != "manual" and not c.missing:
             raise HTTPException(409, "synced contacts can be hidden (untick 'visible'), not deleted")
         cfg.contacts.remove(c)
@@ -734,6 +814,15 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     async def call_contact(cid: str, body: CallBody):
         c = find(cfg.contacts, cid)
         conn = online(body.client_id)
+        if c.kind == "tmux":
+            try:
+                conn.route = engine.route_for(c)          # type: ignore[attr-defined]
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from e
+            agent = store.agent_for_client(conn.client)
+            back = agent.name if agent else "your assistant"
+            asyncio.create_task(engine.voice.announce(conn, f"Connected to {c.label}. Say back to {back} to return."))
+            return {"connected": c.label}
         try:
             s = engine.calls.call_to_speaker(c, conn)
         except CallError as e:

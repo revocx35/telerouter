@@ -98,6 +98,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   your session limit · resets …" and ends the turn (transcript: assistant text + `system`/`turn_duration`).
   `AgentRuntime._watch_turn_end` tails the transcript during a voice request and answers with that text,
   instead of leaving the caller waiting for `reply_timeout`.
+- Foreign tmux sessions (not started by telerouter) have no hooks: `~/.claude/sessions/<pid>.json` (pid of
+  the pane's claude, or a child of the pane's shell) gives the session id -> transcript. Read it from the
+  line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.
+- Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 ## Status (v0.1.0, 2026-10-17)

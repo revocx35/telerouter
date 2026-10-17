@@ -177,6 +177,24 @@ Start-up dialogs (workspace trust, permission-mode confirmations) are recognised
 answered. Changing model/effort/permissions/instructions restarts the session (Claude resumes the same
 conversation by its session id; "New conversation" starts a fresh one).
 
+### 4.1 Machines and tmux sessions
+
+A **Machine** (`models.Machine`) is an SSH target with a pinned host key and the agent type its tmux
+sessions run. Agents run on a machine (their SSH fields are copied from it; 0.3 configs are migrated, with a
+backup of config.json). `agents/machine.py` keeps one SSH connection per machine, lists `tmux list-sessions`
+every 60 s (except telerouter's own `telerouter-*`), and the engine merges them into connections of kind
+`tmux` (missing ones are marked gone).
+
+Talking to a session telerouter did not start (no hooks there): Claude Code writes
+`~/.claude/sessions/<pid>.json` for the claude process in the pane, naming the live session id and so its
+transcript. telerouter notes the transcript's length, pastes the request (with a nonce) into the pane and
+waits for the `system`/`turn_duration` entry after it; the last assistant text of that turn is the answer.
+Hermes sessions fall back to watching the pane until it is quiet.
+
+**Routing**: MCP `connect_call` with a tmux contact (or the UI's *Connect*) puts a `Route` on the speaker or
+the phone call. Their following requests go to the session instead of the agent; a short "back to <agent>",
+"disconnect" or "leave the session" (≤ 7 words) ends it, and so do 15 idle minutes.
+
 ## 5. Calls
 
 `router/calls.py`. Every call is a `CallSession` with one SIP leg (`router/sipaudio.py`: G.711 <-> 16 kHz,
@@ -244,6 +262,7 @@ integration tokens, SSH key).
 | Spoofed SIP INVITEs | PBX account only from the PBX's IP; direct address is a 128-bit secret and only from linked integrations' IPs; unknown callers rejected; optional DTMF PIN before the agent; wa2sip/cam2sip tickets are single-use, 30 s, bound to the requesting IP |
 | Spoofed caller ID on the PBX | caller policy per contact; use the agent PIN if the PBX takes calls from outside |
 | A voice request makes the agent do harm | the agent runs with the permission mode you choose (default `auto`); permission prompts are announced, never auto-approved; the agent instructions forbid calling anyone not asked for; MCP tokens can be limited to contacts/speakers |
+| Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | SSRF via integration URLs | admin-only, HTTPS only, no redirects followed; the SIP address from the integration is rewritten to the integration's own host |

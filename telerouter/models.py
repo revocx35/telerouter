@@ -84,7 +84,7 @@ class Integration(BaseModel):
         return v
 
 
-ContactKind = Literal["pbx", "whatsapp", "camera"]
+ContactKind = Literal["pbx", "whatsapp", "camera", "tmux"]
 InboundPolicy = Literal["default", "agent", "client", "reject"]
 
 
@@ -203,15 +203,50 @@ class ExtraMcpServer(BaseModel):
 AgentKind = Literal["claude", "hermes"]
 
 
+class Machine(BaseModel):
+    """A host telerouter reaches over SSH: runs telerouter's agents and/or your own agent tmux sessions."""
+    id: str = Field(default_factory=new_id)
+    name: str
+    host: str
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str
+    host_key: str = ""                # pinned OpenSSH public host key
+    enabled: bool = True
+    agent_kind: Literal["claude", "hermes"] = "claude"   # what runs in its tmux sessions
+    list_tmux: bool = True            # list its tmux sessions as connections
+    reply_timeout: int = Field(default=600, ge=30, le=7200)   # tmux sessions can work for a while
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        return _name(v)
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if not HOST_RE.match(v):
+            raise ValueError("invalid host")
+        return v
+
+    @field_validator("username")
+    @classmethod
+    def _user(cls, v: str) -> str:
+        if not USER_RE.match(v):
+            raise ValueError("invalid user name")
+        return v
+
+
 class Agent(BaseModel):
     id: str = Field(default_factory=new_id)
     name: str = "Jarvis"              # how it introduces itself on calls
     kind: AgentKind = "claude"
     enabled: bool = True
     autostart: bool = True
-    host: str
+    machine_id: str = ""              # the Machine it runs on (host/port/user/key are copied from it)
+    host: str = ""
     port: int = Field(default=22, ge=1, le=65535)
-    username: str
+    username: str = ""
     host_key: str = ""                # pinned OpenSSH public host key ("ssh-ed25519 AAAA...")
     workdir: str = "~"
     tmux_session: str = ""
@@ -243,14 +278,14 @@ class Agent(BaseModel):
     @classmethod
     def _host(cls, v: str) -> str:
         v = v.strip()
-        if not HOST_RE.match(v):
+        if v and not HOST_RE.match(v):
             raise ValueError("invalid host")
         return v
 
     @field_validator("username")
     @classmethod
     def _user(cls, v: str) -> str:
-        if not USER_RE.match(v):
+        if v and not USER_RE.match(v):
             raise ValueError("invalid user name")
         return v
 
@@ -379,6 +414,7 @@ class Config(BaseModel):
     admin: Admin | None = None
     pbx: Pbx = Field(default_factory=Pbx)
     integrations: list[Integration] = Field(default_factory=list)
+    machines: list[Machine] = Field(default_factory=list)
     contacts: list[Contact] = Field(default_factory=list)
     clients: list[Client] = Field(default_factory=list)
     enrollments: list[Enrollment] = Field(default_factory=list)

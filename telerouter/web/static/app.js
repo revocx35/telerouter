@@ -165,8 +165,8 @@ function totpPage() {
 
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
-  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents"], ["contacts", "Contacts"],
-  ["connections", "Connections"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
+  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["connections", "Connections"],
+  ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
 ];
 
@@ -185,7 +185,10 @@ function route() {
   const id = (location.hash.replace(/^#\//, "") || "dashboard").split("?")[0];
   S.page = id;
   document.querySelectorAll("nav.side a").forEach(a => a.classList.toggle("active", a.dataset.p === id));
-  const fn = { dashboard, speakers, agents, contacts, connections, voice, mcp, history, logs, account }[id] || dashboard;
+  if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
+  S.dirty = null;
+  const fn = { dashboard, speakers, agents, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+    history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
   fn(main).catch(e => main.replaceChildren(el("div", { class: "err" }, e.message)));
@@ -302,13 +305,29 @@ const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMS = [["auto", "auto (classifier decides)"], ["default", "default (asks in the terminal)"], ["acceptEdits", "acceptEdits"], ["dontAsk", "dontAsk"], ["bypassPermissions", "bypassPermissions (dangerous)"], ["plan", "plan"]];
 
 async function agents(main) {
-  const data = await api("GET", "/api/agents");
-  main.replaceChildren(el("h1", {}, "Agents"),
+  const [data, mdata] = await Promise.all([api("GET", "/api/agents"), api("GET", "/api/machines")]);
+  data.machines = mdata.machines;
+  const kindName = k => k === "hermes" ? "Hermes" : "Claude Code";
+  const machinesCard = el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "Machines"), el("span", { class: "spacer" }),
+      el("button", { onclick: () => machineForm(null, mdata) }, "Add machine")),
+    el("p", { class: "hint" }, "Hosts telerouter reaches over SSH. Agents (like Jarvis) run on a machine, and the machine's other tmux sessions show up under Connections → tmux, so you can say \"connect me to the wa_logger tmux\" and talk to the agent in it. Pick the agent type you run there."),
+    mdata.machines.length ? el("table", {}, mdata.machines.map(m => {
+      const rt = m.runtime;
+      return el("tr", {}, el("td", {}, stateDot(rt ? rt.state : (m.host_key ? "disabled" : "error")), el("b", {}, m.name)),
+        el("td", { class: "mono" }, `${m.username}@${m.host}${m.port !== 22 ? ":" + m.port : ""}`),
+        el("td", {}, kindName(m.agent_kind)),
+        el("td", { class: "muted" }, !m.host_key ? "host key not confirmed" : rt && rt.error ? rt.error :
+          m.list_tmux ? `${rt ? rt.sessions.length : 0} tmux sessions` : "tmux not listed",
+          m.agents.length ? ` · runs ${m.agents.join(", ")}` : ""),
+        el("td", {}, el("button", { class: "small", onclick: () => machineForm(m, mdata) }, "Edit")));
+    })) : el("p", { class: "hint" }, "No machine yet."));
+  main.replaceChildren(el("h1", {}, "Agents & machines"),
     el("div", { class: "card" }, el("h2", {}, "How telerouter reaches an agent"),
-      el("p", { class: "hint" }, "telerouter logs in over SSH with its own key, starts the agent (Claude Code or Hermes) inside a tmux session you can attach to, types each voice request into it and reads the answer through the agent's hooks. The agent gets telerouter's MCP tools through an SSH reverse tunnel (127.0.0.1 on the agent host). Add this public key to ~/.ssh/authorized_keys of the agent's user:"),
+      el("p", { class: "hint" }, "telerouter logs in over SSH with its own key, starts the agent (Claude Code or Hermes) inside a tmux session you can attach to, types each voice request into it and reads the answer through the agent's hooks. The agent gets telerouter's MCP tools through an SSH reverse tunnel (127.0.0.1 on the agent host). Add this public key to ~/.ssh/authorized_keys of the user on each machine:"),
       copyBox(data.ssh_public_key),
       el("p", { class: "hint" }, "The host needs tmux and the agent itself installed and logged in (claude: run it once yourself; hermes: hermes setup).")),
-    el("div", { class: "row" }, el("button", { class: "primary", onclick: () => agentForm(null, data) }, "Add agent"),
+    machinesCard,
+    el("div", { class: "row" }, el("button", { class: "primary", onclick: () => mdata.machines.length ? agentForm(null, data) : toast("Add the machine first", true) }, "Add agent"),
       data.agents.length > 1 ? el("label", { class: "chk" }, "Default agent:", sel("default", data.default_agent_id, data.agents.map(a => [a.id, a.name]))) : ""),
     el("div", { id: "agentlist" }));
   const def = $("select[name=default]", main);
@@ -325,7 +344,7 @@ async function agents(main) {
         el("button", { onclick: () => agentForm(a, data) }, "Edit")),
       rt && rt.error ? el("p", { class: "err" }, rt.error) : null,
       (a.mcp_servers || []).length ? el("p", { class: "hint" }, "Extra MCP: ", a.mcp_servers.map(s => s.name + (s.enabled ? "" : " (off)")).join(", ")) : null,
-      el("p", { class: "hint" }, `${a.username}@${a.host}:${a.port} · ${a.workdir} · tmux ${a.tmux_session || "telerouter-" + a.id}`,
+      el("p", { class: "hint" }, `${(data.machines.find(m => m.id === a.machine_id) || { name: a.host }).name} · ${a.workdir} · tmux ${a.tmux_session || "telerouter-" + a.id}`,
         a.kind === "claude" ? ` · model ${a.model || "default"} · effort ${a.effort || "default"} · permissions ${a.permission_mode}` : ` · model ${a.model || "default"}`),
       rt ? copyBox(rt.attach) : null,
       el("div", { class: "row" },
@@ -365,21 +384,49 @@ function serverRow(s) {
 
 function cfgId(a) { return el("span", { class: "muted mono" }, a.id); }
 
+function machineForm(m, mdata) {
+  const isNew = !m;
+  m = m || { name: "", host: "", port: 22, username: "root", host_key: "", enabled: true, agent_kind: "claude", list_tmux: true, reply_timeout: 600 };
+  let hostKey = m.host_key;
+  const fp = el("div", { class: "hint" }, m.host_key ? `Host key confirmed: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
+  const f = el("div", {},
+    el("div", { class: "form2" },
+      field("Name", inp("name", m.name, { placeholder: "e.g. claude LXC" })),
+      field("SSH host", inp("host", m.host, { placeholder: "192.168.1.20" })),
+      field("SSH port", num("port", m.port)),
+      field("SSH user", inp("username", m.username)),
+      field("Agent type in its tmux sessions", sel("agent_kind", m.agent_kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
+      field("Wait for a session's answer (s)", num("reply_timeout", m.reply_timeout))),
+    el("div", { class: "row" }, chk("enabled", m.enabled, "Enabled"), chk("list_tmux", m.list_tmux, "List its tmux sessions under Connections")),
+    el("div", { class: "row" }, el("button", { onclick: async () => {
+      const d = formData(f);
+      const r = await act(() => api("POST", "/api/agents/hostkey", { host: d.host, port: d.port }));
+      if (confirm(`Trust this SSH host key for ${d.host}?\n\n${r.fingerprint}\n\nCompare it with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (on that host)`)) {
+        hostKey = r.host_key; fp.textContent = `Host key confirmed: ${r.fingerprint} (saved when you press Save)`;
+      }
+    } }, "Fetch & confirm host key"), fp));
+  modal(isNew ? "Add machine" : `Edit ${m.name}`, f, close => [
+    isNew ? null : el("button", { class: "danger", onclick: async () => { if (confirm(`Remove ${m.name}?`)) { await act(() => api("DELETE", `/api/machines/${m.id}`), "Removed"); close(); route(); } } }, "Remove"),
+    el("button", { class: "primary", onclick: async () => {
+      const d = formData(f);
+      d.host_key = hostKey;
+      if (!d.host_key) { toast("Confirm the host key first", true); return; }
+      await act(() => isNew ? api("POST", "/api/machines", d) : api("PUT", `/api/machines/${m.id}`, d), "Saved");
+      close(); route();
+    } }, "Save")].filter(Boolean));
+}
+
 function agentForm(a, data) {
   const isNew = !a;
-  a = a || { name: "Jarvis", kind: "claude", host: "", port: 22, username: "", workdir: "~", tmux_session: "", model: "claude-sonnet-5-5",
-    effort: "medium", permission_mode: "auto", hermes_provider: "", extra_instructions: "", mcp_remote_port: 47801, reply_timeout: 300,
-    enabled: true, autostart: true, host_key: "" };
-  let hostKey = a.host_key;
+  a = a || { name: "Jarvis", kind: (data.machines[0] || {}).agent_kind || "claude", machine_id: (data.machines[0] || {}).id || "", workdir: "~",
+    tmux_session: "", model: "claude-sonnet-5-5", effort: "medium", permission_mode: "auto", hermes_provider: "", extra_instructions: "",
+    mcp_remote_port: 47801, reply_timeout: 300, enabled: true, autostart: true };
   const servers = el("div", {}, (a.mcp_servers || []).map(serverRow));
-  const fp = el("div", { class: "hint" }, a.host_key ? `Host key confirmed: ${a.host_key_fingerprint}` : "Host key not confirmed yet.");
   const f = el("div", {},
     el("div", { class: "form2" },
       field("Name (how it introduces itself)", inp("name", a.name)),
       field("Agent", sel("kind", a.kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
-      field("SSH host", inp("host", a.host, { placeholder: "192.168.1.20" })),
-      field("SSH port", num("port", a.port)),
-      field("SSH user", inp("username", a.username)),
+      field("Machine", sel("machine_id", a.machine_id, data.machines.map(m => [m.id, `${m.name} (${m.username}@${m.host})`]))),
       field("Working directory", inp("workdir", a.workdir)),
       field("Model", inp("model", a.model), "Claude Code: e.g. claude-sonnet-5-5, sonnet, opus. Hermes: provider model name."),
       field("Effort (Claude Code)", sel("effort", a.effort, [["", "default"], ...EFFORTS])),
@@ -395,14 +442,7 @@ function agentForm(a, data) {
     el("div", { class: "row" },
       el("button", { onclick: () => servers.append(serverRow({ name: "home-assistant", url: "", description: "Home Assistant: lights, switches, covers, climate, media and sensors", enabled: true, auto_approve: true })) }, "Add Home Assistant"),
       el("button", { onclick: () => servers.append(serverRow({ name: "", url: "", description: "", enabled: true, auto_approve: true })) }, "Add other MCP server")),
-    el("div", { class: "row" }, chk("enabled", a.enabled, "Enabled"), chk("autostart", a.autostart, "Start the tmux session automatically")),
-    el("div", { class: "row" }, el("button", { onclick: async () => {
-      const d = formData(f);
-      const r = await act(() => api("POST", "/api/agents/hostkey", { host: d.host, port: d.port }));
-      if (confirm(`Trust this SSH host key for ${d.host}?\n\n${r.fingerprint}\n\nCompare it with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (on that host)`)) {
-        hostKey = r.host_key; fp.textContent = `Host key confirmed: ${r.fingerprint} (saved when you press Save)`;
-      }
-    } }, "Fetch & confirm host key"), fp));
+    el("div", { class: "row" }, chk("enabled", a.enabled, "Enabled"), chk("autostart", a.autostart, "Start the tmux session automatically")));
   modal(isNew ? "Add agent" : `Edit ${a.name}`, f, close => [el("button", { class: "primary", onclick: async () => {
     const d = formData(f);
     for (const k of Object.keys(d)) if (k.startsWith("srv_")) delete d[k];
@@ -410,71 +450,124 @@ function agentForm(a, data) {
       name: $("[data-k=name]", r).value.trim(), url: $("[data-k=url]", r).value.trim(), token: $("[data-k=token]", r).value,
       description: $("[data-k=description]", r).value, enabled: $("[data-k=enabled]", r).checked,
       auto_approve: $("[data-k=auto_approve]", r).checked })).filter(s => s.name || s.url);
-    d.host_key = hostKey;
-    if (!d.host_key) { toast("Confirm the host key first", true); return; }
     await act(() => isNew ? api("POST", "/api/agents", d) : api("PUT", `/api/agents/${a.id}`, d), "Saved");
     close(); route();
   } }, "Save")]);
 }
 
-// ---------------------------------------------------------------------------------------------- contacts
-async function contacts(main) {
+// ---------------------------------------------------------------------------------------------- connections
+const GROUPS = [["pbx", "Phone extensions", "PBX"], ["whatsapp", "WhatsApp", "wa2sip"], ["camera", "Cameras", "cam2sip"],
+  ["tmux", "tmux sessions", "machines"]];
+S.open = S.open || new Set();
+
+async function connectionsPage(main) {
   const [data, clientsCfg, agentsCfg] = await Promise.all([api("GET", "/api/contacts"), api("GET", "/api/clients"), api("GET", "/api/agents")]);
-  const filter = inp("q", "", { placeholder: "Filter…" });
-  const tbody = el("tbody");
-  const kinds = { pbx: "Extension", whatsapp: "WhatsApp", camera: "Camera" };
+  const drafts = new Map();              // id -> changed fields
+  const byId = new Map(data.contacts.map(c => [c.id, c]));
+  const filter = inp("q", "", { placeholder: "Filter all connections…" });
+  const groupsBox = el("div");
+  const counter = el("span");
+  const saveBtn = el("button", { class: "primary" }, "Save changes");
+  const discardBtn = el("button", {}, "Discard");
+  const bar = el("div", { class: "savebar hidden" }, counter, el("span", { class: "spacer" }), discardBtn, saveBtn);
+  S.dirty = () => drafts.size > 0;
+  const value = (c, k) => drafts.has(c.id) && k in drafts.get(c.id) ? drafts.get(c.id)[k] : c[k];
+  function change(c, k, v) {
+    const d = drafts.get(c.id) || {};
+    if (v === c[k]) delete d[k]; else d[k] = v;
+    if (Object.keys(d).length) drafts.set(c.id, d); else drafts.delete(c.id);
+    bar.classList.toggle("hidden", !drafts.size);
+    counter.textContent = `${drafts.size} connection${drafts.size === 1 ? "" : "s"} changed`;
+  }
+  const matches = c => { const q = filter.value.toLowerCase(); return !q || (c.alias + " " + c.name + " " + c.number + " " + c.description).toLowerCase().includes(q); };
+
+  function row(c) {
+    const text = (k, ph) => { const i = inp(k, value(c, k), { placeholder: ph }); i.addEventListener("input", () => change(c, k, i.value)); return i; };
+    const vis = el("input", { type: "checkbox", checked: value(c, "enabled"), title: "visible to agents" });
+    vis.addEventListener("change", () => change(c, "enabled", vis.checked));
+    const canCall = !c.missing && clientsCfg.clients.length;
+    return el("tr", { class: c.missing ? "gone" : "" },
+      el("td", {}, vis),
+      el("td", {}, el("div", {}, c.name), el("div", { class: "muted" }, c.source_name + (c.missing ? " · gone" : ""))),
+      el("td", {}, text("alias", c.name)),
+      el("td", { class: "hide-sm" }, text("description", c.kind === "tmux" ? "what is this session for?" : "e.g. my father")),
+      el("td", { class: "hide-sm mono" }, c.number || ""),
+      el("td", {}, ["pbx", "whatsapp"].includes(c.kind) ? inboundPicker(c, clientsCfg, agentsCfg, value, change) : ""),
+      el("td", {}, el("div", { class: "row" },
+        canCall ? el("button", { class: "small", onclick: () => callDialog(c, clientsCfg) }, c.kind === "tmux" ? "Connect" : "Call") : "",
+        c.source === "manual" || c.missing ? el("button", { class: "small danger", onclick: async () => {
+          if (confirm(`Delete ${c.alias || c.name}?`)) { await act(() => api("DELETE", `/api/contacts/${c.id}`)); drafts.delete(c.id); route(); } } }, "Delete") : "")));
+  }
+
   function draw() {
-    const q = filter.value.toLowerCase();
-    tbody.replaceChildren(...data.contacts.filter(c => !q || (c.alias + c.name + c.number + c.description).toLowerCase().includes(q)).map(c => {
-      const row = el("tr", {},
-        el("td", {}, el("div", {}, c.name), el("div", { class: "muted" }, `${kinds[c.kind]} · ${c.source_name}${c.missing ? " · gone at source" : ""}`)),
-        el("td", {}, inp("alias", c.alias, { placeholder: c.name })),
-        el("td", { class: "hide-sm" }, inp("description", c.description, { placeholder: "e.g. my father" })),
-        el("td", { class: "hide-sm mono" }, c.number || ""),
-        el("td", {}, el("input", { type: "checkbox", name: "enabled", checked: c.enabled, title: "visible to agents / callable" })),
-        el("td", {}, inboundPicker(c, clientsCfg, agentsCfg)),
-        el("td", {}, el("div", { class: "row" },
-          el("button", { class: "small primary", onclick: async () => {
-            const d = formData(row);
-            const upd = await act(() => api("PUT", `/api/contacts/${c.id}`, d), "Saved");
-            Object.assign(c, upd);
-          } }, "Save"),
-          el("button", { class: "small", onclick: () => callDialog(c, clientsCfg) }, "Call"),
-          c.source === "manual" || c.missing ? el("button", { class: "small danger", onclick: async () => { if (confirm(`Delete ${c.alias || c.name}?`)) { await act(() => api("DELETE", `/api/contacts/${c.id}`)); route(); } } }, "Delete") : "")));
-      return row;
+    groupsBox.replaceChildren(...GROUPS.map(([kind, title, src]) => {
+      const all = data.contacts.filter(c => c.kind === kind);
+      const shown = all.filter(matches);
+      const visible = all.filter(c => value(c, "enabled") && !c.missing).length;
+      const open = S.open.has(kind) || (filter.value && shown.length > 0);
+      const setAll = on => { for (const c of shown) change(c, "enabled", on); draw(); };
+      const head = el("div", { class: "row group-head" },
+        el("button", { class: "small", onclick: () => { S.open.has(kind) ? S.open.delete(kind) : S.open.add(kind); draw(); } }, open ? "▾ Collapse" : "▸ Expand"),
+        el("h2", {}, title), el("span", { class: "chip" }, `${all.length}`), el("span", { class: "muted" }, `${visible} visible to agents · from ${src}`),
+        el("span", { class: "spacer" }),
+        el("button", { class: "small", disabled: !shown.length, onclick: () => setAll(true) }, "Select all"),
+        el("button", { class: "small", disabled: !shown.length, onclick: () => setAll(false) }, "Deselect all"));
+      const body = open ? (shown.length ? el("div", { class: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["Visible", "Name", "Referred name", "Notes for the agent", "Number", "When they call", ""].map((t, i) =>
+          el("th", { class: [3, 4].includes(i) ? "hide-sm" : "" }, t)))),
+        el("tbody", {}, shown.map(row)))) : el("p", { class: "hint" }, all.length ? "Nothing matches the filter." : emptyHint(kind))) : null;
+      return el("div", { class: "card" }, head, kind === "pbx" && open ? addExtension() : null, body);
     }));
   }
+  function emptyHint(kind) {
+    return { pbx: "Add the extensions telerouter may call.", whatsapp: "Link wa2sip under Integrations.",
+      camera: "Link cam2sip under Integrations.", tmux: "Add a machine under Agents & machines; its tmux sessions appear here." }[kind];
+  }
+  function addExtension() {
+    const add = el("form", { class: "row" }, inp("name", "", { placeholder: "Name", required: true }), inp("number", "", { placeholder: "Extension, e.g. 1005", required: true }),
+      inp("alias", "", { placeholder: "Referred name (optional)" }), el("button", { type: "submit" }, "Add extension"));
+    add.addEventListener("submit", async e => { e.preventDefault(); await act(() => api("POST", "/api/contacts", formData(add)), "Added"); route(); });
+    return add;
+  }
+  saveBtn.addEventListener("click", async () => {
+    const changes = [...drafts.entries()].map(([id, d]) => ({ id, ...d }));
+    const r = await act(() => api("PUT", "/api/contacts", { changes }), "Saved");
+    for (const ch of changes) Object.assign(byId.get(ch.id), ch);
+    drafts.clear(); bar.classList.add("hidden"); draw();
+    return r;
+  });
+  discardBtn.addEventListener("click", () => { drafts.clear(); bar.classList.add("hidden"); draw(); });
   filter.addEventListener("input", draw);
-  const add = el("form", { class: "row" }, inp("name", "", { placeholder: "Name", required: true }), inp("number", "", { placeholder: "Extension, e.g. 1005", required: true }),
-    inp("alias", "", { placeholder: "Referred name (optional)" }), el("button", { class: "primary", type: "submit" }, "Add extension"));
-  add.addEventListener("submit", async e => { e.preventDefault(); await act(() => api("POST", "/api/contacts", formData(add)), "Added"); route(); });
-  main.replaceChildren(el("h1", {}, "Contacts"),
-    el("div", { class: "card" }, el("h2", {}, "PBX extensions"), el("p", { class: "hint" }, "Add the extensions of your PBX that telerouter may call. WhatsApp contacts and cameras appear here automatically from wa2sip and cam2sip (Connections)."), add),
-    el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "All contacts"), el("span", { class: "spacer" }), filter),
-      el("p", { class: "hint" }, "The referred name is what the agent sees and what you say (\"call dad\"). Untick a contact to hide it from agents. Inbound: what happens when this contact calls telerouter."),
-      el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["Contact", "Referred name", "Notes for the agent", "Number", "Visible", "Inbound calls", ""].map((t, i) => el("th", { class: [2, 3].includes(i) ? "hide-sm" : "" }, t)))), tbody))));
+  main.replaceChildren(el("h1", {}, "Connections"),
+    el("p", { class: "hint" }, "Everything telerouter can connect you to. The referred name is what the agent sees and what you say (\"call dad\", \"connect me to the wa_logger tmux\"). Only ticked connections are visible to agents. Changes are saved together with the button at the bottom."),
+    el("div", { class: "row" }, filter), groupsBox, bar);
   draw();
 }
 
-function inboundPicker(c, clientsCfg, agentsCfg) {
-  const policy = sel("inbound", c.inbound, [["default", "default"], ["agent", "talk to agent"], ["client", "ring speaker"], ["reject", "reject"]]);
-  const speaker = sel("inbound_client", c.inbound_client, [["", "which speaker?"], ...clientsCfg.clients.map(x => [x.id, x.name])]);
-  const agent = agentsCfg.agents.length > 1 ? sel("inbound_agent", c.inbound_agent, [["", "default agent"], ...agentsCfg.agents.map(x => [x.id, x.name])]) : null;
+function inboundPicker(c, clientsCfg, agentsCfg, value, change) {
+  const policy = sel("inbound", value(c, "inbound"), [["default", "default"], ["agent", "talk to agent"], ["client", "ring speaker"], ["reject", "reject"]]);
+  const speaker = sel("inbound_client", value(c, "inbound_client"), [["", "which speaker?"], ...clientsCfg.clients.map(x => [x.id, x.name])]);
+  const agent = agentsCfg.agents.length > 1 ? sel("inbound_agent", value(c, "inbound_agent"), [["", "default agent"], ...agentsCfg.agents.map(x => [x.id, x.name])]) : null;
   const sync = () => { speaker.classList.toggle("hidden", policy.value !== "client"); if (agent) agent.classList.toggle("hidden", policy.value !== "agent"); };
-  policy.addEventListener("change", sync);
+  policy.addEventListener("change", () => { change(c, "inbound", policy.value); sync(); });
+  speaker.addEventListener("change", () => change(c, "inbound_client", speaker.value));
+  if (agent) agent.addEventListener("change", () => change(c, "inbound_agent", agent.value));
   sync();
   return el("div", {}, policy, speaker, agent);
 }
 
 function callDialog(c, clientsCfg) {
   const s = sel("client", "", clientsCfg.clients.map(x => [x.id, x.name]));
-  modal(`Call ${c.alias || c.name}`, el("div", {}, field("Connect to speaker", s)), close => [el("button", { class: "primary", onclick: async () => {
-    await act(() => api("POST", `/api/contacts/${c.id}/call`, { client_id: s.value }), "Calling…"); close();
-  } }, "Call")]);
+  const tmux = c.kind === "tmux";
+  modal(`${tmux ? "Connect to" : "Call"} ${c.alias || c.name}`, el("div", {}, field("Speaker", s),
+    tmux ? el("p", { class: "hint" }, "The speaker then talks to this session (after the wake word) until you say \"back to Jarvis\".") : null),
+    close => [el("button", { class: "primary", onclick: async () => {
+      await act(() => api("POST", `/api/contacts/${c.id}/call`, { client_id: s.value }), tmux ? "Connected" : "Calling…"); close();
+    } }, tmux ? "Connect" : "Call")]);
 }
 
-// ---------------------------------------------------------------------------------------------- connections
-async function connections(main) {
+// ---------------------------------------------------------------------------------------------- integrations
+async function integrations(main) {
   const [pbx, integ, st, settings] = await Promise.all([api("GET", "/api/pbx"), api("GET", "/api/integrations"), api("GET", "/api/status"), api("GET", "/api/settings")]);
   const pf = el("div", { class: "form2" },
     field("PBX host", inp("host", pbx.host, { placeholder: "192.168.1.10" })), field("SIP port (UDP)", num("port", pbx.port)),
@@ -504,7 +597,7 @@ async function connections(main) {
     const i = integ.integrations.filter(x => x.kind === "wa2sip")[n];
     await act(() => api("PUT", `/api/integrations/${i.id}`, { inbound: cb.checked }), "Saved");
   }));
-  main.replaceChildren(el("h1", {}, "Connections"), pbxCard,
+  main.replaceChildren(el("h1", {}, "Integrations"), pbxCard,
     el("div", { class: "card" }, el("h2", {}, "wa2sip and cam2sip"),
       el("p", { class: "hint" }, "Link your wa2sip (WhatsApp calls) and cam2sip (camera intercom) instances. In their web UI open Settings → Integrations, create a telerouter token and paste it here. telerouter then lists their WhatsApp contacts and cameras, calls them directly over SIP (no PBX needed), and wa2sip can ring telerouter for incoming WhatsApp calls."),
       el("button", { class: "primary", onclick: () => integrationForm(null) }, "Add wa2sip / cam2sip")), list);
@@ -626,7 +719,7 @@ async function mcp(main) {
 }
 
 // ---------------------------------------------------------------------------------------------- history / logs / account
-async function history(main) {
+async function historyPage(main) {
   const d = await api("GET", "/api/history");
   main.replaceChildren(el("h1", {}, "History"), el("div", { class: "card" },
     d.history.length ? el("table", {}, el("tr", {}, ["When", "Call", "Mode", "Result", "Duration"].map(t => el("th", {}, t))),

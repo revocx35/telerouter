@@ -16,8 +16,10 @@ telerouter, through MCP, to call him on WhatsApp, and the call is connected to t
   (call telerouter from your phone and talk to your agent), or to another call.
 - **MCP server**: your agent, or any other MCP client, gets tools to list contacts, call people, leave
   phone messages, talk on calls and announce things on speakers.
-- **One contact list**: your PBX extensions, WhatsApp contacts and cameras with the names *you* use
-  ("referred name": what the agent sees and what you say).
+- **Connections**: your PBX extensions, WhatsApp contacts, cameras and **tmux sessions** (your own Claude
+  Code sessions on your machines), grouped, with the names *you* use ("referred name": what the agent sees
+  and what you say). *"Connect me to the wa_logger tmux"* switches your speaker or phone call to that session
+  until you say *"back to Jarvis"*.
 
 Secure by default: no default password (setup code), argon2id, lockout, optional TOTP, CSRF, strict CSP,
 HTTPS everywhere with certificate pinning, tokens stored as hashes, scoped MCP tokens, hardened containers.
@@ -46,7 +48,8 @@ services listen on `127.0.0.1` only.
 
 ## Set it up
 
-1. **Agents** → copy telerouter's SSH public key into `~/.ssh/authorized_keys` of the user that runs your
+1. **Agents & machines** → add the **machine** (SSH host, user, host key, the agent type you run there:
+   Claude Code or Hermes); its tmux sessions appear under Connections → tmux. Then copy telerouter's SSH public key into `~/.ssh/authorized_keys` of the user that runs your
    agent (add `from="<telerouter IP>"` in front to pin it to telerouter). That host needs `tmux` and the
    agent installed and logged in (`claude` once by hand, or `hermes setup`). *Add agent*: host, user,
    *Fetch & confirm host key*, model (`claude-sonnet-5-5`), effort (`medium`), permission mode. telerouter
@@ -54,12 +57,13 @@ services listen on `127.0.0.1` only.
 2. **Speakers** → *Add speaker*, then run the shown command on the Linux/macOS machine (as the desktop
    user). It installs the client into `~/.local/share/telerouter-client` and starts it as a user service.
    Linux needs `python3-venv` and `libportaudio2`. Check audio with `telerouter-client test-audio`.
-3. **Connections** → your PBX extension (e.g. a new FreePBX extension for telerouter; enable *Trust
+3. **Integrations** → your PBX extension (e.g. a new FreePBX extension for telerouter; enable *Trust
    RPID/PAI*). For WhatsApp and cameras: in wa2sip/cam2sip open *Settings → Integrations*, create a token,
    then here *Add wa2sip / cam2sip* with its HTTPS address, the token, and *Fetch & pin certificate*.
-4. **Contacts** → add the PBX extensions telerouter may call; WhatsApp contacts and cameras appear by
-   themselves. Give them referred names ("dad", "front door") and decide what happens when they call
-   telerouter (talk to the agent, ring a speaker, reject).
+4. **Connections** → add the PBX extensions telerouter may call; WhatsApp contacts, cameras and tmux
+   sessions appear by themselves, one collapsible group each. *Deselect all* and tick only what agents may
+   see, give referred names ("dad", "front door"), decide what happens when a contact calls telerouter, then
+   **Save changes** once.
 5. **Voice & calls** → wake word (Hey Jarvis, Alexa, Okay Nabu, Hey Mycroft, Hey Rhasspy, or your own
    `.tflite` in `wake-models/`), language, voice, timeouts.
 

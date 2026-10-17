@@ -57,7 +57,8 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
 
 
 S = {"type": "string"}
-KIND_WORDS = {"pbx": "extension phone desk", "whatsapp": "whatsapp wa mobile", "camera": "camera cameras cam intercom door"}
+KIND_WORDS = {"pbx": "extension phone desk", "whatsapp": "whatsapp wa mobile", "camera": "camera cameras cam intercom door",
+              "tmux": "tmux session terminal project agent claude code"}
 
 
 class McpServer:
@@ -128,7 +129,7 @@ class McpServer:
               "List the people/places you may call: referred name, kind (pbx = phone extension, whatsapp, camera), "
               "notes. Filter by kind and/or text (matches names, notes and the kind).",
               _obj({"query": {**S, "description": "optional filter text"},
-                    "kind": {"type": "string", "enum": ["pbx", "whatsapp", "camera"]}}))
+                    "kind": {"type": "string", "enum": ["pbx", "whatsapp", "camera", "tmux"]}}))
         async def list_contacts(tok, query: str = "", kind: str = ""):
             q = query.lower().strip()
             out = []
@@ -157,7 +158,9 @@ class McpServer:
 
         @tool("connect_call", "calls",
               "Call a contact and connect them for a live conversation with a person: by default the speaker the "
-              "current voice request came from (or the phone caller who asked). Returns when the call is dialing.",
+              "current voice request came from (or the phone caller who asked). Returns when the call is dialing. "
+              "For a tmux contact (an agent session on a machine) the person is switched to talk to that session "
+              "until they say 'back to <your name>'.",
               _obj({"contact": {**S, "description": "referred name or id"},
                     "speaker": {**S, "description": "speaker name/id; omit to use the requesting speaker"}},
                    ["contact"]))
@@ -165,6 +168,8 @@ class McpServer:
             e = self.engine
             c = self._find_contact(tok, contact)
             src = self._source(tok)
+            if c.kind == "tmux":
+                return self._connect_tmux(tok, c, src, speaker)
             if speaker:
                 conn = self._find_speaker(tok, speaker)
             elif src and src.kind == "speaker" and src.client_id:
@@ -290,6 +295,29 @@ class McpServer:
             except RuntimeError as ex:
                 raise ToolError(str(ex)) from ex
             return {"heard": heard}
+
+    def _connect_tmux(self, tok: McpToken, c: Contact, src, speaker: str) -> dict:
+        e = self.engine
+        try:
+            route = e.route_for(c)
+        except ValueError as ex:
+            raise ToolError(str(ex)) from ex
+        agent = e.store.agent(tok.agent_id) if tok.agent_id else None
+        back = f"back to {agent.name}" if agent else "back"
+        if speaker or (src and src.kind == "speaker"):
+            conn = self._find_speaker(tok, speaker) if speaker else e.clients.get(src.client_id)
+            if not conn:
+                raise ToolError("the requesting speaker went offline")
+            conn.route = route                 # type: ignore[attr-defined]
+            where = f"the {conn.name} speaker"
+        elif src and src.kind == "phone" and src.call_id and e.calls.get(src.call_id):
+            e.calls.get(src.call_id).route = route   # type: ignore[union-attr]
+            where = "this phone call"
+        else:
+            raise ToolError("which speaker? (no voice request in progress; pass speaker)")
+        return {"connected": c.label, "where": where,
+                "note": f"From the next sentence on, the person talks to the {c.label} session directly. Tell them "
+                        f"in a few words, and that saying '{back}' returns to you."}
 
     def _own_agent(self, tok: McpToken):
         rt = self.engine.agents.get(tok.agent_id) if tok.agent_id else None

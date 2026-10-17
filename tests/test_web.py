@@ -190,7 +190,8 @@ def test_password_change_logs_out_other_sessions(app, c):
 def test_agent_extra_mcp_token_is_write_only(c):
     csrf = setup_admin(c)
     h = {"X-CSRF-Token": csrf}
-    a = c.post("/api/agents", json={"name": "Jarvis", "host": "10.0.0.9", "username": "me",
+    m = c.post("/api/machines", json={"name": "box", "host": "10.0.0.9", "username": "me"}, headers=h).json()
+    a = c.post("/api/agents", json={"name": "Jarvis", "machine_id": m["id"],
                                     "mcp_servers": [{"name": "home-assistant", "url": "https://ha.lan/api/mcp",
                                                      "token": "secret-llat"}]}, headers=h).json()
     assert a["mcp_servers"][0]["token"] == "" and a["mcp_servers"][0]["token_set"] is True
@@ -204,3 +205,30 @@ def test_agent_extra_mcp_token_is_write_only(c):
     bad = c.put(f"/api/agents/{a['id']}", json={"mcp_servers": [{"name": "ha", "url": "http://ha.lan:8123/api/mcp"}]},
                 headers=h)
     assert bad.status_code == 422
+
+
+def test_bulk_contact_save_is_all_or_nothing(c):
+    csrf = setup_admin(c)
+    h = {"X-CSRF-Token": csrf}
+    a = c.post("/api/contacts", json={"name": "Desk", "number": "1005"}, headers=h).json()
+    b = c.post("/api/contacts", json={"name": "Echo", "number": "*43"}, headers=h).json()
+    r = c.put("/api/contacts", json={"changes": [{"id": a["id"], "alias": "dad", "enabled": False},
+                                                 {"id": b["id"], "description": "x" * 500}]}, headers=h)
+    assert r.status_code == 422
+    assert c.app.state.store.config.contacts[0].alias == ""                  # nothing applied
+    r = c.put("/api/contacts", json={"changes": [{"id": a["id"], "alias": "dad", "enabled": False, "kind": "tmux"},
+                                                 {"id": b["id"], "description": "echo line"}]}, headers=h)
+    assert r.json() == {"saved": 2}
+    cs = c.app.state.store.config.contacts
+    assert (cs[0].alias, cs[0].enabled, cs[0].kind, cs[1].description) == ("dad", False, "pbx", "echo line")
+
+
+def test_agents_need_a_machine(c):
+    csrf = setup_admin(c)
+    h = {"X-CSRF-Token": csrf}
+    assert c.post("/api/agents", json={"name": "J"}, headers=h).status_code == 422
+    m = c.post("/api/machines", json={"name": "box", "host": "10.0.0.9", "username": "me", "host_key": "ssh-ed25519 AAAA"},
+               headers=h).json()
+    a = c.post("/api/agents", json={"name": "J", "machine_id": m["id"], "host": "evil", "host_key": "x"}, headers=h).json()
+    assert a["host"] == "10.0.0.9" and a["machine_id"] == m["id"]              # SSH target only from the machine
+    assert c.delete(f"/api/machines/{m['id']}", headers=h).status_code == 409

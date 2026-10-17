@@ -9,10 +9,11 @@ import socket
 import time
 from urllib.parse import urlsplit
 
+from .agents.machine import MachineRuntime
 from .agents.runtime import AgentRuntime
 from .agents.ssh import SshKeys
 from .media.rtp import PortAllocator
-from .models import Agent, Contact, Integration
+from .models import Agent, Contact, Integration, Machine
 from .router.calls import CallManager, digits
 from .router.integrations import IntegrationClient, IntegrationError
 from .settings import Settings
@@ -52,6 +53,8 @@ class Engine:
         self.calls = CallManager(self)
         self.ua.on_incoming = self.calls.on_incoming
         self.agent_rts: dict[str, AgentRuntime] = {}
+        self.machine_rts: dict[str, MachineRuntime] = {}
+        self._machine_sigs: dict[str, tuple] = {}
         self._agent_sigs: dict[str, tuple[tuple, tuple]] = {}
         self.integ_clients: dict[str, IntegrationClient] = {}
         self._addr_cache: dict[str, tuple[float, set[str]]] = {}
@@ -98,6 +101,7 @@ class Engine:
             if s.task:
                 s.task.cancel()
         await asyncio.gather(*(rt.stop() for rt in self.agent_rts.values()), return_exceptions=True)
+        await asyncio.gather(*(rt.stop() for rt in self.machine_rts.values()), return_exceptions=True)
         for c in self.integ_clients.values():
             await c.close()
         await self.ua.stop()
@@ -115,10 +119,87 @@ class Engine:
         self.ua.direct_accounts["inbound"] = Account(self.ua, AccountConfig(
             id="inbound", server="0.0.0.0", port=5060, username="telerouter", password="",
             contact_user=cfg.inbound_secret))
+        self._sync_agent_machines()
+        await self._apply_machines()
         await self._apply_agents()
         await self._apply_integrations()
         self.voice.refresh_wake_words()
         self._sync_now.set()
+
+    def _sync_agent_machines(self) -> None:
+        """An agent's SSH target comes from its machine."""
+        for a in self.store.config.agents:
+            m = self.store.machine(a.machine_id)
+            if m:
+                a.host, a.port, a.username = m.host, m.port, m.username
+                a.host_key = m.host_key if m.enabled else ""
+
+    async def _apply_machines(self) -> None:
+        cfg = self.store.config
+        wanted = {m.id: m for m in cfg.machines if m.enabled and m.host_key}
+        for mid in list(self.machine_rts):
+            m = wanted.get(mid)
+            sig = (m.host, m.port, m.username, m.host_key) if m else None
+            if not m or self._machine_sigs.get(mid) != sig:
+                rt = self.machine_rts.pop(mid)
+                self._machine_sigs.pop(mid, None)
+                await rt.stop()
+        for m in wanted.values():
+            rt = self.machine_rts.get(m.id)
+            if rt is None:
+                rt = MachineRuntime(self, m)
+                self.machine_rts[m.id] = rt
+                self._machine_sigs[m.id] = (m.host, m.port, m.username, m.host_key)
+                rt.start()
+            else:
+                rt.machine = m
+                rt.refresh()
+        for c in cfg.contacts:                   # sessions of removed/disabled machines are gone
+            if c.kind == "tmux" and c.source not in wanted and not c.missing:
+                c.missing = True
+
+    def route_for(self, contact: Contact):
+        from .agents.machine import Route
+        if contact.kind != "tmux":
+            raise ValueError("not a tmux session")
+        if contact.source not in self.machine_rts:
+            raise ValueError("that machine is not connected")
+        return Route(contact.source, contact.source_ref, contact.label)
+
+    async def ask_route(self, route, text: str, label: str) -> str:
+        """Send what was said to the routed tmux session; its answer (or a spoken error)."""
+        from .agents.runtime import AgentError
+        rt = self.machine_rts.get(route.machine_id)
+        route.last = time.time()
+        if not rt:
+            return f"The machine of {route.label} is not connected."
+        try:
+            reply = await rt.ask(route.session, text, label)
+        except AgentError as e:
+            return f"Sorry, {e}."
+        route.last = time.time()
+        return reply
+
+    def merge_tmux_sessions(self, m: Machine, sessions: list[dict]) -> None:
+        cfg = self.store.config
+        mine = {c.source_ref: c for c in cfg.contacts if c.kind == "tmux" and c.source == m.id}
+        names = {s["name"] for s in sessions}
+        changed = False
+        for s in sessions:
+            c = mine.get(s["name"])
+            if c is None:
+                cfg.contacts.append(Contact(kind="tmux", source=m.id, source_ref=s["name"], name=s["name"],
+                                            description=f"{m.agent_kind} session in {s['path']}"[:200]))
+                changed = True
+            elif c.missing:
+                c.missing = False
+                changed = True
+        for ref, c in mine.items():
+            if ref not in names and not c.missing:
+                c.missing = True
+                changed = True
+        if changed:
+            self.store.save()
 
     async def _apply_agents(self) -> None:
         cfg = self.store.config
@@ -298,6 +379,7 @@ class Engine:
             "pbx": pbx.status() if pbx else {"state": "disabled"},
             "clients": [c.info() for c in self.clients.values()],
             "agents": {aid: rt.info() for aid, rt in self.agent_rts.items()},
+            "machines": {mid: rt.info() for mid, rt in self.machine_rts.items()},
             "calls": self.calls.info(),
             "integrations": {i.id: {"last_sync": i.last_sync, "last_error": i.last_error}
                              for i in cfg.integrations},

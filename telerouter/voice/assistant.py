@@ -217,6 +217,22 @@ class VoiceAssistant:
     async def _ask_agent(self, conn: ClientConn, text: str) -> str | None:
         e = self.engine
         agent = e.store.agent_for_client(conn.client)
+        route = getattr(conn, "route", None)
+        if route is not None and route.expired():
+            conn.route = route = None              # type: ignore[attr-defined]
+        if route is not None:
+            from ..agents.machine import is_exit
+            if is_exit(text, agent.name if agent else ""):
+                conn.route = None                  # type: ignore[attr-defined]
+                return f"Back to {agent.name if agent else 'your assistant'}."
+            conn.set_state("thinking")
+            ticker = asyncio.create_task(self._think_ticks(conn))
+            try:
+                reply = await e.ask_route(route, text, f"{conn.name} speaker")
+            finally:
+                ticker.cancel()
+            conn.last_reply = reply
+            return reply
         rt = e.agents.get(agent.id) if agent else None
         if not agent or not rt:
             await self.say_error(conn, "No assistant is set up yet.")
