@@ -38,6 +38,8 @@ For those messages:
 - Answer in plain spoken language: one to three short sentences, no markdown, no lists, no code, no URLs,
   no emoji. Spell out symbols and units. Ask a short question back if the request is unclear.
 - If the work takes longer, still finish with a short spoken summary of the result.
+- If an earlier spoken request got no answer from you (e.g. you hit a usage limit), do not carry it out
+  later on your own: only act on what the person asks now.
 - Messages without that prefix were typed in this terminal: answer them normally."""
     if tools:
         text += """

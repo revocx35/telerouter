@@ -94,6 +94,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   then Enter works in Claude Code 2.1.302. `/compact` keeps the session id (SessionStart source "compact");
   `/clear` starts a new session id (SessionStart source "clear"), which `AgentRuntime._track` stores as
   `session_uuid` so restarts `--resume` the cleared conversation. The reset waits for the turn's Stop hook.
+- **Claude Code ends some turns without the Stop hook**: on a subscription usage limit it prints "You've hit
+  your session limit · resets …" and ends the turn (transcript: assistant text + `system`/`turn_duration`).
+  `AgentRuntime._watch_turn_end` tails the transcript during a voice request and answers with that text,
+  instead of leaving the caller waiting for `reply_timeout`.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 ## Status (v0.1.0, 2026-10-17)

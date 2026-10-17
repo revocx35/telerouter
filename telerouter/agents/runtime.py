@@ -51,6 +51,7 @@ class Pending:
     source: Source
     future: asyncio.Future
     session_id: str = ""            # agent session that accepted the prompt (Claude UserPromptSubmit)
+    transcript: str = ""            # Claude: transcript file of that session
     started: float = field(default_factory=time.time)
 
 
@@ -341,7 +342,12 @@ class AgentRuntime:
             self.log.append(entry)
             try:
                 await self._type(prompt)
-                reply = await asyncio.wait_for(fut, a.reply_timeout)
+                watch = asyncio.create_task(self._watch_turn_end(self.pending)) if a.kind == "claude" else None
+                try:
+                    reply = await asyncio.wait_for(fut, a.reply_timeout)
+                finally:
+                    if watch:
+                        watch.cancel()
                 entry["reply"] = reply
                 return reply
             except TimeoutError as e:
@@ -395,6 +401,7 @@ class AgentRuntime:
             if name == "UserPromptSubmit":
                 if f"#{p.nonce}" in str(ev.get("prompt") or ""):
                     p.session_id = str(ev.get("session_id") or "")
+                    p.transcript = str(ev.get("transcript_path") or "")
             elif name == "Stop" and p.session_id and ev.get("session_id") == p.session_id:
                 if ev.get("stop_hook_active"):
                     return
@@ -479,6 +486,26 @@ class AgentRuntime:
             log.info("[%s] context %s done", self.agent.name, mode)
             await asyncio.sleep(3 if mode == "clear" else 30)   # /compact takes a while
 
+    async def _watch_turn_end(self, p: Pending) -> None:
+        """Claude ends some turns without the Stop hook (usage limit, API errors). Watch the transcript for
+        the turn's end and answer with what Claude printed, instead of waiting for the reply timeout."""
+        while not p.future.done():
+            await asyncio.sleep(3)
+            if not p.transcript or not re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", p.transcript):
+                continue
+            try:
+                out = await self._sh(f"tail -n 120 {ssh.q(p.transcript)}", timeout=10)
+            except Exception:
+                continue
+            reply = turn_end_without_stop(out, p.nonce)
+            if reply is None:
+                continue
+            await asyncio.sleep(2)                      # give a late Stop hook its chance
+            if not p.future.done():
+                log.warning("[%s] the turn ended without a Stop hook: %s", self.agent.name, reply[:120])
+                p.future.set_result(reply or "Sorry, I stopped without an answer.")
+            return
+
     async def _last_reply_from_transcript(self, path: str) -> str:
         """Fallback for Claude Code versions whose Stop hook has no last_assistant_message."""
         if not path or not re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path):
@@ -515,3 +542,30 @@ def _paths() -> str:
 def _short(e: BaseException) -> str:
     s = str(e) or e.__class__.__name__
     return s if len(s) < 300 else s[:300] + "..."
+
+
+def turn_end_without_stop(transcript_tail: str, nonce: str) -> str | None:
+    """If the turn that started with our prompt (nonce) has ended in the transcript, the assistant text it
+    produced (maybe ""); None while it is still running."""
+    seen, text, ended = False, "", False
+    for line in transcript_tail.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        m = e.get("message") or {}
+        if e.get("type") == "user" and isinstance(m.get("content"), str):
+            if f"#{nonce}" in m["content"]:
+                seen, text, ended = True, "", False
+            elif seen:
+                return None if not ended else text        # a newer prompt: ours ended before it
+            continue
+        if not seen:
+            continue
+        if e.get("type") == "assistant":
+            for b in m.get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                    text = b["text"]
+        elif e.get("type") == "system" and e.get("subtype") == "turn_duration":
+            ended = True
+    return text if seen and ended else None

@@ -252,3 +252,16 @@ async def test_context_size_is_measured_after_each_turn():
     await rt._on_event({"hook_event_name": "Stop", "session_id": "u-1", "transcript_path": "/r/.claude/x.jsonl"})
     await asyncio.sleep(0.05)
     assert rt.context_tokens == 111100
+
+
+def test_turn_end_without_stop_hook_is_noticed():
+    from telerouter.agents.runtime import turn_end_without_stop
+    L = lambda **e: json.dumps(e)  # noqa: E731
+    prompt = L(type="user", message={"content": "[telerouter #ab12 · phone] Turn on the lights."})
+    limit = L(type="assistant", message={"content": [{"type": "text", "text": "You've hit your session limit · resets 7:10pm"}]})
+    end = L(type="system", subtype="turn_duration", durationMs=705)
+    assert turn_end_without_stop("\n".join([prompt, limit]), "ab12") is None            # still running
+    assert turn_end_without_stop("\n".join([prompt, limit, end]), "ab12").startswith("You've hit")
+    other = L(type="user", message={"content": "[telerouter #zz99] later"})
+    assert turn_end_without_stop("\n".join([prompt, end, other, limit, end]), "ab12") == ""
+    assert turn_end_without_stop("\n".join([limit, end]), "ab12") is None                # not our prompt
