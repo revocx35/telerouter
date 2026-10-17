@@ -139,13 +139,28 @@ sleep 3
 
     def dialog_keys(self, screen: str) -> list[str] | None:
         s = screen.lower()
-        if "trust the files in this folder" in s or "trust this folder" in s:
-            return ["Enter"]
+        if "trust this folder" in s or "trust the files in this folder" in s:
+            return menu_keys(screen, "yes, i trust") or menu_keys(screen, "yes, proceed") or menu_keys(screen, "yes")
         if "bypass permissions mode" in s and "yes, i accept" in s:
-            return ["Down", "Enter"]
+            return menu_keys(screen, "yes, i accept")
         if "auto mode" in s and "yes, enable" in s:
-            return ["Enter"]
+            return menu_keys(screen, "yes, enable")
         return None
+
+
+def menu_keys(screen: str, target: str) -> list[str]:
+    """Keys that move a TUI menu's cursor (the line with ❯) to the option containing `target`, then Enter.
+
+    Claude Code's menus put one option per line; which option is preselected differs between versions
+    (the workspace-trust dialog preselects "No, exit"), so never just press Enter.
+    """
+    lines = screen.splitlines()
+    sel = next((i for i, ln in enumerate(lines) if "\u276f" in ln or ln.lstrip().startswith(">")), None)
+    tgt = next((i for i, ln in enumerate(lines) if target in ln.lower()), None)
+    if sel is None or tgt is None:
+        return ["Enter"] if tgt is not None else []
+    d = tgt - sel
+    return (["Down"] * d if d > 0 else ["Up"] * -d) + ["Enter"]
 
 
 class HermesDriver(Driver):
