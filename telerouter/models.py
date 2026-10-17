@@ -166,6 +166,40 @@ class Enrollment(BaseModel):
     expires: float
 
 
+class ExtraMcpServer(BaseModel):
+    """Another MCP server the agent gets (e.g. Home Assistant's /api/mcp), next to telerouter's own."""
+    name: str                          # tool prefix for the agent, e.g. "home-assistant"
+    url: str                           # https://... (plain http only on loopback)
+    token: str = ""                    # sent as "Authorization: Bearer <token>"; write-only in the API
+    description: str = ""              # what it is for, told to the agent ("lights, switches, sensors")
+    enabled: bool = True
+    auto_approve: bool = True          # allow its tools without permission prompts (voice can't answer them)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not re.match(r"^[a-z0-9][a-z0-9_-]{0,31}$", v) or v == "telerouter":
+            raise ValueError("lower-case letters, digits, - and _ (not 'telerouter')")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^(https://[A-Za-z0-9.\-\[\]:]+|http://(127\.0\.0\.1|localhost)(:\d+)?)(/[A-Za-z0-9._~/%-]*)?$", v):
+            raise ValueError("must be an https:// URL (plain http only for 127.0.0.1)")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _desc(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) > 300:
+            raise ValueError("max 300 characters")
+        return v
+
+
 AgentKind = Literal["claude", "hermes"]
 
 
@@ -190,6 +224,15 @@ class Agent(BaseModel):
     session_uuid: str = ""            # Claude Code --session-id (kept across restarts with --resume)
     mcp_token_id: str = ""
     reply_timeout: int = Field(default=300, ge=10, le=3600)
+    mcp_servers: list[ExtraMcpServer] = Field(default_factory=list, max_length=10)
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _unique(cls, v: list[ExtraMcpServer]) -> list[ExtraMcpServer]:
+        names = [s.name for s in v]
+        if len(names) != len(set(names)):
+            raise ValueError("MCP server names must be unique")
+        return v
 
     @field_validator("name")
     @classmethod

@@ -87,6 +87,9 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   `drivers.menu_keys()` moves the `❯` cursor to the wanted option first.
 - PBX numbers are dialed exactly as entered: feature codes keep `*`/`#` (`*43` is FreePBX's echo test, a safe
   live target). Stripping non-digits dialed "43".
+- Home Assistant's MCP server (`/api/mcp`) answers 404 until the "Model Context Protocol Server"
+  integration is added in HA; it accepts a long-lived access token as Bearer. Extra MCP servers are agent
+  settings (`Agent.mcp_servers`), not telerouter tools.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 ## Status (v0.1.0, 2026-10-17)

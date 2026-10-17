@@ -65,6 +65,21 @@ services listen on `127.0.0.1` only.
 
 Then say *"Hey Jarvis"*: a blip means it listens, a second blip means it got you.
 
+## Home Assistant (lights, switches, …)
+
+Give your agent Home Assistant's own tools:
+
+1. In Home Assistant: **Settings → Devices & services → Add integration → Model Context Protocol Server**,
+   and expose the devices you want to control (**Settings → Voice assistants → Expose**).
+2. Your HA profile → **Security → Long-lived access tokens → Create token** (an admin user, or turn off
+   *Require an administrator account* in the MCP Server options).
+3. In telerouter: **Agents → Edit → Extra MCP servers → Add Home Assistant**: URL
+   `https://<your HA>/api/mcp`, the token. Save: the agent session restarts with HA's tools.
+
+Then *"Hey Jarvis, turn off the kitchen lights"*. Any other MCP server (HTTPS + bearer token) works the same
+way. Tokens are write-only in the UI; telerouter writes them only into the agent's own `mcp.json` (0600) on
+the agent host.
+
 ## Use telerouter from other agents (MCP)
 
 *MCP access* → *New token* (choose scopes and which contacts/speakers it may use). For Claude Code:

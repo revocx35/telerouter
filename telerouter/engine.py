@@ -34,7 +34,7 @@ def _conn_sig(a: Agent) -> tuple:
 
 def _launch_sig(a: Agent) -> tuple:
     return (a.model, a.effort, a.permission_mode, a.workdir, a.extra_instructions, a.hermes_provider,
-            a.tmux_session, a.name)
+            a.tmux_session, a.name, tuple(s.model_dump_json() for s in a.mcp_servers))
 
 
 class Engine:

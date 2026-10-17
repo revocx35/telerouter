@@ -155,6 +155,12 @@ installer creates a systemd user service (Linux) or a launchd agent (macOS).
 | MCP | `mcp.json` (0600) with a per-start `trm_` token; `permissions.allow: mcp__telerouter` | `mcp_servers.telerouter` in config.yaml |
 | voice rules | `--append-system-prompt` | appended to each request |
 
+**Extra MCP servers** (`Agent.mcp_servers`, e.g. Home Assistant's `/api/mcp`): added to Claude's
+`mcp.json` (with `permissions.allow: mcp__<name>` when auto-approve is on) or to Hermes' `mcp_servers`
+(telerouter remembers which names it added in `hermes-managed.json` and removes them again). HTTPS only
+(plain http only for 127.0.0.1), bearer token write-only in the API; the voice instructions list them and tell
+the agent to use them directly for smart-home requests.
+
 **Correlation**: each request carries a nonce (`[telerouter #a1b2 · Kitchen speaker] ...`). Claude: the
 UserPromptSubmit event whose `prompt` contains the nonce names the session; the next Stop of that
 session is the answer. Hermes: the `post_llm_call` whose `user_message` contains the nonce. Turns typed by

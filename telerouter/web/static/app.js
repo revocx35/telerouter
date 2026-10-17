@@ -324,6 +324,7 @@ async function agents(main) {
         el("span", { class: "chip" }, rt ? rt.state : (a.enabled ? "host key not confirmed" : "disabled")), cfgId(a), el("span", { class: "spacer" }),
         el("button", { onclick: () => agentForm(a, data) }, "Edit")),
       rt && rt.error ? el("p", { class: "err" }, rt.error) : null,
+      (a.mcp_servers || []).length ? el("p", { class: "hint" }, "Extra MCP: ", a.mcp_servers.map(s => s.name + (s.enabled ? "" : " (off)")).join(", ")) : null,
       el("p", { class: "hint" }, `${a.username}@${a.host}:${a.port} · ${a.workdir} · tmux ${a.tmux_session || "telerouter-" + a.id}`,
         a.kind === "claude" ? ` · model ${a.model || "default"} · effort ${a.effort || "default"} · permissions ${a.permission_mode}` : ` · model ${a.model || "default"}`),
       rt ? copyBox(rt.attach) : null,
@@ -345,6 +346,23 @@ async function agents(main) {
     list.append(card);
   }
 }
+function serverRow(s) {
+  const tok = el("input", { type: "password", "data-k": "token", autocomplete: "new-password",
+    placeholder: s.token_set ? "(unchanged)" : "token (e.g. HA long-lived access token)" });
+  const row = el("div", { class: "card" },
+    el("div", { class: "form2" },
+      field("Name (tool prefix)", el("input", { type: "text", "data-k": "name", value: s.name, placeholder: "home-assistant" })),
+      field("URL", el("input", { type: "text", "data-k": "url", value: s.url, placeholder: "https://ha.example.com/api/mcp" })),
+      field("Token", tok),
+      field("What it is for (told to the agent)", el("input", { type: "text", "data-k": "description", value: s.description }))),
+    el("div", { class: "row" },
+      el("label", { class: "chk" }, el("input", { type: "checkbox", "data-k": "enabled", checked: s.enabled }), "Enabled"),
+      el("label", { class: "chk" }, el("input", { type: "checkbox", "data-k": "auto_approve", checked: s.auto_approve }), "Use its tools without permission prompts"),
+      el("span", { class: "spacer" }),
+      el("button", { class: "small danger", onclick: () => row.remove() }, "Remove")));
+  return row;
+}
+
 function cfgId(a) { return el("span", { class: "muted mono" }, a.id); }
 
 function agentForm(a, data) {
@@ -353,6 +371,7 @@ function agentForm(a, data) {
     effort: "medium", permission_mode: "auto", hermes_provider: "", extra_instructions: "", mcp_remote_port: 47801, reply_timeout: 300,
     enabled: true, autostart: true, host_key: "" };
   let hostKey = a.host_key;
+  const servers = el("div", {}, (a.mcp_servers || []).map(serverRow));
   const fp = el("div", { class: "hint" }, a.host_key ? `Host key confirmed: ${a.host_key_fingerprint}` : "Host key not confirmed yet.");
   const f = el("div", {},
     el("div", { class: "form2" },
@@ -370,6 +389,12 @@ function agentForm(a, data) {
       field("MCP tunnel port on the agent host", num("mcp_remote_port", a.mcp_remote_port)),
       field("Answer timeout (s)", num("reply_timeout", a.reply_timeout))),
     field("Extra instructions for voice requests", el("textarea", { name: "extra_instructions" }, a.extra_instructions)),
+    el("h3", {}, "Extra MCP servers"),
+    el("p", { class: "hint" }, "Other tools the agent gets, e.g. Home Assistant (Settings → Devices & services → add \"Model Context Protocol Server\", then a long-lived access token from your HA profile). HTTPS only; the token is sent as a Bearer header and is never shown again."),
+    servers,
+    el("div", { class: "row" },
+      el("button", { onclick: () => servers.append(serverRow({ name: "home-assistant", url: "", description: "Home Assistant: lights, switches, covers, climate, media and sensors", enabled: true, auto_approve: true })) }, "Add Home Assistant"),
+      el("button", { onclick: () => servers.append(serverRow({ name: "", url: "", description: "", enabled: true, auto_approve: true })) }, "Add other MCP server")),
     el("div", { class: "row" }, chk("enabled", a.enabled, "Enabled"), chk("autostart", a.autostart, "Start the tmux session automatically")),
     el("div", { class: "row" }, el("button", { onclick: async () => {
       const d = formData(f);
@@ -380,6 +405,11 @@ function agentForm(a, data) {
     } }, "Fetch & confirm host key"), fp));
   modal(isNew ? "Add agent" : `Edit ${a.name}`, f, close => [el("button", { class: "primary", onclick: async () => {
     const d = formData(f);
+    for (const k of Object.keys(d)) if (k.startsWith("srv_")) delete d[k];
+    d.mcp_servers = [...servers.children].map(r => ({
+      name: $("[data-k=name]", r).value.trim(), url: $("[data-k=url]", r).value.trim(), token: $("[data-k=token]", r).value,
+      description: $("[data-k=description]", r).value, enabled: $("[data-k=enabled]", r).checked,
+      auto_approve: $("[data-k=auto_approve]", r).checked })).filter(s => s.name || s.url);
     d.host_key = hostKey;
     if (!d.host_key) { toast("Confirm the host key first", true); return; }
     await act(() => isNew ? api("POST", "/api/agents", d) : api("PUT", `/api/agents/${a.id}`, d), "Saved");

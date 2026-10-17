@@ -50,6 +50,14 @@ speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
 - For an interactive phone conversation you lead yourself, use start_voice_call, then say/listen, then hang_up.
 - announce / ask_speaker talk through a speaker in the house.
 Never call anyone the person didn't ask you to call."""
+    extra = [s for s in agent.mcp_servers if s.enabled]
+    if extra:
+        text += "\n\nYou also have these MCP servers:"
+        for s in extra:
+            text += f"\n- \"{s.name}\"" + (f": {s.description}" if s.description else "")
+        text += ("\nFor smart-home requests (lights, switches, covers, climate, \"is the door locked\") use "
+                 "those tools right away instead of asking, then confirm in a few words (\"Done, the kitchen "
+                 "light is on.\"). If the device name is unclear, ask which one.")
     if agent.extra_instructions.strip():
         text += "\n\n" + agent.extra_instructions.strip()
     return text
@@ -63,6 +71,10 @@ class Driver:
         self.dir = dir_
         self.workdir = workdir
         self.mcp_url = mcp_url
+
+    @property
+    def extra_servers(self):
+        return [s for s in self.agent.mcp_servers if s.enabled]
 
     @property
     def events_path(self) -> str:
@@ -102,10 +114,16 @@ class ClaudeDriver(Driver):
         handler = [{"hooks": [{"type": "command", "command": hook, "timeout": 10}]}]
         settings = {
             "hooks": {"UserPromptSubmit": handler, "Stop": handler, "Notification": handler},
-            "permissions": {"allow": ["mcp__telerouter"]},
+            "permissions": {"allow": ["mcp__telerouter"] + [f"mcp__{s.name}" for s in self.extra_servers
+                                                              if s.auto_approve]},
         }
         mcp = {"mcpServers": {"telerouter": {"type": "http", "url": self.mcp_url,
                                              "headers": {"Authorization": f"Bearer {mcp_token}"}}}}
+        for s in self.extra_servers:
+            entry: dict = {"type": "http", "url": s.url}
+            if s.token:
+                entry["headers"] = {"Authorization": f"Bearer {s.token}"}
+            mcp["mcpServers"][s.name] = entry
         out = super().files(mcp_token)
         out[f"{self.dir}/settings.json"] = (json.dumps(settings, indent=1), 0o600)
         out[f"{self.dir}/mcp.json"] = (json.dumps(mcp, indent=1), 0o600)
@@ -169,6 +187,9 @@ class HermesDriver(Driver):
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         out = super().files(mcp_token)
         out[f"{self.dir}/mcp-token"] = (mcp_token, 0o600)
+        extra = {s.name: {"url": s.url, **({"headers": {"Authorization": f"Bearer {s.token}"}} if s.token else {}),
+                          "timeout": 120} for s in self.extra_servers}
+        out[f"{self.dir}/mcp-extra.json"] = (json.dumps(extra), 0o600)
         out[f"{self.dir}/configure.py"] = (HERMES_CONFIGURE, 0o600)
         out[f"{self.dir}/start.sh"] = (self.launch_script(), 0o700)
         return out
@@ -181,7 +202,7 @@ for p in "$HOME/.hermes/hermes-agent/venv/bin/python" "$HOME/.hermes/hermes-agen
   if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import yaml' 2>/dev/null; then PY="$p"; break; fi
 done
 [ -n "$PY" ] || {{ echo "no python with PyYAML found to edit ~/.hermes/config.yaml" >&2; exit 3; }}
-"$PY" {d}/configure.py {shlex.quote(self.mcp_url)} {d}/mcp-token {shlex.quote(self.hook_path)}
+"$PY" {d}/configure.py {shlex.quote(self.mcp_url)} {d}/mcp-token {shlex.quote(self.hook_path)} {d}/mcp-extra.json
 """
 
     def launch_script(self) -> str:
@@ -232,6 +253,19 @@ entries = hooks.setdefault("post_llm_call", []) or []
 hooks["post_llm_call"] = entries
 changed = servers.get("telerouter") != want_mcp
 servers["telerouter"] = want_mcp
+# extra servers telerouter manages (e.g. Home Assistant); names it added before but no longer has are removed
+extra = json.load(open(sys.argv[4])) if len(sys.argv) > 4 and os.path.exists(sys.argv[4]) else {}
+managed_file = os.path.join(os.path.dirname(token_file), "hermes-managed.json")
+managed = set(json.load(open(managed_file))) if os.path.exists(managed_file) else set()
+for name in managed - set(extra):
+    if servers.pop(name, None) is not None:
+        changed = True
+for name, entry in extra.items():
+    if servers.get(name) != entry:
+        servers[name] = entry
+        changed = True
+with open(managed_file, "w") as f:
+    json.dump(sorted(extra), f)
 for ev in ("post_llm_call", "on_session_end"):
     lst = hooks.setdefault(ev, []) or []
     hooks[ev] = lst

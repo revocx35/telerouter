@@ -584,7 +584,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     # -- agents ------------------------------------------------------------------------------------------------
     @app.get("/api/agents")
     async def list_agents():
-        return {"agents": [{**a.model_dump(), "host_key_fingerprint": sshmod.fingerprint(a.host_key) if a.host_key else ""}
+        return {"agents": [redact({**a.model_dump(), "host_key_fingerprint": sshmod.fingerprint(a.host_key) if a.host_key else ""})
                            for a in cfg.agents],
                 "ssh_public_key": engine.ssh_keys.public, "default_agent_id": cfg.default_agent_id,
                 "runtime": {aid: rt.info() for aid, rt in engine.agent_rts.items()}}
@@ -609,7 +609,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             cfg.default_agent_id = a.id
         store.save()
         await engine.apply_config()
-        return a.model_dump()
+        return redact(a)
 
     @app.put("/api/agents/{aid}")
     async def update_agent(aid: str, payload: dict):
@@ -617,11 +617,19 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         if payload.get("host", a.host) != a.host or int(payload.get("port", a.port)) != a.port:
             if payload.get("host_key", a.host_key) == a.host_key:
                 payload["host_key"] = ""            # a new host needs its key confirmed again
+        if isinstance(payload.get("mcp_servers"), list):
+            old = {s.name: s for s in a.mcp_servers}
+            for s in payload["mcp_servers"]:
+                if isinstance(s, dict) and not s.get("token"):          # empty = keep the stored token
+                    prev = old.get(str(s.get("name", "")).strip().lower())
+                    s["token"] = prev.token if prev else ""
+                if isinstance(s, dict):
+                    s.pop("token_set", None)
         new = merge(Agent, a, payload, protected=AGENT_PROTECTED)
         replace(cfg.agents, new)
         store.save()
         await engine.apply_config()
-        return new.model_dump()
+        return redact(new)
 
     @app.delete("/api/agents/{aid}")
     async def delete_agent(aid: str):

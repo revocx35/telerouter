@@ -141,3 +141,54 @@ def test_trust_dialog_selects_yes_even_when_no_is_preselected():
     assert d.dialog_keys(screen.replace("❯ No, exit", "  No, exit").replace("   Yes, I trust", " ❯ Yes, I trust")) == ["Enter"]
     old_style = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit"
     assert d.dialog_keys(old_style) == ["Enter"]    # older wording: "Yes, proceed" is already selected
+
+
+def test_extra_mcp_servers_reach_claude_with_permissions_and_instructions():
+    from telerouter.models import ExtraMcpServer
+    a = agent(mcp_servers=[ExtraMcpServer(name="home-assistant", url="https://ha.example.com/api/mcp", token="llat",
+                                          description="lights and switches"),
+                           ExtraMcpServer(name="off", url="https://x.example/mcp", enabled=False),
+                           ExtraMcpServer(name="ask", url="https://y.example/mcp", auto_approve=False)])
+    files = make_driver(a, "/d", "/w", "http://127.0.0.1:47801/mcp").files("trm_x")
+    mcp = json.loads(files["/d/mcp.json"][0])["mcpServers"]
+    assert mcp["home-assistant"] == {"type": "http", "url": "https://ha.example.com/api/mcp",
+                                     "headers": {"Authorization": "Bearer llat"}}
+    assert "off" not in mcp and "headers" not in mcp["ask"]
+    allow = json.loads(files["/d/settings.json"][0])["permissions"]["allow"]
+    assert allow == ["mcp__telerouter", "mcp__home-assistant"]
+    instr = files["/d/instructions.md"][0]
+    assert '"home-assistant": lights and switches' in instr and "smart-home" in instr and "llat" not in instr
+
+
+def test_extra_mcp_server_validation():
+    from telerouter.models import ExtraMcpServer
+    for bad in ({"name": "telerouter", "url": "https://a.b/mcp"}, {"name": "ha", "url": "http://192.168.1.2:8123/api/mcp"},
+                {"name": "Bad Name", "url": "https://a.b"}):
+        with pytest.raises(ValueError):
+            ExtraMcpServer(**bad)
+    with pytest.raises(ValueError):
+        agent(mcp_servers=[{"name": "ha", "url": "https://a.b"}, {"name": "ha", "url": "https://c.d"}])
+
+
+def test_hermes_configure_adds_and_removes_extra_servers(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("mcp_servers:\n  mine:\n    command: x\n")
+    d = tmp_path / "tr"
+    d.mkdir()
+    (d / "tok").write_text("trm_abc")
+    script = d / "configure.py"
+    script.write_text(HERMES_CONFIGURE)
+    env = {**os.environ, "HERMES_HOME": str(home)}
+
+    def run(extra):
+        (d / "extra.json").write_text(json.dumps(extra))
+        subprocess.run([sys.executable, str(script), "http://127.0.0.1:47801/mcp", str(d / "tok"), "/h/hook.sh",
+                        str(d / "extra.json")], check=True, env=env, capture_output=True)
+        return yaml.safe_load((home / "config.yaml").read_text())["mcp_servers"]
+
+    s = run({"home-assistant": {"url": "https://ha/api/mcp", "headers": {"Authorization": "Bearer t"}}})
+    assert set(s) == {"mine", "telerouter", "home-assistant"}
+    s = run({})
+    assert set(s) == {"mine", "telerouter"}                  # ours removed, the owner's kept

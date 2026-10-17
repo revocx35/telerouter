@@ -185,3 +185,22 @@ def test_password_change_logs_out_other_sessions(app, c):
     use_cookie(c, first)
     assert c.get("/api/status").status_code == 401                        # the other one is gone
     use_cookie(c, mine)
+
+
+def test_agent_extra_mcp_token_is_write_only(c):
+    csrf = setup_admin(c)
+    h = {"X-CSRF-Token": csrf}
+    a = c.post("/api/agents", json={"name": "Jarvis", "host": "10.0.0.9", "username": "me",
+                                    "mcp_servers": [{"name": "home-assistant", "url": "https://ha.lan/api/mcp",
+                                                     "token": "secret-llat"}]}, headers=h).json()
+    assert a["mcp_servers"][0]["token"] == "" and a["mcp_servers"][0]["token_set"] is True
+    listed = c.get("/api/agents").json()
+    assert "secret-llat" not in json.dumps(listed)
+    r = c.put(f"/api/agents/{a['id']}", json={"mcp_servers": [{"name": "home-assistant", "url": "https://ha.lan/api/mcp",
+                                                               "token": "", "description": "lights"}]}, headers=h)
+    assert r.status_code == 200
+    stored = c.app.state.store.config.agents[0].mcp_servers[0]
+    assert stored.token == "secret-llat" and stored.description == "lights"     # empty token kept the old one
+    bad = c.put(f"/api/agents/{a['id']}", json={"mcp_servers": [{"name": "ha", "url": "http://ha.lan:8123/api/mcp"}]},
+                headers=h)
+    assert bad.status_code == 422
