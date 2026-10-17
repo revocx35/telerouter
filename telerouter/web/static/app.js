@@ -402,16 +402,14 @@ async function contacts(main) {
         el("td", { class: "hide-sm" }, inp("description", c.description, { placeholder: "e.g. my father" })),
         el("td", { class: "hide-sm mono" }, c.number || ""),
         el("td", {}, el("input", { type: "checkbox", name: "enabled", checked: c.enabled, title: "visible to agents / callable" })),
-        el("td", {}, sel("inbound", c.inbound, [["default", "default"], ["agent", "talk to agent"], ["client", "ring speaker"], ["reject", "reject"]]),
-          sel("inbound_client", c.inbound_client, [["", "speaker…"], ...clientsCfg.clients.map(x => [x.id, x.name])]),
-          agentsCfg.agents.length > 1 ? sel("inbound_agent", c.inbound_agent, [["", "default agent"], ...agentsCfg.agents.map(x => [x.id, x.name])]) : ""),
+        el("td", {}, inboundPicker(c, clientsCfg, agentsCfg)),
         el("td", {}, el("div", { class: "row" },
           el("button", { class: "small primary", onclick: async () => {
             const d = formData(row);
             const upd = await act(() => api("PUT", `/api/contacts/${c.id}`, d), "Saved");
             Object.assign(c, upd);
           } }, "Save"),
-          c.kind !== "camera" || true ? el("button", { class: "small", onclick: () => callDialog(c, clientsCfg) }, "Call") : "",
+          el("button", { class: "small", onclick: () => callDialog(c, clientsCfg) }, "Call"),
           c.source === "manual" || c.missing ? el("button", { class: "small danger", onclick: async () => { if (confirm(`Delete ${c.alias || c.name}?`)) { await act(() => api("DELETE", `/api/contacts/${c.id}`)); route(); } } }, "Delete") : "")));
       return row;
     }));
@@ -424,8 +422,18 @@ async function contacts(main) {
     el("div", { class: "card" }, el("h2", {}, "PBX extensions"), el("p", { class: "hint" }, "Add the extensions of your PBX that telerouter may call. WhatsApp contacts and cameras appear here automatically from wa2sip and cam2sip (Connections)."), add),
     el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "All contacts"), el("span", { class: "spacer" }), filter),
       el("p", { class: "hint" }, "The referred name is what the agent sees and what you say (\"call dad\"). Untick a contact to hide it from agents. Inbound: what happens when this contact calls telerouter."),
-      el("table", {}, el("thead", {}, el("tr", {}, ["Contact", "Referred name", "Notes for the agent", "Number", "Visible", "Inbound calls", ""].map((t, i) => el("th", { class: [2, 3].includes(i) ? "hide-sm" : "" }, t)))), tbody)));
+      el("div", { class: "table-wrap" }, el("table", {}, el("thead", {}, el("tr", {}, ["Contact", "Referred name", "Notes for the agent", "Number", "Visible", "Inbound calls", ""].map((t, i) => el("th", { class: [2, 3].includes(i) ? "hide-sm" : "" }, t)))), tbody))));
   draw();
+}
+
+function inboundPicker(c, clientsCfg, agentsCfg) {
+  const policy = sel("inbound", c.inbound, [["default", "default"], ["agent", "talk to agent"], ["client", "ring speaker"], ["reject", "reject"]]);
+  const speaker = sel("inbound_client", c.inbound_client, [["", "which speaker?"], ...clientsCfg.clients.map(x => [x.id, x.name])]);
+  const agent = agentsCfg.agents.length > 1 ? sel("inbound_agent", c.inbound_agent, [["", "default agent"], ...agentsCfg.agents.map(x => [x.id, x.name])]) : null;
+  const sync = () => { speaker.classList.toggle("hidden", policy.value !== "client"); if (agent) agent.classList.toggle("hidden", policy.value !== "agent"); };
+  policy.addEventListener("change", sync);
+  sync();
+  return el("div", {}, policy, speaker, agent);
 }
 
 function callDialog(c, clientsCfg) {

@@ -35,6 +35,9 @@ p.hint, .hint { color: var(--muted); font-size: 13px; margin: 4px 0 10px; }
 .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; }
+.row > input[type=text], .row > input[type=password], .row > input[type=number] { width: auto; flex: 1 1 160px; }
+.table-wrap { overflow-x: auto; }
+.hidden { display: none !important; }
 .spacer { flex: 1; }
 
 table { width: 100%; border-collapse: collapse; }
