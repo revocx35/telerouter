@@ -1,0 +1,13 @@
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+asyncssh==2.24.1
+numpy==2.5.4
+soxr==1.1.0
+pysilero-vad==3.4.0
+argon2-cffi==25.1.0
+pyotp==2.10.0
+wyoming==1.10.2
+cryptography==50.0.2
+httpx==0.28.1
+qrcode==8.2

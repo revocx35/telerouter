@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telerouter-client"
+version = "0.1.0"
+description = "Speaker client for telerouter: streams the microphone, plays what the server sends"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+  "websockets>=13",
+  "numpy>=1.21",
+  "sounddevice>=0.4.6",
+]
+
+[project.optional-dependencies]
+aec = ["livekit>=1.0,<2"]
+
+[project.scripts]
+telerouter-client = "telerouter_client.__main__:main"
+
+[tool.setuptools]
+packages = ["telerouter_client"]

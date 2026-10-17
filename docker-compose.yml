@@ -1,0 +1,69 @@
+# telerouter: agentic smart-speaker manager and voice router.
+# docker compose up -d   then open https://<this host>:8443 (setup code: docker logs telerouter 2>&1 | grep 'setup code')
+name: telerouter
+
+x-hardening: &hardening
+  restart: unless-stopped
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  telerouter:
+    <<: *hardening
+    image: ghcr.io/revocx35/telerouter:${TELEROUTER_VERSION:-latest}
+    build: .
+    container_name: telerouter
+    # host networking: SIP/RTP (UDP 5080, 18000-18199) must carry this host's real address
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TELEROUTER_WHISPER_URI: tcp://127.0.0.1:10300
+      TELEROUTER_PIPER_URI: tcp://127.0.0.1:10200
+      TELEROUTER_WAKE_URI: tcp://127.0.0.1:10400
+    volumes:
+      - ./data:/data
+    depends_on: [whisper, piper, openwakeword]
+
+  # Speech services: reachable only from this host (127.0.0.1), never from the network.
+  whisper:
+    <<: *hardening
+    image: rhasspy/wyoming-whisper:3.8.1
+    container_name: telerouter-whisper
+    user: "1000:1000"
+    command: ["--model", "${WHISPER_MODEL:-small-int8}", "--cpu-threads", "${WHISPER_THREADS:-4}", "--beam-size", "1",
+              "--initial-prompt", "${WHISPER_PROMPT:-Hey Jarvis. Call dad. Call mom. Hang up.}"]
+    environment:
+      HF_HOME: /data/hf
+      HOME: /data
+    volumes:
+      - ./whisper-data:/data
+    ports: ["127.0.0.1:10300:10300"]
+
+  piper:
+    <<: *hardening
+    image: rhasspy/wyoming-piper:2.5.2
+    container_name: telerouter-piper
+    user: "1000:1000"
+    command: ["--voice", "${PIPER_VOICE:-en_US-lessac-medium}"]
+    environment:
+      HOME: /data
+    volumes:
+      - ./piper-data:/data
+    ports: ["127.0.0.1:10200:10200"]
+
+  openwakeword:
+    <<: *hardening
+    image: rhasspy/wyoming-openwakeword:2.1.0
+    container_name: telerouter-openwakeword
+    user: "1000:1000"
+    command: ["--custom-model-dir", "/custom", "--threshold", "${WAKE_THRESHOLD:-0.5}"]
+    volumes:
+      - ./wake-models:/custom:ro
+    ports: ["127.0.0.1:10400:10400"]

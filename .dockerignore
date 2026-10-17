@@ -1,0 +1,12 @@
+.git
+data
+deploy/data
+**/__pycache__
+**/*.pyc
+.pytest_cache
+tests
+tools
+docs
+*.md
+.env
+CLAUDE.local.md

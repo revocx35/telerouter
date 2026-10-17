@@ -1,0 +1,254 @@
+"""Per-agent-kind details: files to install on the agent host, the launch command, and reply events.
+
+Both agents run interactively in tmux, so the owner can attach and watch or type. telerouter types the
+voice request into the pane and learns the answer from the agent's own hook system:
+
+* Claude Code: `--settings` adds UserPromptSubmit/Stop/Notification hooks; Stop carries
+  `last_assistant_message`. Nothing in the owner's ~/.claude is changed.
+* Hermes: shell hooks (`post_llm_call` carries `assistant_response`) and the MCP server are declared in
+  ~/.hermes/config.yaml, which telerouter edits once (with a backup) when it sets the agent up.
+
+The hook script only appends the event JSON (one line) to a file; telerouter tails it over SSH.
+"""
+
+from __future__ import annotations
+
+import json
+import shlex
+
+from ..models import Agent
+
+HOOK_SH = """#!/bin/sh
+# telerouter agent hook: append the event (one JSON line) for telerouter to read over SSH.
+EV={events}
+{{ tr -d '\\n\\r' ; printf '\\n'; }} >> "$EV" 2>/dev/null
+exit 0
+"""
+
+PATHS = 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.hermes/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"'
+
+
+def voice_instructions(agent: Agent, tools: bool = True) -> str:
+    text = f"""You are also "{agent.name}", the voice assistant of telerouter (a smart-speaker and phone router).
+Messages that start with "[telerouter ..." were spoken by a person to a speaker in their home or on a phone
+call, transcribed by Whisper (so expect transcription errors), and your final answer will be read aloud by
+a text-to-speech voice.
+
+For those messages:
+- Answer in plain spoken language: one to three short sentences, no markdown, no lists, no code, no URLs,
+  no emoji. Spell out symbols and units. Ask a short question back if the request is unclear.
+- If the work takes longer, still finish with a short spoken summary of the result.
+- Messages without that prefix were typed in this terminal: answer them normally."""
+    if tools:
+        text += """
+
+You have the "telerouter" MCP tools: contacts (people, phone extensions, WhatsApp contacts, cameras),
+speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
+- "call my dad" from a speaker: use connect_call with that contact; the speaker the request came from is
+  used automatically. Then just say who you are calling, in a few words.
+- To deliver a message by phone yourself, use phone_message (it rings, speaks, can wait for a reply).
+- For an interactive phone conversation you lead yourself, use start_voice_call, then say/listen, then hang_up.
+- announce / ask_speaker talk through a speaker in the house.
+Never call anyone the person didn't ask you to call."""
+    if agent.extra_instructions.strip():
+        text += "\n\n" + agent.extra_instructions.strip()
+    return text
+
+
+class Driver:
+    kind = ""
+
+    def __init__(self, agent: Agent, dir_: str, workdir: str, mcp_url: str):
+        self.agent = agent
+        self.dir = dir_
+        self.workdir = workdir
+        self.mcp_url = mcp_url
+
+    @property
+    def events_path(self) -> str:
+        return f"{self.dir}/events.jsonl"
+
+    @property
+    def hook_path(self) -> str:
+        return f"{self.dir}/hook.sh"
+
+    def hook_script(self) -> str:
+        return HOOK_SH.format(events=shlex.quote(self.events_path))
+
+    def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
+        """Remote files (path -> (content, mode)) written when the agent session is (re)started."""
+        return {self.hook_path: (self.hook_script(), 0o700)}
+
+    def launch_script(self) -> str:
+        raise NotImplementedError
+
+    def setup_script(self) -> str:
+        """Shell run once per start, before launching (e.g. config edits). Empty: nothing."""
+        return ""
+
+    def prompt_text(self, text: str, header: str) -> str:
+        return f"[{header}] {text}"
+
+    def dialog_keys(self, screen: str) -> list[str] | None:
+        """Keys to press for a start-up dialog visible on screen, or None."""
+        return None
+
+
+class ClaudeDriver(Driver):
+    kind = "claude"
+
+    def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
+        hook = shlex.quote(self.hook_path)
+        handler = [{"hooks": [{"type": "command", "command": hook, "timeout": 10}]}]
+        settings = {
+            "hooks": {"UserPromptSubmit": handler, "Stop": handler, "Notification": handler},
+            "permissions": {"allow": ["mcp__telerouter"]},
+        }
+        mcp = {"mcpServers": {"telerouter": {"type": "http", "url": self.mcp_url,
+                                             "headers": {"Authorization": f"Bearer {mcp_token}"}}}}
+        out = super().files(mcp_token)
+        out[f"{self.dir}/settings.json"] = (json.dumps(settings, indent=1), 0o600)
+        out[f"{self.dir}/mcp.json"] = (json.dumps(mcp, indent=1), 0o600)
+        out[f"{self.dir}/instructions.md"] = (voice_instructions(self.agent), 0o600)
+        out[f"{self.dir}/start.sh"] = (self.launch_script(), 0o700)
+        return out
+
+    def launch_script(self) -> str:
+        a = self.agent
+        uuid = a.session_uuid
+        args = []
+        if a.model:
+            args += ["--model", a.model]
+        if a.effort:
+            args += ["--effort", a.effort]
+        if a.permission_mode and a.permission_mode != "default":
+            args += ["--permission-mode", a.permission_mode]
+        d = shlex.quote(self.dir)
+        return f"""#!/bin/sh
+# started by telerouter in tmux session {a.session_name}; attach with: tmux attach -t {a.session_name}
+{PATHS}
+DIR={d}
+cd {shlex.quote(self.workdir)} 2>/dev/null || cd "$HOME"
+if ls "$HOME"/.claude/projects/*/{uuid}.jsonl >/dev/null 2>&1; then SESS="--resume {uuid}"; else SESS="--session-id {uuid}"; fi
+claude $SESS {" ".join(shlex.quote(x) for x in args)} \\
+  --settings "$DIR/settings.json" --mcp-config "$DIR/mcp.json" \\
+  --append-system-prompt "$(cat "$DIR/instructions.md")" -n telerouter
+echo "agent exited with status $?"
+sleep 3
+"""
+
+    def dialog_keys(self, screen: str) -> list[str] | None:
+        s = screen.lower()
+        if "trust the files in this folder" in s or "trust this folder" in s:
+            return ["Enter"]
+        if "bypass permissions mode" in s and "yes, i accept" in s:
+            return ["Down", "Enter"]
+        if "auto mode" in s and "yes, enable" in s:
+            return ["Enter"]
+        return None
+
+
+class HermesDriver(Driver):
+    kind = "hermes"
+
+    def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
+        out = super().files(mcp_token)
+        out[f"{self.dir}/mcp-token"] = (mcp_token, 0o600)
+        out[f"{self.dir}/configure.py"] = (HERMES_CONFIGURE, 0o600)
+        out[f"{self.dir}/start.sh"] = (self.launch_script(), 0o700)
+        return out
+
+    def setup_script(self) -> str:
+        d = shlex.quote(self.dir)
+        return f"""{PATHS}
+PY=""
+for p in "$HOME/.hermes/hermes-agent/venv/bin/python" "$HOME/.hermes/hermes-agent/.venv/bin/python" python3; do
+  if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import yaml' 2>/dev/null; then PY="$p"; break; fi
+done
+[ -n "$PY" ] || {{ echo "no python with PyYAML found to edit ~/.hermes/config.yaml" >&2; exit 3; }}
+"$PY" {d}/configure.py {shlex.quote(self.mcp_url)} {d}/mcp-token {shlex.quote(self.hook_path)}
+"""
+
+    def launch_script(self) -> str:
+        a = self.agent
+        args = ["-c", f"telerouter-{a.id}", "--create-if-missing", "--accept-hooks"]
+        if a.model:
+            args += ["--model", a.model]
+        if a.hermes_provider:
+            args += ["--provider", a.hermes_provider]
+        if a.permission_mode == "bypassPermissions":
+            args += ["--yolo"]
+        return f"""#!/bin/sh
+# started by telerouter in tmux session {a.session_name}; attach with: tmux attach -t {a.session_name}
+{PATHS}
+export HERMES_ACCEPT_HOOKS=1
+cd {shlex.quote(self.workdir)} 2>/dev/null || cd "$HOME"
+hermes {" ".join(shlex.quote(x) for x in args)}
+echo "agent exited with status $?"
+sleep 3
+"""
+
+    def prompt_text(self, text: str, header: str) -> str:
+        # Hermes gets no system-prompt flag from us: the voice rules travel with each request.
+        return (f"[{header}] {text} -- (Spoken request: answer in one to three short plain sentences for "
+                f"text-to-speech, no markdown. telerouter MCP tools are available for calls and speakers.)")
+
+
+# Runs on the agent host with Hermes' own Python: adds the telerouter MCP server and hook to
+# ~/.hermes/config.yaml (backup first), and allow-lists the hook command.
+HERMES_CONFIGURE = r'''
+import json, os, shutil, sys, time
+import yaml
+url, token_file, hook = sys.argv[1], sys.argv[2], sys.argv[3]
+home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+path = os.path.join(home, "config.yaml")
+os.makedirs(home, exist_ok=True)
+cfg = {}
+if os.path.exists(path):
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+token = open(token_file).read().strip()
+want_mcp = {"url": url, "headers": {"Authorization": "Bearer " + token}, "timeout": 300}
+servers = cfg.setdefault("mcp_servers", {}) or {}
+cfg["mcp_servers"] = servers
+hooks = cfg.setdefault("hooks", {}) or {}
+cfg["hooks"] = hooks
+entries = hooks.setdefault("post_llm_call", []) or []
+hooks["post_llm_call"] = entries
+changed = servers.get("telerouter") != want_mcp
+servers["telerouter"] = want_mcp
+for ev in ("post_llm_call", "on_session_end"):
+    lst = hooks.setdefault(ev, []) or []
+    hooks[ev] = lst
+    if not any(isinstance(e, dict) and e.get("command") == hook for e in lst):
+        lst.append({"command": hook, "timeout": 10})
+        changed = True
+if changed:
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".bak-telerouter-" + time.strftime("%Y%m%d%H%M%S"))
+    tmp = path + ".tmp-telerouter"
+    with open(tmp, "w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+allow = os.path.join(home, "shell-hooks-allowlist.json")
+data = {"approvals": []}
+if os.path.exists(allow):
+    try:
+        data = json.load(open(allow)) or data
+    except ValueError:
+        pass
+apps = data.setdefault("approvals", [])
+for ev in ("post_llm_call", "on_session_end"):
+    if not any(a.get("event") == ev and a.get("command") == hook for a in apps):
+        apps.append({"event": ev, "command": hook})
+with open(allow + ".tmp", "w") as f:
+    json.dump(data, f, indent=1)
+os.replace(allow + ".tmp", allow)
+print("ok" + (" (config.yaml updated)" if changed else ""))
+'''
+
+
+def make_driver(agent: Agent, dir_: str, workdir: str, mcp_url: str) -> Driver:
+    cls = ClaudeDriver if agent.kind == "claude" else HermesDriver
+    return cls(agent, dir_, workdir, mcp_url)

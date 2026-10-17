@@ -1,0 +1,112 @@
+"""JSON persistence: /data/config.json (0600, atomic writes) plus small history files."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+from .models import Agent, Client, Config, Contact, Integration, McpToken
+
+log = logging.getLogger("telerouter.store")
+
+HISTORY_MAX = 300
+
+
+def write_private(path: Path, data: str | bytes) -> None:
+    """Atomically write `data` to `path` with mode 0600."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data.encode() if isinstance(data, str) else data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class Store:
+    def __init__(self, data_dir: str):
+        self.dir = Path(data_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.dir, 0o700)
+        except OSError:
+            pass
+        self.path = self.dir / "config.json"
+        self.history_path = self.dir / "history.json"
+        self._lock = threading.Lock()
+        self.config = self._load()
+        self.history: list[dict] = self._load_list(self.history_path)
+
+    def _load(self) -> Config:
+        if self.path.exists():
+            try:
+                return Config.model_validate_json(self.path.read_text())
+            except Exception as e:
+                # never silently start empty over a broken file: keep a copy for the owner
+                backup = self.path.with_suffix(f".broken-{int(time.time())}")
+                self.path.rename(backup)
+                log.error("config.json could not be read (%s); moved it to %s", e, backup.name)
+        cfg = Config()
+        self._write(cfg)
+        return cfg
+
+    @staticmethod
+    def _load_list(path: Path) -> list[dict]:
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _write(self, cfg: Config) -> None:
+        write_private(self.path, cfg.model_dump_json(indent=1))
+
+    def save(self) -> None:
+        with self._lock:
+            self._write(self.config)
+
+    # -- history -------------------------------------------------------------------------------
+    def add_history(self, entry: dict) -> None:
+        entry.setdefault("at", time.time())
+        self.history.append(entry)
+        del self.history[:-HISTORY_MAX]
+        try:
+            write_private(self.history_path, json.dumps(self.history))
+        except OSError as e:
+            log.warning("could not write history: %s", e)
+
+    # -- lookups ---------------------------------------------------------------------------------
+    def client(self, cid: str) -> Client | None:
+        return next((c for c in self.config.clients if c.id == cid), None)
+
+    def agent(self, aid: str) -> Agent | None:
+        return next((a for a in self.config.agents if a.id == aid), None)
+
+    def default_agent(self) -> Agent | None:
+        cfg = self.config
+        return self.agent(cfg.default_agent_id) or next((a for a in cfg.agents if a.enabled), None)
+
+    def agent_for_client(self, client: Client) -> Agent | None:
+        return (self.agent(client.agent_id) if client.agent_id else None) or self.default_agent()
+
+    def contact(self, cid: str) -> Contact | None:
+        return next((c for c in self.config.contacts if c.id == cid), None)
+
+    def integration(self, iid: str) -> Integration | None:
+        return next((i for i in self.config.integrations if i.id == iid), None)
+
+    def mcp_token(self, tid: str) -> McpToken | None:
+        return next((t for t in self.config.mcp_tokens if t.id == tid), None)
