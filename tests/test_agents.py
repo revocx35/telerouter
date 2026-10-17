@@ -265,3 +265,18 @@ def test_turn_end_without_stop_hook_is_noticed():
     other = L(type="user", message={"content": "[telerouter #zz99] later"})
     assert turn_end_without_stop("\n".join([prompt, end, other, limit, end]), "ab12") == ""
     assert turn_end_without_stop("\n".join([limit, end]), "ab12") is None                # not our prompt
+
+
+async def test_mid_turn_detection_from_events():
+    rt = AgentRuntime(_Engine2(), agent())
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+    lines = {"v": ""}
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        return lines["v"]
+    rt._sh = fake_sh
+    ev = lambda n: json.dumps({"hook_event_name": n})  # noqa: E731
+    lines["v"] = "\n".join([ev("UserPromptSubmit"), ev("Stop"), ev("Notification")])
+    assert not await rt._mid_turn()
+    lines["v"] = "\n".join([ev("Stop"), ev("UserPromptSubmit")])
+    assert await rt._mid_turn()

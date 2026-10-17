@@ -163,10 +163,17 @@ class AgentRuntime:
             if not self.session_alive and a.autostart:
                 await self.start_session()
             elif self.session_alive and a.autostart and await self._stale_session():
-                log.info("[%s] its session was started by an older telerouter - restarting it (same conversation)",
-                         a.name)
-                await self._kill_session()
-                await self.start_session()
+                if await self._mid_turn():
+                    log.info("[%s] its session is from an older telerouter; restarting it after the current turn",
+                             a.name)
+                    self._restart_after_turn = True
+                    self.state = "ready"
+                    self._ready.set()
+                else:
+                    log.info("[%s] its session was started by an older telerouter - restarting it (same conversation)",
+                             a.name)
+                    await self._kill_session()
+                    await self.start_session()
             elif self.session_alive:
                 await self._handle_startup()      # it may sit in a dialog (e.g. we restarted mid-start)
                 self.state = "ready"
@@ -222,6 +229,21 @@ class AgentRuntime:
     async def _has_session(self) -> bool:
         out = await self._sh(self._tmux("has-session", "-t", "=" + self.agent.session_name) + " 2>/dev/null && echo yes")
         return out.strip() == "yes"
+
+    async def _mid_turn(self) -> bool:
+        """The agent is working on a turn right now (its last prompt has no Stop yet)."""
+        assert self.driver
+        out = await self._sh(f"tail -n 30 {ssh.q(self.driver.events_path)} 2>/dev/null")
+        for line in reversed(out.splitlines()):
+            try:
+                name = json.loads(line).get("hook_event_name")
+            except ValueError:
+                continue
+            if name in ("Stop", "post_llm_call", "on_session_end"):
+                return False
+            if name in ("UserPromptSubmit", "pre_llm_call"):
+                return True
+        return False
 
     async def _stale_session(self) -> bool:
         """True when the running session got its hooks/MCP config from another telerouter version."""
@@ -437,6 +459,11 @@ class AgentRuntime:
             return
         if a.kind == "claude":
             asyncio.create_task(self._update_context_size(str(ev.get("transcript_path") or "")))
+        if getattr(self, "_restart_after_turn", False):
+            self._restart_after_turn = False
+            log.info("[%s] turn finished - restarting its session for the new telerouter version", a.name)
+            self.request_restart()
+            return
         if self.pending_reset:
             mode, keep, _at = self.pending_reset
             self.pending_reset = None
