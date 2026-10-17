@@ -83,11 +83,19 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   otherwise strict clients refuse them.
 - The dev host's port 18443 is taken by another project; the loopback MCP port defaults to 47700.
 - MCP SDK 2.x moved FastMCP; telerouter implements the small MCP surface itself (`mcp.py`).
+- **Claude Code's workspace-trust dialog preselects "No, exit"** (v2.1.302): pressing Enter quits the agent.
+  `drivers.menu_keys()` moves the `❯` cursor to the wanted option first.
+- PBX numbers are dialed exactly as entered: feature codes keep `*`/`#` (`*43` is FreePBX's echo test, a safe
+  live target). Stripping non-digits dialed "43".
+- Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 ## Status (v0.1.0, 2026-10-17)
 
 Verified: speaker turn end to end with real Whisper/Piper/openWakeWord (WAV-driven client); agent
 plumbing over SSH/tmux/hooks/reverse-tunnel MCP with the fake agent; outbound and inbound calls through
-Asterisk; wa2sip (simulated WhatsApp) both directions; PBX registration on FreePBX 17.
+Asterisk; wa2sip (simulated WhatsApp) both directions. In production (FreePBX 17, real Claude Code with
+Sonnet 5.5): "Hey Jarvis, call the echo test" -> connect_call -> *43 bridged to a speaker; an inbound call
+through the PBX talking to the agent; phone_message with a transcribed reply; wa2sip/cam2sip linked and
+synced (no real WhatsApp contact or camera was called during testing).
 Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
 Hermes install; echo cancellation on real hardware.

@@ -143,3 +143,11 @@ async def test_contact_lookup_is_forgiving_but_not_ambiguous(mcp):
     assert mcp._find_contact(tok, "dad").id == "c1"            # exact referred name wins
     with pytest.raises(ToolError):
         mcp._find_contact(tok, "ad")                             # substring of two contacts
+
+
+async def test_list_contacts_filters_by_kind_and_kind_words(mcp):
+    mcp.engine.store.config.contacts.append(Contact(id="c5", kind="camera", name="C212"))
+    for args in ({"query": "camera"}, {"query": "cameras"}, {"kind": "camera"}):
+        _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "list_contacts", "arguments": args}})
+        assert [c["name"] for c in r["result"]["structuredContent"]["contacts"]] == ["C212"], args

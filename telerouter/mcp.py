@@ -57,6 +57,7 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
 
 
 S = {"type": "string"}
+KIND_WORDS = {"pbx": "extension phone desk", "whatsapp": "whatsapp wa mobile", "camera": "camera cameras cam intercom door"}
 
 
 class McpServer:
@@ -124,13 +125,18 @@ class McpServer:
             return deco
 
         @tool("list_contacts", "contacts",
-              "List the people/places you may call: referred name, kind (pbx extension, whatsapp, camera), notes.",
-              _obj({"query": {**S, "description": "optional filter text"}}))
-        async def list_contacts(tok, query: str = ""):
+              "List the people/places you may call: referred name, kind (pbx = phone extension, whatsapp, camera), "
+              "notes. Filter by kind and/or text (matches names, notes and the kind).",
+              _obj({"query": {**S, "description": "optional filter text"},
+                    "kind": {"type": "string", "enum": ["pbx", "whatsapp", "camera"]}}))
+        async def list_contacts(tok, query: str = "", kind: str = ""):
             q = query.lower().strip()
             out = []
             for c in self._contacts(tok):
-                if q and q not in c.label.lower() and q not in c.name.lower() and q not in c.description.lower():
+                if kind and c.kind != kind:
+                    continue
+                hay = " ".join((c.label, c.name, c.description, c.kind, KIND_WORDS.get(c.kind, ""))).lower()
+                if q and not all(w in hay for w in q.split()):
                     continue
                 out.append({"id": c.id, "name": c.label, "kind": c.kind, "notes": c.description,
                             "number": c.number if c.kind != "camera" else ""})
