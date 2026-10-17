@@ -178,3 +178,14 @@ async def test_garbled_spoken_names_find_the_connection(mcp):
     mcp.engine.store.config.contacts = cs
     tok = mcp.engine.store.config.mcp_tokens[0]
     assert mcp._find_contact(tok, "Tether Outer T-Max").name == "telerouter"
+
+
+def test_speakers_by_room_or_loose_name():
+    from telerouter.mcp import pick_speaker
+    cs = [Client(id="k1", name="Kitchen", room="kitchen"), Client(id="k2", name="Bedroom speaker", room="my room"),
+          Client(id="k3", name="Office", room="office")]
+    assert pick_speaker("the speaker in my room", cs).id == "k2"
+    assert pick_speaker("bedroom", cs).id == "k2"
+    assert pick_speaker("Kitchen speaker", cs).id == "k1"
+    assert pick_speaker("k3", cs).id == "k3"
+    assert pick_speaker("garage", cs) is None

@@ -107,16 +107,14 @@ class McpServer:
 
     def _find_speaker(self, tok: McpToken, ref: str):
         e = self.engine
-        ref_l = ref.lower().strip()
-        for c in e.store.config.clients:
-            if not (c.visible_to_agents and tok.allows_client(c.id)):
-                continue
-            if ref_l in (c.id, c.name.lower(), c.room.lower()):
-                conn = e.clients.get(c.id)
-                if not conn:
-                    raise ToolError(f"speaker '{c.name}' is offline")
-                return conn
-        raise ToolError(f"no speaker '{ref}' (see list_speakers)")
+        cands = [c for c in e.store.config.clients if c.visible_to_agents and tok.allows_client(c.id)]
+        c = pick_speaker(ref, cands)
+        if c is None:
+            raise ToolError(f"no speaker '{ref}' (see list_speakers)")
+        conn = e.clients.get(c.id)
+        if not conn:
+            raise ToolError(f"speaker '{c.name}' is offline")
+        return conn
 
     def _source(self, tok: McpToken):
         rt = self.engine.agents.get(tok.agent_id) if tok.agent_id else None
@@ -167,7 +165,8 @@ class McpServer:
               "For a tmux contact (an agent session on a machine) the person is switched to talk to that session "
               "until they say 'back to <your name>'.",
               _obj({"contact": {**S, "description": "referred name or id"},
-                    "speaker": {**S, "description": "speaker name/id; omit to use the requesting speaker"}},
+                    "speaker": {**S, "description": "speaker name, room or id ('the speaker in my room'); omit to use the "
+                                                  "requesting speaker. Ring a speaker even when the request came by phone."}},
                    ["contact"]))
         async def connect_call(tok, contact: str, speaker: str = ""):
             e = self.engine
@@ -456,3 +455,27 @@ def fuzzy_pick(ref: str, contacts: list[Contact]) -> Contact | None:
     if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.08:
         return None
     return scored[0][1]
+
+
+_SPEAKER_FILLER = {"the", "a", "speaker", "speakers", "in", "on", "at", "of", "from", "please"}
+
+
+def _speaker_words(text: str) -> str:
+    return " ".join(w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in _SPEAKER_FILLER)
+
+
+def pick_speaker(ref, clients):
+    """'the speaker in my room' -> the client named/roomed 'my room' (or the one clearly closest)."""
+    r = _speaker_words(ref)
+    for c in clients:                                   # exact id, name or room
+        if ref.strip().lower() in (c.id, c.name.lower(), c.room.lower()) or (r and r in (_speaker_words(c.name), _speaker_words(c.room))):
+            return c
+    hits = [c for c in clients if r and (r in _speaker_words(c.name + " " + c.room) or
+                                         any(_speaker_words(x) and _speaker_words(x) in r for x in (c.name, c.room)))]
+    if len(hits) == 1:
+        return hits[0]
+    scored = sorted(((max(difflib.SequenceMatcher(None, r, _speaker_words(x)).ratio() for x in (c.name, c.room)), c)
+                     for c in clients), key=lambda x: -x[0])
+    if scored and scored[0][0] >= 0.75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.1):
+        return scored[0][1]
+    return None

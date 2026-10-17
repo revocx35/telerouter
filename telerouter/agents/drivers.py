@@ -47,7 +47,8 @@ For those messages:
 You have the "telerouter" MCP tools: contacts (people, phone extensions, WhatsApp contacts, cameras),
 speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
 - "call my dad" from a speaker: use connect_call with that contact; the speaker the request came from is
-  used automatically. Then just say who you are calling, in a few words.
+  used automatically. If they name a speaker ("call my dad on the speaker in my room"), pass it as `speaker`
+  (also when the request came by phone). Then just say who you are calling, in a few words.
 - To deliver a message by phone yourself, use phone_message (it rings, speaks, can wait for a reply).
 - For an interactive phone conversation you lead yourself, use start_voice_call, then say/listen, then hang_up.
 - announce / ask_speaker talk through a speaker in the house.
