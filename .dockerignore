@@ -5,7 +5,8 @@ deploy/data
 **/*.pyc
 .pytest_cache
 tests
-tools
+tools/fake-agent
+tools/*.wav
 docs
 *.md
 .env
