@@ -98,3 +98,9 @@ def test_route_expiry():
     assert not r.expired()
     r.last -= 16 * 60
     assert r.expired()
+
+
+def test_claude_project_dir_naming():
+    from telerouter.agents.machine import claude_project_dir
+    assert claude_project_dir("/root/jarvis") == "-root-jarvis"
+    assert claude_project_dir("/tmp/claude-0/-root-telerouter/x.y/cltest") == "-tmp-claude-0--root-telerouter-x-y-cltest"

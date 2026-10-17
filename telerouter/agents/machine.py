@@ -153,24 +153,28 @@ class MachineRuntime:
                   "[ -f \"$f\" ] && { cat \"$f\"; exit 0; }; done")
         info = await self._sh(script)
         try:
-            sid = json.loads(info).get("sessionId", "")
+            d = json.loads(info)
         except ValueError:
             return ""
-        if not re.match(r"^[0-9a-f-]{36}$", sid or ""):
+        sid, cwd = str(d.get("sessionId") or ""), str(d.get("cwd") or "")
+        if not re.match(r"^[0-9a-f-]{36}$", sid):
             return ""
         path = (await self._sh(f'ls -t "$HOME"/.claude/projects/*/{sid}.jsonl 2>/dev/null | head -1')).strip()
+        if not path and cwd.startswith("/") and self.home:
+            # no message yet: the file appears with the first one, in the folder named after the cwd
+            path = f"{self.home}/.claude/projects/{claude_project_dir(cwd)}/{sid}.jsonl"
         return path if re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path) else ""
 
     async def _ask_claude(self, session: str, prompt: str, nonce: str) -> str:
         path = await self.claude_transcript(session)
         if not path:
             raise AgentError(f"no Claude Code is running in the {session} session")
-        start = int((await self._sh(f"wc -l < {ssh.q(path)}")).strip() or 0)
+        start = int((await self._sh(f"wc -l < {ssh.q(path)} 2>/dev/null || echo 0")).strip() or 0)
         await self._type(session, prompt)
         deadline = time.monotonic() + self.machine.reply_timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
-            out = await self._sh(f"tail -n +{start + 1} {ssh.q(path)} | head -c 4000000", timeout=30)
+            out = await self._sh(f"tail -n +{start + 1} {ssh.q(path)} 2>/dev/null | head -c 4000000", timeout=30)
             reply = turn_end_without_stop(out, nonce)
             if reply is not None:
                 return reply or "Done."
@@ -228,3 +232,8 @@ def is_exit(text: str, agent_name: str = "") -> bool:
         return False
     names = {"jarvis", "the assistant", "assistant"} | ({agent_name.lower()} if agent_name else set())
     return any(f"back to {n}" in t for n in names) or bool(_EXIT.search(t))
+
+
+def claude_project_dir(cwd: str) -> str:
+    """Claude Code's folder name for a working directory: every non-alphanumeric character becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
