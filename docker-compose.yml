@@ -18,7 +18,8 @@ services:
     image: ghcr.io/revocx35/telerouter:${TELEROUTER_VERSION:-latest}
     build: .
     container_name: telerouter
-    # host networking: SIP/RTP (UDP 5080, 18000-18199) must carry this host's real address
+    # host networking: SIP/RTP (UDP 5080, 18000-18199) must carry this host's real address; mDNS finds
+    # Google Cast speakers, which fetch their audio from TCP 8480 (TELEROUTER_CAST_PORT, only with a Cast output)
     network_mode: host
     env_file:
       - path: .env

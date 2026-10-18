@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hmac
 import io
 import ipaddress
@@ -27,14 +28,16 @@ from .. import security
 from ..agents import ssh as sshmod
 from ..engine import Engine
 from ..logbuffer import LogBuffer
-from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, Client, Contact, Enrollment, Integration, Machine,
-                      McpToken, Pbx, QuietHours, SecuritySettings, VoiceSettings)
+from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
+                      Machine, McpToken, Pbx, QuietHours, SecuritySettings, Speaker, VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_certificate
 from ..settings import Settings
 from ..store import Store, write_private
 from ..tls import TlsFiles
+from ..voice import cast as castmod
 from ..voice.client_conn import ClientConn
+from ..voice.speaker import VirtualSpeaker
 
 log = logging.getLogger("telerouter.web")
 
@@ -84,7 +87,7 @@ class TextBody(BaseModel):
 
 
 class CallBody(BaseModel):
-    client_id: str = Field(max_length=16)
+    speaker_id: str = Field(max_length=16)
 
 
 class HostKeyBody(BaseModel):
@@ -495,7 +498,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             raise HTTPException(503, f"text-to-speech failed: {e}") from e
         return Response(pcmmod.to_wav(audio), media_type="audio/wav")
 
-    # -- speakers (clients) -------------------------------------------------------------------------------------
+    # -- speaker devices (clients) ------------------------------------------------------------------------------
     def install_command(request: Request, code: str) -> dict:
         host = request.headers.get("host", f"localhost:{settings.https_port}")
         server = f"https://{host}"
@@ -543,6 +546,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         token = security.new_token("trc_")
         c = Client(name=name, room=room, token_hash=security.token_hash(token), platform=body.platform[:64])
         cfg.clients.append(c)
+        if not store.speaker(c.id) and len(cfg.speakers) < 100:     # its own speaker: its mic and loudspeaker
+            cfg.speakers.append(Speaker(id=c.id, name=name, room=room, mic=c.id, output=f"client:{c.id}"))
         store.save()
         log.info("speaker '%s' enrolled from %s (%s)", c.name, ip, c.platform)
         return {"client_id": c.id, "name": c.name, "token": token}
@@ -557,39 +562,166 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         conn = engine.clients.get(cid)
         if conn:
             conn.client = new
-            await conn.send_json({"type": "config", "volume": new.volume})
-        engine.voice.refresh_wake_words()
+            if not new.enabled:
+                await engine.detach_client(conn)
         return redact(new)
 
     @app.delete("/api/clients/{cid}")
     async def delete_client(cid: str):
         c = find(cfg.clients, cid)
         cfg.clients.remove(c)
+        drop_device_refs(mic=cid, output=f"client:{cid}")
         store.save()
         conn = engine.clients.get(cid)
         if conn:
             await engine.detach_client(conn)
-        log.info("speaker '%s' removed (its token is revoked)", c.name)
+        engine.sync_speakers()
+        log.info("speaker device '%s' removed (its token is revoked)", c.name)
         return {"ok": True}
 
-    def online(cid: str) -> ClientConn:
-        conn = engine.clients.get(cid)
+    def drop_device_refs(mic: str = "", output: str = "") -> None:
+        """A device is gone: speakers lose it; a speaker left with neither mic nor output goes too."""
+        for sp in list(cfg.speakers):
+            if mic and sp.mic == mic:
+                sp.mic = ""
+            if output and sp.output == output:
+                sp.output = ""
+            if not sp.mic and not sp.output:
+                cfg.speakers.remove(sp)
+
+    # -- Google Cast speakers (outputs) ----------------------------------------------------------------------------
+    @app.get("/api/casts")
+    async def list_casts():
+        return {"casts": [c.model_dump() for c in cfg.casts], "port": settings.cast_port,
+                "runtime": {cid: c.info() for cid, c in engine.casts.items()}}
+
+    @app.get("/api/casts/discover")
+    async def discover_casts():
+        try:
+            found = await castmod.discover()
+        except OSError as e:
+            raise HTTPException(502, f"mDNS discovery failed: {e}") from e
+        known = {c.uuid for c in cfg.casts if c.uuid}
+        return {"found": [{**vars(f), "added": f.uuid in known} for f in found]}
+
+    @app.post("/api/casts")
+    async def add_cast(payload: dict):
+        if len(cfg.casts) >= 20:
+            raise HTTPException(409, "too many Cast speakers")
+        c = merge(CastDevice, None, payload, protected={"id"})
+        if c.uuid and any(x.uuid == c.uuid for x in cfg.casts):
+            raise HTTPException(409, f"{c.name} is already added")
+        cfg.casts.append(c)
+        store.save()
+        engine.sync_speakers()
+        return c.model_dump()
+
+    @app.put("/api/casts/{cid}")
+    async def update_cast(cid: str, payload: dict):
+        c = find(cfg.casts, cid)
+        new = merge(CastDevice, c, payload, protected={"id", "uuid"})
+        replace(cfg.casts, new)
+        store.save()
+        engine.sync_speakers()
+        return new.model_dump()
+
+    @app.delete("/api/casts/{cid}")
+    async def delete_cast(cid: str):
+        c = find(cfg.casts, cid)
+        cfg.casts.remove(c)
+        drop_device_refs(output=f"cast:{cid}")
+        store.save()
+        engine.sync_speakers()
+        return {"ok": True}
+
+    @app.post("/api/casts/{cid}/test")
+    async def test_cast(cid: str):
+        c = find(cfg.casts, cid)
+        out = engine.casts.get(cid)
+        if not out:
+            raise HTTPException(409, "the Cast speaker is disabled")
+        try:
+            audio = await engine.speech.synthesize_all(f"This is {c.name}.", cfg.voice.tts_voice)
+        except Exception as e:
+            raise HTTPException(503, f"text-to-speech failed: {e}") from e
+        out.spill = None
+        out.play(audio)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(out.drained(), 30)
+        if out.state == "unreachable":
+            raise HTTPException(502, f"{c.name}: {out.error}")
+        return {"ok": True}
+
+    # -- speakers (virtual: a mic device + an output device) ---------------------------------------------------------
+    def check_speaker(sp: Speaker) -> list[str]:
+        """Device references must exist; a microphone feeds one speaker (it moves). Returns who lost it."""
+        if sp.mic and not store.client(sp.mic):
+            raise HTTPException(422, "unknown microphone device")
+        kind, _, oid = sp.output.partition(":")
+        if sp.output and not (store.client(oid) if kind == "client" else store.cast(oid)):
+            raise HTTPException(422, "unknown output device")
+        if not sp.mic and not sp.output:
+            raise HTTPException(422, "pick a microphone, an output or both")
+        moved = []
+        for other in cfg.speakers:
+            if other.id != sp.id and sp.mic and other.mic == sp.mic:
+                other.mic = ""
+                moved.append(other.name)
+        return moved
+
+    @app.get("/api/speakers")
+    async def list_speakers():
+        return {"speakers": [sp.model_dump() for sp in cfg.speakers]}
+
+    @app.post("/api/speakers")
+    async def create_speaker(payload: dict):
+        if len(cfg.speakers) >= 100:
+            raise HTTPException(409, "too many speakers")
+        sp = merge(Speaker, None, payload, protected={"id"})
+        moved = check_speaker(sp)
+        cfg.speakers.append(sp)
+        store.save()
+        engine.sync_speakers()
+        return {**sp.model_dump(), "mic_moved_from": moved}
+
+    @app.put("/api/speakers/{sid}")
+    async def update_speaker(sid: str, payload: dict):
+        sp = find(cfg.speakers, sid)
+        new = merge(Speaker, sp, payload, protected={"id"})
+        moved = check_speaker(new)
+        replace(cfg.speakers, new)
+        store.save()
+        engine.sync_speakers()
+        return {**new.model_dump(), "mic_moved_from": moved}
+
+    @app.delete("/api/speakers/{sid}")
+    async def delete_speaker(sid: str):
+        sp = find(cfg.speakers, sid)
+        cfg.speakers.remove(sp)
+        store.save()
+        engine.sync_speakers()
+        return {"ok": True}
+
+    def online(sid: str) -> VirtualSpeaker:
+        conn = engine.speakers.get(sid)
         if not conn:
             raise HTTPException(409, "the speaker is offline")
         return conn
 
-    @app.post("/api/clients/{cid}/say")
-    async def client_say(cid: str, body: TextBody):
-        conn = online(cid)
+    @app.post("/api/speakers/{sid}/say")
+    async def speaker_say(sid: str, body: TextBody):
+        conn = online(sid)
         try:
             await engine.voice.announce(conn, body.text)
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from e
         return {"ok": True}
 
-    @app.post("/api/clients/{cid}/talk")
-    async def client_talk(cid: str):
-        conn = online(cid)
+    @app.post("/api/speakers/{sid}/talk")
+    async def speaker_talk(sid: str):
+        conn = online(sid)
+        if not conn.has_mic:
+            raise HTTPException(409, "the speaker has no microphone")
         if conn.state != "idle":
             raise HTTPException(409, f"the speaker is {conn.state}")
         engine.voice.start_turn(conn)
@@ -827,13 +959,13 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.post("/api/contacts/{cid}/call")
     async def call_contact(cid: str, body: CallBody):
         c = find(cfg.contacts, cid)
-        conn = online(body.client_id)
+        conn = online(body.speaker_id)
         if c.kind == "tmux":
             try:
-                conn.route = engine.route_for(c)          # type: ignore[attr-defined]
+                conn.route = engine.route_for(c)
             except ValueError as e:
                 raise HTTPException(409, str(e)) from e
-            agent = store.agent_for_client(conn.client)
+            agent = store.agent_for_speaker(conn.cfg)
             back = agent.name if agent else "your assistant"
             asyncio.create_task(engine.voice.announce(conn, f"Connected to {c.label}. Say back to {back} to return."))
             return {"connected": c.label}
@@ -1021,7 +1153,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         store.save()
         engine.attach_client(conn)
         log.info("speaker '%s' connected from %s", client.name, ip)
-        await conn.send_json({"type": "config", "volume": client.volume, "server_version": settings.version})
+        await conn.send_json({"type": "config", "volume": 100, "server_version": settings.version})
         bucket, bucket_t = 0, time.monotonic()
 
         async def pinger():
@@ -1066,11 +1198,13 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()
-                elif t == "button" and obj.get("action") == "talk" and conn.state == "idle":
-                    engine.voice.start_turn(conn)
-                elif t == "button" and obj.get("action") == "cancel" and conn.busy_task:
-                    conn.busy_task.cancel()
-                    conn.flush()
+                elif t == "button":               # the device's buttons act on the speaker using its mic
+                    vs = engine.speaker_for_mic(client.id)
+                    if vs and obj.get("action") == "talk" and vs.state == "idle":
+                        engine.voice.start_turn(vs)
+                    elif vs and obj.get("action") == "cancel" and vs.busy_task:
+                        vs.busy_task.cancel()
+                        vs.flush()
         except WebSocketDisconnect:
             pass
         finally:

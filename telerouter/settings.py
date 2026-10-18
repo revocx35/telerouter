@@ -41,6 +41,8 @@ class Settings:
     rtp_port_min: int = field(default_factory=lambda: _int("RTP_PORT_MIN", 18000))
     rtp_port_max: int = field(default_factory=lambda: _int("RTP_PORT_MAX", 18199))
     advertise_ip: str = field(default_factory=lambda: _env("ADVERTISE_IP"))
+    # plain-HTTP listener Google Cast speakers fetch their audio from (single-use URLs; only used with Cast outputs)
+    cast_port: int = field(default_factory=lambda: _int("CAST_PORT", 8480))
     whisper_uri: str = field(default_factory=lambda: _env("WHISPER_URI", "tcp://127.0.0.1:10300"))
     piper_uri: str = field(default_factory=lambda: _env("PIPER_URI", "tcp://127.0.0.1:10200"))
     wake_uri: str = field(default_factory=lambda: _env("WAKE_URI", "tcp://127.0.0.1:10400"))

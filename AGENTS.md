@@ -118,6 +118,14 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   line count noted before typing (`tail -n +N`), not a fixed tail: long turns push the prompt out.
 - Over SSH (no terminal) tmux prints control characters in `-F` formats as `_`: tab-separated
   `list-sessions` output arrives as `calls_claude_/root`. Use a printable separator (`|~|`).
+- **Speakers are virtual** (0.6): `Speaker` = mic device (client id) + output (`client:<id>` | `cast:<id>`);
+  `VirtualSpeaker` is what voice/calls/MCP use (`engine.speakers`), `ClientConn` is only the device
+  (`engine.clients`). Use `play()` for speech, `cue()` for beeps, `live()` for call audio. 0.5 configs are
+  migrated in `store.migrate_raw` (each client -> a speaker with the same id, backup kept).
+- **Google Cast**: a live WAV stream does not start before ~7 s is buffered (measured on a Mi Smart Speaker
+  Lite), complete WAVs start in ~0.15 s and report FINISHED. Hence one LOAD per segment and no live calls on
+  Cast outputs. Cast media is plain HTTP by necessity (receivers need publicly trusted HTTPS). When testing
+  on a real Cast speaker at night, mute it (`SET_VOLUME {"muted": true}`) and unmute in a `finally`.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -136,7 +144,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.5.0, 2026-10-17)
+## Status (v0.6.0, 2026-10-18)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=0.5` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
@@ -149,6 +157,9 @@ Sonnet 5.5): "Hey Jarvis, call the echo test" -> connect_call -> *43 bridged to 
 through the PBX talking to the agent; phone_message with a transcribed two-way reply; voice connection to a
 foreign tmux Claude session; Home Assistant lights via Jarvis's HA MCP server; the Raqqa speaker LXC (ALSA
 backend) in daily use; wa2sip/cam2sip linked and synced (no real WhatsApp contact or camera was called).
+0.6 virtual speakers: CastOutput against the real Mi Smart Speaker Lite (muted: launch, LOAD, FINISHED
+timing, flush, receiver stop), the rest with a fake Cast device in tests and the UI with Playwright.
+Not yet heard on the real speaker: audible quality/latency of answers through Cast.
 Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
 Hermes install; echo cancellation on real hardware; quiet hours with real desk sensors (off in prod until the
 user enables them under Voice & calls -> Quiet hours).

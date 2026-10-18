@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telerouter-client"
-version = "0.5.0"
+version = "0.6.0"
 description = "Speaker client for telerouter: streams the microphone, plays what the server sends"
 requires-python = ">=3.9"
 license = { text = "MIT" }

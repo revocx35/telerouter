@@ -1,4 +1,7 @@
-"""One connected speaker client: paced audio out, microphone in, state shown in the UI.
+"""One connected speaker device (client): paced audio out, microphone in, state shown on the device.
+
+The device is not the speaker agents see: a `VirtualSpeaker` (speaker.py) takes its microphone and/or uses it
+as its output (`play` gets audio the speaker already scaled to its volume).
 
 Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client token>`):
 
@@ -29,6 +32,9 @@ CHUNK_BYTES = pcmmod.FRAME_BYTES * 5      # 100 ms per message
 
 
 class ClientConn:
+    kind = "client"
+    live_ok = True                      # plays live call audio with ~250 ms delay
+
     def __init__(self, client: Client, send_bytes, send_text, aec: bool = False):
         self.client = client
         self.id = client.id
@@ -37,7 +43,7 @@ class ClientConn:
         self.aec = aec
         self.state = "idle"
         self.connected_at = time.time()
-        self.on_mic: Callable[[bytes], None] | None = None
+        self.on_mic: Callable[[bytes], None] | None = None   # set by the speaker that uses this microphone
         self._out = bytearray()
         self._out_event = asyncio.Event()
         self._play_until = 0.0              # monotonic time when sent audio finishes playing
@@ -47,9 +53,6 @@ class ClientConn:
         self.closed = asyncio.Event()
         self.mic_bytes = 0
         self.mic_level = -120.0
-        self.last_text = ""                 # last thing heard (for the UI)
-        self.last_reply = ""
-        self.busy_task: asyncio.Task | None = None   # the conversation/call that owns this client
 
     @property
     def name(self) -> str:
@@ -62,8 +65,6 @@ class ClientConn:
         self.closed.set()
         if self._task:
             self._task.cancel()
-        if self.busy_task and not self.busy_task.done():
-            self.busy_task.cancel()
 
     # -- state ----------------------------------------------------------------------------------
     def set_state(self, state: str) -> None:
@@ -88,12 +89,12 @@ class ClientConn:
             except Exception:
                 log.exception("mic handler failed")
 
-    # -- speaker -------------------------------------------------------------------------------
+    # -- loudspeaker ---------------------------------------------------------------------------
     def play(self, audio: bytes) -> None:
         """Queue PCM16 audio for playback (after anything already queued)."""
         if not audio:
             return
-        self._out += pcmmod.gain(audio, self.client.volume)
+        self._out += audio
         self._drained.clear()
         self._out_event.set()
 
@@ -107,6 +108,9 @@ class ClientConn:
     @property
     def playing(self) -> bool:
         return bool(self._out) or time.monotonic() < self._play_until
+
+    def prepare(self) -> None:
+        """Audio is about to come (Cast outputs launch their receiver); nothing to do for a client."""
 
     async def drained(self, extra: float = 0.0) -> None:
         """Wait until everything queued has been played on the client."""
@@ -144,5 +148,4 @@ class ClientConn:
 
     def info(self) -> dict:
         return {"id": self.id, "name": self.name, "state": self.state, "aec": self.aec,
-                "connected_at": self.connected_at, "mic_level": round(self.mic_level, 1),
-                "last_text": self.last_text, "last_reply": self.last_reply}
+                "connected_at": self.connected_at, "mic_level": round(self.mic_level, 1)}

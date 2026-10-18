@@ -1,6 +1,6 @@
 """The speaker conversation: wake word -> start blip -> listen -> end blip -> Whisper -> agent -> Piper.
 
-Microphone audio of every connected speaker flows through `mic()`:
+Microphone audio of every online speaker (a VirtualSpeaker with a mic device) flows through `mic()`:
   idle / speaking*   -> openWakeWord (wake word starts a turn; *barge-in only with client echo cancelling)
   listening          -> endpointer (Silero VAD), then the utterance goes to Whisper
   ringing            -> openWakeWord (the wake word answers the call)
@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from ..agents.runtime import AgentError, Source
 from ..media import pcm as pcmmod
-from .client_conn import ClientConn
+from .speaker import VirtualSpeaker
 from .speech import SpeechError, WakeStream
 from .vad import MAX_CONTINUATIONS, EndpointConfig, Endpointer, continuation, looks_unfinished
 
@@ -69,36 +69,38 @@ class VoiceAssistant:
         self._listeners: dict[str, Endpointer] = {}
         self._listen_done: dict[str, asyncio.Event] = {}
 
-    # -- client lifecycle --------------------------------------------------------------------------------
-    def attach(self, conn: ClientConn) -> None:
+    # -- speaker lifecycle -------------------------------------------------------------------------------
+    def attach(self, conn: VirtualSpeaker) -> None:
         names = self.wake_words(conn)
         ws = WakeStream(self.engine.settings.wake_uri, names, lambda n: self._on_wake(conn, n), conn.name)
         self.wake[conn.id] = ws
+        conn.wake_stream = ws
         ws.start()
         conn.on_mic = lambda pcm: self.mic(conn, pcm)
 
-    async def detach(self, conn: ClientConn) -> None:
-        ws = self.wake.pop(conn.id, None)
-        if ws:
-            await ws.stop()
+    def detach(self, conn: VirtualSpeaker) -> None:
+        ws = self.wake.get(conn.id)
+        if ws and ws is conn.wake_stream:
+            del self.wake[conn.id]
+            asyncio.create_task(ws.stop())
         self._listeners.pop(conn.id, None)
 
-    def wake_words(self, conn: ClientConn) -> list[str]:
-        return conn.client.wake_words or self.engine.store.config.voice.wake_words
+    def wake_words(self, conn: VirtualSpeaker) -> list[str]:
+        return conn.cfg.wake_words or self.engine.store.config.voice.wake_words
 
     def refresh_wake_words(self) -> None:
         for cid, ws in self.wake.items():
-            conn = self.engine.clients.get(cid)
+            conn = self.engine.speakers.get(cid)
             if conn:
                 ws.set_names(self.wake_words(conn))
 
-    def reset_wake(self, conn: ClientConn) -> None:
+    def reset_wake(self, conn: VirtualSpeaker) -> None:
         ws = self.wake.get(conn.id)
         if ws:
             ws.reset()
 
     # -- audio routing ---------------------------------------------------------------------------------------
-    def mic(self, conn: ClientConn, pcm: bytes) -> None:
+    def mic(self, conn: VirtualSpeaker, pcm: bytes) -> None:
         st = conn.state
         ep = self._listeners.get(conn.id)
         if st == "listening" and ep is not None:
@@ -115,21 +117,21 @@ class VoiceAssistant:
         if not ws:
             return
         if feed:
-            if not getattr(conn, "wake_fed", False):
+            if not conn.wake_fed:
                 # feeding resumes after a pause: start a fresh detection, or the wake word that began
                 # the last turn (still in the model's window) would fire again
                 ws.reset()
             ws.feed(pcm)
-        conn.wake_fed = feed      # type: ignore[attr-defined]
+        conn.wake_fed = feed
 
-    def _on_wake(self, conn: ClientConn, name: str) -> None:
+    def _on_wake(self, conn: VirtualSpeaker, name: str) -> None:
         st = conn.state
         log.info("wake word %s on %s (%s)", name, conn.name, st)
         if st == "ringing":
             self.engine.calls.answer_on_speaker(conn)
             return
         if st == "call":
-            s = getattr(conn, "call_session", None)
+            s = conn.call_session
             if s:
                 asyncio.create_task(self.engine.calls.hangup(s, "hung up by voice"))
             return
@@ -140,13 +142,13 @@ class VoiceAssistant:
             return
         self.start_turn(conn)
 
-    def start_turn(self, conn: ClientConn) -> None:
-        if conn.busy_task and not conn.busy_task.done():
+    def start_turn(self, conn: VirtualSpeaker) -> None:
+        if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):
             return
         conn.busy_task = asyncio.create_task(self._turn(conn))
 
     # -- one conversation turn ------------------------------------------------------------------------------
-    async def _turn(self, conn: ClientConn) -> None:
+    async def _turn(self, conn: VirtualSpeaker) -> None:
         e = self.engine
         try:
             follow = True
@@ -158,7 +160,7 @@ class VoiceAssistant:
                 if text is None:
                     return
                 if not text:
-                    conn.play(pcmmod.cue("error", e.store.config.voice.beep_volume))
+                    conn.cue(pcmmod.cue("error", e.store.config.voice.beep_volume))
                     await conn.drained()
                     return
                 reply = await self._ask_agent(conn, text)
@@ -176,13 +178,14 @@ class VoiceAssistant:
                 conn.set_state("idle")
             self.reset_wake(conn)
 
-    async def listen(self, conn: ClientConn, start_timeout: float | None = None) -> str | None:
+    async def listen(self, conn: VirtualSpeaker, start_timeout: float | None = None) -> str | None:
         """Blip, record one utterance, blip, transcribe. None: nothing was said."""
         e = self.engine
         v = e.store.config.voice
         conn.flush()
+        conn.prepare()                 # a Cast output launches its receiver while the person talks
         conn.set_state("listening")
-        conn.play(pcmmod.cue("start", v.beep_volume))
+        conn.cue(pcmmod.cue("start", v.beep_volume))
         await conn.drained(0.05)
         cfg = EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
                              end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
@@ -226,22 +229,22 @@ class VoiceAssistant:
             self._listeners.pop(conn.id, None)
             self._listen_done.pop(conn.id, None)
         conn.set_state("thinking")
-        conn.play(pcmmod.cue("end", v.beep_volume))
+        conn.cue(pcmmod.cue("end", v.beep_volume))
         log.info("[%s] heard (%.1f s audio, %.2f s stt): %s", conn.name, len(audio) / 32000,
                  time.monotonic() - t0, text)
         conn.last_text = text
         return text
 
-    async def _ask_agent(self, conn: ClientConn, text: str) -> str | None:
+    async def _ask_agent(self, conn: VirtualSpeaker, text: str) -> str | None:
         e = self.engine
-        agent = e.store.agent_for_client(conn.client)
-        route = getattr(conn, "route", None)
+        agent = e.store.agent_for_speaker(conn.cfg)
+        route = conn.route
         if route is not None and route.expired():
-            conn.route = route = None              # type: ignore[attr-defined]
+            conn.route = route = None
         if route is not None:
             from ..agents.machine import is_exit
             if is_exit(text, agent.name if agent else ""):
-                conn.route = None                  # type: ignore[attr-defined]
+                conn.route = None
                 return f"Back to {agent.name if agent else 'your assistant'}."
             conn.set_state("thinking")
             ticker = asyncio.create_task(self._think_ticks(conn))
@@ -263,8 +266,8 @@ class VoiceAssistant:
             conn.play(await e.speech.synthesize_all(speakable(f"{agent.name} needs you at the terminal: {msg}"),
                                                     e.store.config.voice.tts_voice))
         try:
-            src = Source("speaker", f"{conn.name} speaker" + (f" in {conn.client.room}" if conn.client.room else ""),
-                         client_id=conn.id)
+            src = Source("speaker", f"{conn.name} speaker" + (f" in {conn.cfg.room}" if conn.cfg.room else ""),
+                         speaker_id=conn.id)
             reply = await self._quiet_wait(conn, rt.ask(text, src, on_note=note))
         except AgentError as ex:
             log.warning("[%s] agent: %s", conn.name, ex)
@@ -275,7 +278,7 @@ class VoiceAssistant:
             conn.last_reply = reply
         return reply
 
-    async def _quiet_wait(self, conn: ClientConn, coro) -> str | None:
+    async def _quiet_wait(self, conn: VirtualSpeaker, coro) -> str | None:
         """During quiet hours a long task is not answered on the speaker: stop waiting (and ticking) after
         long_task_minutes and stay silent; the agent keeps working. None = say nothing."""
         q = self.engine.quiet
@@ -288,11 +291,11 @@ class VoiceAssistant:
                      conn.name, q.cfg.long_task_minutes)
             return None
 
-    def ticks_on(self, conn: ClientConn) -> bool:
-        pref = conn.client.thinking_cue
+    def ticks_on(self, conn: VirtualSpeaker) -> bool:
+        pref = conn.cfg.thinking_cue
         return self.engine.store.config.voice.thinking_cue if pref == "default" else pref == "on"
 
-    async def _think_ticks(self, conn: ClientConn) -> None:
+    async def _think_ticks(self, conn: VirtualSpeaker) -> None:
         v = self.engine.store.config.voice
         if not self.ticks_on(conn):
             return
@@ -300,9 +303,9 @@ class VoiceAssistant:
         while True:
             await asyncio.sleep(3.0)
             if conn.state == "thinking" and not conn.playing:
-                conn.play(tick)
+                conn.cue(tick)
 
-    async def speak(self, conn: ClientConn, text: str) -> None:
+    async def speak(self, conn: VirtualSpeaker, text: str) -> None:
         """Say `text` on the speaker (sentence by sentence, so it starts quickly)."""
         e = self.engine
         text = speakable(text)
@@ -316,25 +319,27 @@ class VoiceAssistant:
             await conn.drained(0.1)
         except SpeechError as ex:
             log.warning("text-to-speech failed: %s", ex)
-            conn.play(pcmmod.cue("error", e.store.config.voice.beep_volume))
+            conn.cue(pcmmod.cue("error", e.store.config.voice.beep_volume))
             await conn.drained()
         finally:
             if conn.state == "speaking":
                 conn.set_state("idle")
 
-    async def say_error(self, conn: ClientConn, text: str) -> None:
+    async def say_error(self, conn: VirtualSpeaker, text: str) -> None:
         with contextlib.suppress(Exception):
             await self.speak(conn, text)
             return
-        conn.play(pcmmod.cue("error", self.engine.store.config.voice.beep_volume))
+        conn.cue(pcmmod.cue("error", self.engine.store.config.voice.beep_volume))
 
     # -- used by MCP tools -------------------------------------------------------------------------------------
-    async def announce(self, conn: ClientConn, text: str) -> None:
+    async def announce(self, conn: VirtualSpeaker, text: str) -> None:
         if conn.state in ("call", "ringing", "listening"):
             raise RuntimeError(f"{conn.name} is busy ({conn.state})")
         await self.speak(conn, text)
 
-    async def ask_speaker(self, conn: ClientConn, question: str, timeout: float) -> str:
+    async def ask_speaker(self, conn: VirtualSpeaker, question: str, timeout: float) -> str:
+        if not conn.has_mic:
+            raise RuntimeError(f"{conn.name} has no microphone")
         if conn.state not in ("idle", "thinking", "speaking"):
             raise RuntimeError(f"{conn.name} is busy ({conn.state})")
         await self.speak(conn, question)

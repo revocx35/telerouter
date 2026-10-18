@@ -6,7 +6,7 @@ import pytest
 from starlette.requests import Request
 
 from telerouter.mcp import McpServer
-from telerouter.models import Client, Config, Contact, McpToken
+from telerouter.models import Config, Contact, McpToken, Speaker
 from telerouter.security import new_token, token_hash
 
 
@@ -24,7 +24,7 @@ class FakeStore:
 class FakeEngine:
     def __init__(self):
         self.store = FakeStore()
-        self.clients = {}
+        self.speakers = {}
         self.agent_rts = {}
 
     @property
@@ -63,7 +63,7 @@ def mcp():
     cfg.contacts = [Contact(id="c1", kind="pbx", name="Desk", alias="dad", number="1005"),
                     Contact(id="c2", kind="whatsapp", name="Ayşe", number="905551112233"),
                     Contact(id="c3", kind="camera", name="Front door", enabled=False)]
-    cfg.clients = [Client(id="k1", name="Kitchen"), Client(id="k2", name="Office")]
+    cfg.speakers = [Speaker(id="k1", name="Kitchen", mic="0000000a"), Speaker(id="k2", name="Office")]
     full, limited = new_token("trm_"), new_token("trm_")
     cfg.mcp_tokens = [McpToken(name="full", token_hash=token_hash(full)),
                       McpToken(name="limited", token_hash=token_hash(limited), scopes=["contacts"], contacts=["c2"])]
@@ -187,10 +187,11 @@ async def test_garbled_spoken_names_find_the_connection(mcp):
 
 def test_speakers_by_room_or_loose_name():
     from telerouter.mcp import pick_speaker
-    cs = [Client(id="k1", name="Kitchen", room="kitchen"), Client(id="k2", name="Bedroom speaker", room="my room"),
-          Client(id="k3", name="Office", room="office")]
+    cs = [Speaker(id="k1", name="Kitchen", room="kitchen"), Speaker(id="k2", name="Bedroom speaker", room="my room"),
+          Speaker(id="k3", name="Office", room="office"), Speaker(id="k4", name="odam")]
     assert pick_speaker("the speaker in my room", cs).id == "k2"
     assert pick_speaker("bedroom", cs).id == "k2"
     assert pick_speaker("Kitchen speaker", cs).id == "k1"
     assert pick_speaker("k3", cs).id == "k3"
     assert pick_speaker("garage", cs) is None
+    assert pick_speaker("Odam", cs).id == "k4"

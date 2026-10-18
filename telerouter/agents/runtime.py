@@ -40,7 +40,7 @@ class Source:
     """Where a request to the agent came from (decides where replies and calls go)."""
     kind: str                       # "speaker" | "phone" | "mcp"
     label: str                      # "Kitchen speaker", "phone call from Dad"
-    client_id: str = ""             # speaker
+    speaker_id: str = ""            # speaker
     call_id: str = ""               # phone
 
 

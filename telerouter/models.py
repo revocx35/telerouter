@@ -100,7 +100,7 @@ class Contact(BaseModel):
     number: str = ""                  # extension / phone number (pbx, whatsapp)
     enabled: bool = True              # visible to agents (MCP) and callable
     inbound: InboundPolicy = "default"
-    inbound_client: str = ""          # client id when inbound == "client"
+    inbound_client: str = ""          # speaker id when inbound == "client" (ring a speaker)
     inbound_agent: str = ""           # agent id when inbound == "agent" ("" = default agent)
     missing: bool = False             # gone at the source on the last sync
 
@@ -131,7 +131,8 @@ class Contact(BaseModel):
 
 
 class Client(BaseModel):
-    """A speaker device (Linux/macOS client)."""
+    """An enrolled speaker device (Linux/macOS client): a microphone and a loudspeaker on one machine.
+    What agents and you talk to is a `Speaker`, which takes its microphone and its output from devices."""
     id: str = Field(default_factory=new_id)
     name: str
     room: str = ""
@@ -141,6 +142,55 @@ class Client(BaseModel):
     platform: str = ""
     client_version: str = ""
     enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        return _name(v)
+
+
+class CastDevice(BaseModel):
+    """A Google Cast speaker (Chromecast built-in): an output only (it has no microphone telerouter can use)."""
+    id: str = Field(default_factory=new_id)
+    name: str
+    host: str                         # its address (updated from mDNS when DHCP moves it)
+    port: int = Field(default=8009, ge=1, le=65535)
+    uuid: str = ""                    # mDNS id: finds the device again under a new address
+    model: str = ""
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        return _name(v)
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if not HOST_RE.match(v):
+            raise ValueError("invalid host")
+        return v
+
+    @field_validator("uuid", "model")
+    @classmethod
+    def _text(cls, v: str) -> str:
+        v = " ".join(v.split())[:64]
+        if any(c in v for c in "<>"):
+            raise ValueError("no < >")
+        return v
+
+
+class Speaker(BaseModel):
+    """A speaker as agents and you see it ("odam"): a microphone from one device and an output from another
+    (or the same) device. `mic` is a client id; `output` is "client:<id>" or "cast:<id>"."""
+    id: str = Field(default_factory=new_id)
+    name: str
+    room: str = ""
+    enabled: bool = True
+    mic: str = ""                     # client id ("" = no microphone: announcements only)
+    output: str = ""                  # "client:<id>" | "cast:<id>" ("" = none)
+    cues: Literal["auto", "output", "mic"] = "auto"   # beeps: auto = on the mic device when the output is a Cast speaker
     agent_id: str = ""                # "" = default agent
     wake_words: list[str] = Field(default_factory=list)   # [] = global setting
     volume: int = Field(default=100, ge=0, le=200)
@@ -151,6 +201,28 @@ class Client(BaseModel):
     @classmethod
     def check_name(cls, v: str) -> str:
         return _name(v)
+
+    @field_validator("room")
+    @classmethod
+    def _room(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if len(v) > 64 or any(c in v for c in "<>"):
+            raise ValueError("max 64 characters, no < >")
+        return v
+
+    @field_validator("mic")
+    @classmethod
+    def _mic(cls, v: str) -> str:
+        if v and not re.match(r"^[0-9a-f]{8}$", v):
+            raise ValueError("invalid microphone device")
+        return v
+
+    @field_validator("output")
+    @classmethod
+    def _output(cls, v: str) -> str:
+        if v and not re.match(r"^(client|cast):[0-9a-f]{8}$", v):
+            raise ValueError("invalid output device")
+        return v
 
     @field_validator("wake_words")
     @classmethod
@@ -336,7 +408,7 @@ class McpToken(BaseModel):
     last_used: float = 0.0
     scopes: list[McpScope] = Field(default_factory=lambda: ["contacts", "calls", "speak", "clients"])
     contacts: list[str] = Field(default_factory=lambda: ["*"])    # contact ids or "*"
-    clients: list[str] = Field(default_factory=lambda: ["*"])     # client ids or "*"
+    clients: list[str] = Field(default_factory=lambda: ["*"])     # speaker ids or "*"
     agent_id: str = ""               # set for the token telerouter made for one of its agents
 
     @field_validator("name")
@@ -471,7 +543,9 @@ class Config(BaseModel):
     integrations: list[Integration] = Field(default_factory=list)
     machines: list[Machine] = Field(default_factory=list)
     contacts: list[Contact] = Field(default_factory=list)
-    clients: list[Client] = Field(default_factory=list)
+    clients: list[Client] = Field(default_factory=list)          # speaker devices (enrolled clients)
+    casts: list[CastDevice] = Field(default_factory=list)        # Google Cast speakers (outputs)
+    speakers: list[Speaker] = Field(default_factory=list)        # virtual speakers built from devices
     enrollments: list[Enrollment] = Field(default_factory=list)
     agents: list[Agent] = Field(default_factory=list)
     default_agent_id: str = ""

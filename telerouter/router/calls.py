@@ -27,7 +27,7 @@ from .sipaudio import SipAudio
 
 if TYPE_CHECKING:
     from ..engine import Engine
-    from ..voice.client_conn import ClientConn
+    from ..voice.speaker import VirtualSpeaker
 
 log = logging.getLogger("telerouter.calls")
 
@@ -65,7 +65,7 @@ class CallSession:
         self.mode = mode
         self.call: Call | None = None
         self.audio: SipAudio | None = None
-        self.client_id = ""
+        self.client_id = ""            # the speaker's id (speaker calls)
         self.agent_id = ""
         self.token_id = ""                 # MCP token that started it
         self.state = "dialing"
@@ -268,17 +268,19 @@ class CallManager:
                 t.cancel()
 
     # -- speaker calls ------------------------------------------------------------------------------------
-    def call_to_speaker(self, contact: Contact, conn: "ClientConn") -> CallSession:
+    def call_to_speaker(self, contact: Contact, conn: "VirtualSpeaker") -> CallSession:
         if conn.state in ("call", "ringing"):
             raise CallError(f"{conn.name} is already in a call")
+        if not conn.has_mic:
+            raise CallError(f"{conn.name} has no microphone")
         s = CallSession(self, "out", contact, contact.label, "speaker")
         s.client_id = conn.id
         conn.set_state("call")
-        conn.call_session = s          # type: ignore[attr-defined]
+        conn.call_session = s
         self._spawn(s, self._run_speaker_out(s, conn))
         return s
 
-    async def _run_speaker_out(self, s: CallSession, conn: "ClientConn") -> None:
+    async def _run_speaker_out(self, s: CallSession, conn: "VirtualSpeaker") -> None:
         e = self.engine
         try:
             if self.cfg.announce_calls:
@@ -308,41 +310,41 @@ class CallManager:
         finally:
             await self._release_speaker(s, conn)
 
-    async def _bridge_speaker(self, s: CallSession, conn: "ClientConn") -> None:
+    async def _bridge_speaker(self, s: CallSession, conn: "VirtualSpeaker") -> None:
         assert s.call
         s.state = "active"
         s.connected_at = time.time()
         s.result = "connected"
-        s.audio = SipAudio(s.call, on_audio=conn.play, on_dtmf=s.on_dtmf)
+        s.audio = SipAudio(s.call, on_audio=conn.live, on_dtmf=s.on_dtmf)
         s.audio.start()
         log.info("speaker %s <-> %s connected (%s)", conn.name, s.label, s.call.codec)
         await self._wait_end(s, conn.closed)
         if s.call.state == "ended" and not s.hangup_requested.is_set():
             s.result = "far end hung up"
 
-    async def _release_speaker(self, s: CallSession, conn: "ClientConn") -> None:
-        if getattr(conn, "call_session", None) is s:
-            conn.call_session = None   # type: ignore[attr-defined]
+    async def _release_speaker(self, s: CallSession, conn: "VirtualSpeaker") -> None:
+        if conn.call_session is s:
+            conn.call_session = None
         if s.audio:
             s.audio.stop()
         if s.call and s.call.state != "ended":
             await s.call.hangup("hung up")
         if not conn.closed.is_set():
             conn.flush()
-            conn.play(pcmmod.cue("end", self.engine.store.config.voice.beep_volume))
+            conn.cue(pcmmod.cue("end", self.engine.store.config.voice.beep_volume))
             await conn.drained()
             if conn.state in ("call", "ringing"):
                 conn.set_state("idle")
             self.engine.reset_wake(conn)
 
-    async def _ringback(self, conn: "ClientConn") -> None:
+    async def _ringback(self, conn: "VirtualSpeaker") -> None:
         tone = pcmmod.cue("ringback", self.engine.store.config.voice.beep_volume)
         while True:
-            conn.play(tone)
+            conn.live(tone)
             await conn.drained()
 
-    def speaker_mic(self, conn: "ClientConn", pcm16: bytes) -> None:
-        s: CallSession | None = getattr(conn, "call_session", None)
+    def speaker_mic(self, conn: "VirtualSpeaker", pcm16: bytes) -> None:
+        s: CallSession | None = conn.call_session
         if s and s.audio and s.state == "active":
             s.audio.send(pcm16)
 
@@ -387,14 +389,14 @@ class CallManager:
             return
         if policy == "client":
             cid = (contact.inbound_client if contact and contact.inbound_client else cfg.inbound_default_client)
-            conn = e.clients.get(cid) if cid else None
-            if not conn or conn.state not in ("idle", "speaking"):
+            conn = e.speakers.get(cid) if cid else None
+            if not conn or not conn.has_mic or conn.state not in ("idle", "speaking"):
                 call.reject(480, "Temporarily Unavailable")
                 return
             s = CallSession(self, "in", contact, label, "speaker")
             s.call = s.call or call
             s.client_id = conn.id
-            conn.call_session = s      # type: ignore[attr-defined]
+            conn.call_session = s
             conn.flush()
             conn.set_state("ringing")
             call.ring()
@@ -412,7 +414,7 @@ class CallManager:
         s.agent_id = agent.id
         self._spawn(s, self._run_agent_call(s))
 
-    async def _run_speaker_in(self, s: CallSession, conn: "ClientConn") -> None:
+    async def _run_speaker_in(self, s: CallSession, conn: "VirtualSpeaker") -> None:
         e = self.engine
         assert s.call
         s.state = "ringing"
@@ -443,7 +445,7 @@ class CallManager:
         finally:
             await self._release_speaker(s, conn)
 
-    async def _ring_speaker(self, s: CallSession, conn: "ClientConn") -> None:
+    async def _ring_speaker(self, s: CallSession, conn: "VirtualSpeaker") -> None:
         e = self.engine
         phrase = e.wake_phrase(conn)
         with contextlib.suppress(Exception):
@@ -453,8 +455,8 @@ class CallManager:
             conn.play(tone)
             await conn.drained()
 
-    def answer_on_speaker(self, conn: "ClientConn") -> bool:
-        s: CallSession | None = getattr(conn, "call_session", None)
+    def answer_on_speaker(self, conn: "VirtualSpeaker") -> bool:
+        s: CallSession | None = conn.call_session
         ev = getattr(s, "answer_event", None) if s else None
         if s and ev and s.state == "ringing":
             ev.set()

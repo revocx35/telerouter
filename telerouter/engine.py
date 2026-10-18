@@ -13,7 +13,7 @@ from .agents.machine import MachineRuntime
 from .agents.runtime import AgentRuntime
 from .agents.ssh import SshKeys
 from .media.rtp import PortAllocator
-from .models import Agent, Contact, Integration, Machine
+from .models import Agent, CastDevice, Contact, Integration, Machine
 from .router.calls import CallManager, digits
 from .router.integrations import IntegrationClient, IntegrationError
 from .settings import Settings
@@ -21,7 +21,9 @@ from .sip.stack import SipStack
 from .sip.ua import Account, AccountConfig, UserAgent
 from .store import Store
 from .voice.assistant import VoiceAssistant, speakable
+from .voice.cast import CastMedia, CastOutput
 from .voice.client_conn import ClientConn
+from .voice.speaker import VirtualSpeaker
 from .voice.speech import SpeechServices
 
 log = logging.getLogger("telerouter.engine")
@@ -48,7 +50,10 @@ class Engine:
                             user_agent=f"telerouter/{settings.version}", bind=settings.sip_bind)
         self.speech = SpeechServices(settings.whisper_uri, settings.piper_uri, settings.wake_uri)
         self.ssh_keys = SshKeys(settings.data_dir)
-        self.clients: dict[str, ClientConn] = {}
+        self.clients: dict[str, ClientConn] = {}          # connected speaker devices
+        self.casts: dict[str, CastOutput] = {}            # enabled Google Cast speakers
+        self.speakers: dict[str, VirtualSpeaker] = {}     # online speakers (what agents talk to)
+        self.cast_media = CastMedia(settings.bind, settings.cast_port)
         self.voice = VoiceAssistant(self)
         from .quiet import Quiet
         self.quiet = Quiet(self)
@@ -97,8 +102,12 @@ class Engine:
     async def stop(self) -> None:
         for t in list(self._tasks):
             t.cancel()
+        for vs in list(self.speakers.values()):
+            await vs.close()
         for conn in list(self.clients.values()):
             await conn.close()
+        await asyncio.gather(*(c.close() for c in self.casts.values()), return_exceptions=True)
+        await self.cast_media.close()
         for s in self.calls.active():
             if s.task:
                 s.task.cancel()
@@ -125,7 +134,7 @@ class Engine:
         await self._apply_machines()
         await self._apply_agents()
         await self._apply_integrations()
-        self.voice.refresh_wake_words()
+        self.sync_speakers()
         self._sync_now.set()
 
     def _sync_agent_machines(self) -> None:
@@ -352,18 +361,78 @@ class Engine:
             self._spawn(self.detach_client(old))
         self.clients[conn.id] = conn
         conn.start()
-        self.voice.attach(conn)
+        self.sync_speakers()
 
     async def detach_client(self, conn: ClientConn) -> None:
         if self.clients.get(conn.id) is conn:
             del self.clients[conn.id]
-        await self.voice.detach(conn)
+            self.sync_speakers()
         await conn.close()
 
-    def reset_wake(self, conn: ClientConn) -> None:
+    def _output(self, ref: str):
+        kind, _, oid = ref.partition(":")
+        if kind == "client":
+            return self.clients.get(oid)
+        if kind == "cast":
+            return self.casts.get(oid)
+        return None
+
+    def sync_speakers(self) -> None:
+        """Config + connected devices -> online VirtualSpeakers. A speaker is online while its mic device is
+        connected and its output is there; a changed device binding makes a new one (like a reconnect)."""
+        cfg = self.store.config
+        devs = {d.id: d for d in cfg.casts if d.enabled}
+        for cid in list(self.casts):
+            if cid not in devs:
+                self._spawn(self.casts.pop(cid).close())
+        for d in devs.values():
+            if d.id in self.casts:
+                self.casts[d.id].dev = d
+            else:
+                self.casts[d.id] = CastOutput(d, self.cast_media, self._cast_moved)
+        wanted = {}
+        for sp in cfg.speakers:
+            mic = self.clients.get(sp.mic) if sp.mic else None
+            out = self._output(sp.output) if sp.output else None
+            if not sp.enabled or (sp.mic and mic is None) or (sp.output and out is None) or (mic is None and out is None):
+                continue
+            wanted[sp.id] = (sp, mic, out)
+        for sid, vs in list(self.speakers.items()):
+            w = wanted.get(sid)
+            if w is None or w[1] is not vs.mic_dev or w[2] is not vs.out:
+                del self.speakers[sid]
+                self.voice.detach(vs)
+                self._spawn(vs.close())
+                log.info("speaker '%s' offline", vs.name)
+        for sid, (sp, mic, out) in wanted.items():
+            vs = self.speakers.get(sid)
+            if vs is not None:
+                vs.cfg = sp
+                continue
+            vs = VirtualSpeaker(sp, mic, out)
+            self.speakers[sid] = vs
+            if mic is not None:
+                mic.on_mic = vs.mic
+                self.voice.attach(vs)
+            log.info("speaker '%s' online (mic: %s, output: %s)", sp.name, mic.name if mic else "none",
+                     out.name if out is not None else "none")
+        self.voice.refresh_wake_words()
+
+    def _cast_moved(self, dev: CastDevice, host: str, port: int) -> None:
+        dev.host, dev.port = host, port
+        d = self.store.cast(dev.id)
+        if d is not None:
+            d.host, d.port = host, port
+        self.store.save()
+
+    def speaker_for_mic(self, client_id: str) -> VirtualSpeaker | None:
+        return next((vs for vs in self.speakers.values() if vs.mic_dev is not None and vs.mic_dev.id == client_id),
+                    None)
+
+    def reset_wake(self, conn: VirtualSpeaker) -> None:
         self.voice.reset_wake(conn)
 
-    def wake_phrase(self, conn: ClientConn) -> str:
+    def wake_phrase(self, conn: VirtualSpeaker) -> str:
         words = self.voice.wake_words(conn)
         return (words[0] if words else "hey_jarvis").replace("_", " ")
 
@@ -380,6 +449,8 @@ class Engine:
             "uptime": time.time() - self.started,
             "pbx": pbx.status() if pbx else {"state": "disabled"},
             "clients": [c.info() for c in self.clients.values()],
+            "speakers": [vs.info() for vs in self.speakers.values()],
+            "casts": {cid: c.info() for cid, c in self.casts.items()},
             "agents": {aid: rt.info() for aid, rt in self.agent_rts.items()},
             "machines": {mid: rt.info() for mid, rt in self.machine_rts.items()},
             "calls": self.calls.info(),

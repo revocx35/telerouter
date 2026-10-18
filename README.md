@@ -7,6 +7,9 @@ telerouter, through MCP, to call him on WhatsApp, and the call is connected to t
 
 - **Speakers**: tiny clients for **Linux and macOS** stream their microphone and play what the server
   sends. Wake word (openWakeWord), speech-to-text (Whisper) and text-to-speech (Piper) run on the server.
+  A speaker is virtual: it takes its **microphone** from one device and its **output** from the same or
+  another one, including **Google Cast speakers** (Nest, Mi Smart Speaker, any Chromecast built-in). Use a
+  laptop's microphone with the good loudspeaker of a Cast speaker in the same room.
 - **Agents**: telerouter SSHes into the machine where your agent lives, starts **Claude Code** (default
   model Sonnet 5.5, effort medium) or **Hermes** in a tmux session you can attach to, types each voice
   request into it and speaks the answer.
@@ -43,8 +46,9 @@ Open `https://<host>:8443`, accept the self-signed certificate (or use your own,
 setup code and create the admin account. The first start downloads the Whisper model and the default
 voice (a few hundred MB).
 
-Ports: `8443/tcp` (web UI, API, speakers, MCP), `5080/udp` (SIP), `18000-18199/udp` (RTP). The speech
-services listen on `127.0.0.1` only.
+Ports: `8443/tcp` (web UI, API, speakers, MCP), `5080/udp` (SIP), `18000-18199/udp` (RTP), and
+`8480/tcp` only once you add a Google Cast speaker (plain HTTP: Cast speakers fetch their audio from it, see
+below). The speech services listen on `127.0.0.1` only.
 
 ## Set it up
 
@@ -54,9 +58,12 @@ services listen on `127.0.0.1` only.
    agent installed and logged in (`claude` once by hand, or `hermes setup`). *Add agent*: host, user,
    *Fetch & confirm host key*, model (`claude-sonnet-5-5`), effort (`medium`), permission mode. telerouter
    starts it in tmux; attach with the command shown on the card.
-2. **Speakers** → *Add speaker*, then run the shown command on the Linux/macOS machine (as the desktop
-   user). It installs the client into `~/.local/share/telerouter-client` and starts it as a user service.
-   Linux needs `python3-venv` and `libportaudio2`. Check audio with `telerouter-client test-audio`.
+2. **Speakers** → *Devices* → *Add device*, then run the shown command on the Linux/macOS machine (as the
+   desktop user). It installs the client into `~/.local/share/telerouter-client` and starts it as a user
+   service, and the device gets its own speaker (its mic + its loudspeaker). Linux needs `python3-venv` and
+   `libportaudio2` (or `alsa-utils` without a sound server). Check audio with `telerouter-client test-audio`.
+   Optional: *Google Cast speakers* → *Find on the network* → *Add*, then *New speaker* with a device's
+   microphone and the Cast speaker as output (see [Speakers from several devices](#speakers-from-several-devices)).
 3. **Integrations** → your PBX extension (e.g. a new FreePBX extension for telerouter; enable *Trust
    RPID/PAI*). For WhatsApp and cameras: in wa2sip/cam2sip open *Settings → Integrations*, create a token,
    then here *Add wa2sip / cam2sip* with its HTTPS address, the token, and *Fetch & pin certificate*.
@@ -68,6 +75,26 @@ services listen on `127.0.0.1` only.
    `.tflite` in `wake-models/`), language, voice, timeouts.
 
 Then say *"Hey Jarvis"*: a blip means it listens, a second blip means it got you.
+
+## Speakers from several devices
+
+A **speaker** is what you and the agents talk to ("odam", "kitchen"). It has a **microphone** (an enrolled
+device) and an **output** (an enrolled device or a Google Cast speaker). *Speakers → New speaker*: name it,
+pick e.g. the laptop's microphone and the Mi Smart Speaker as output. A microphone feeds one speaker (it
+moves there; the old speaker keeps its output and can still announce).
+
+With a Cast speaker as output:
+- answers, announcements and "Calling dad" play on the Cast speaker (each sentence starts in ~0.2 s; the
+  first answer after 5 idle minutes ~1.5 s later, while the receiver app starts, which may chime);
+- the beeps play on the microphone's device by default (instant feedback; *Beeps* → *on the output* to
+  change it);
+- live **calls are heard on the microphone's device**: Cast speakers buffer seconds of a live stream;
+- no barge-in (the device's echo canceller can't hear the Cast speaker); the wake word pauses while it plays;
+- telerouter takes the Cast speaker over when it speaks (whatever it was casting stops) and lets it go after
+  5 idle minutes. If it is unreachable, the microphone's device plays instead for a minute.
+- Cast speakers only fetch media over HTTPS with a public certificate, so their audio comes over **plain
+  HTTP** (`TELEROUTER_CAST_PORT`, default 8480): each sentence gets a random single-use link that only that
+  speaker's address may fetch, for at most 60 s. Keep it on your LAN.
 
 ## Quiet hours (do not disturb)
 

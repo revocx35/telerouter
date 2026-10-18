@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from .models import Agent, Client, Config, Contact, Integration, Machine, McpToken
+from .models import Agent, CastDevice, Client, Config, Contact, Integration, Machine, McpToken, Speaker
 
 log = logging.getLogger("telerouter.store")
 
@@ -34,6 +34,26 @@ def write_private(path: Path, data: str | bytes) -> None:
         except OSError:
             pass
         raise
+
+
+SPEAKER_FIELDS = ("agent_id", "wake_words", "volume", "visible_to_agents", "thinking_cue")
+
+
+def migrate_raw(data: dict) -> bool:
+    """0.5 -> 0.6: a client was the speaker; now a Speaker takes its mic and output from devices.
+    Every client becomes a speaker with the same id (MCP allow-lists and "ring a speaker" keep working)."""
+    if "speakers" in data or not isinstance(data.get("clients"), list):
+        return False
+    speakers = []
+    for c in data["clients"]:
+        if not isinstance(c, dict) or not c.get("id") or not c.get("name"):
+            continue
+        sp = {"id": c["id"], "name": c["name"], "room": c.get("room", ""), "enabled": c.get("enabled", True),
+              "mic": c["id"], "output": f"client:{c['id']}"}
+        sp.update({k: c[k] for k in SPEAKER_FIELDS if k in c})
+        speakers.append(sp)
+    data["speakers"] = speakers
+    return True
 
 
 def migrate(cfg: Config) -> bool:
@@ -76,8 +96,10 @@ class Store:
         if self.path.exists():
             try:
                 raw = self.path.read_text()
-                cfg = Config.model_validate_json(raw)
-                if migrate(cfg):
+                data = json.loads(raw)
+                moved = migrate_raw(data)
+                cfg = Config.model_validate(data)
+                if migrate(cfg) or moved:
                     write_private(self.path.with_name(f"config.json.bak-{int(time.time())}"), raw)
                     self._write(cfg)
                 return cfg
@@ -119,6 +141,12 @@ class Store:
     def client(self, cid: str) -> Client | None:
         return next((c for c in self.config.clients if c.id == cid), None)
 
+    def speaker(self, sid: str) -> Speaker | None:
+        return next((s for s in self.config.speakers if s.id == sid), None)
+
+    def cast(self, cid: str) -> CastDevice | None:
+        return next((c for c in self.config.casts if c.id == cid), None)
+
     def agent(self, aid: str) -> Agent | None:
         return next((a for a in self.config.agents if a.id == aid), None)
 
@@ -126,8 +154,8 @@ class Store:
         cfg = self.config
         return self.agent(cfg.default_agent_id) or next((a for a in cfg.agents if a.enabled), None)
 
-    def agent_for_client(self, client: Client) -> Agent | None:
-        return (self.agent(client.agent_id) if client.agent_id else None) or self.default_agent()
+    def agent_for_speaker(self, sp: Speaker) -> Agent | None:
+        return (self.agent(sp.agent_id) if sp.agent_id else None) or self.default_agent()
 
     def contact(self, cid: str) -> Contact | None:
         return next((c for c in self.config.contacts if c.id == cid), None)

@@ -107,11 +107,11 @@ class McpServer:
 
     def _find_speaker(self, tok: McpToken, ref: str):
         e = self.engine
-        cands = [c for c in e.store.config.clients if c.visible_to_agents and tok.allows_client(c.id)]
+        cands = [c for c in e.store.config.speakers if c.visible_to_agents and tok.allows_client(c.id)]
         c = pick_speaker(ref, cands)
         if c is None:
             raise ToolError(f"no speaker '{ref}' (see list_speakers)")
-        conn = e.clients.get(c.id)
+        conn = e.speakers.get(c.id)
         if not conn:
             raise ToolError(f"speaker '{c.name}' is offline")
         return conn
@@ -146,16 +146,16 @@ class McpServer:
                             "number": c.number if c.kind != "camera" else ""})
             return {"contacts": out}
 
-        @tool("list_speakers", "clients", "List the speakers (smart-speaker clients) and whether they are online.",
-              _obj({}))
+        @tool("list_speakers", "clients", "List the speakers and whether they are online (a speaker without a "
+              "microphone can only announce).", _obj({}))
         async def list_speakers(tok):
             e = self.engine
             out = []
-            for c in e.store.config.clients:
+            for c in e.store.config.speakers:
                 if c.visible_to_agents and tok.allows_client(c.id):
-                    conn = e.clients.get(c.id)
+                    conn = e.speakers.get(c.id)
                     out.append({"id": c.id, "name": c.name, "room": c.room, "online": bool(conn),
-                                "state": conn.state if conn else "offline"})
+                                "state": conn.state if conn else "offline", "microphone": bool(c.mic)})
             src = self._source(tok)
             return {"speakers": out, "current_request_from": src.label if src else None}
 
@@ -178,8 +178,8 @@ class McpServer:
                 await self._quiet_gate("calls")
             if speaker:
                 conn = self._find_speaker(tok, speaker)
-            elif src and src.kind == "speaker" and src.client_id:
-                conn = e.clients.get(src.client_id)
+            elif src and src.kind == "speaker" and src.speaker_id:
+                conn = e.speakers.get(src.speaker_id)
                 if not conn:
                     raise ToolError("the requesting speaker went offline")
                 if not tok.allows_client(conn.id):
@@ -317,10 +317,10 @@ class McpServer:
         agent = e.store.agent(tok.agent_id) if tok.agent_id else None
         back = f"back to {agent.name}" if agent else "back"
         if speaker or (src and src.kind == "speaker"):
-            conn = self._find_speaker(tok, speaker) if speaker else e.clients.get(src.client_id)
+            conn = self._find_speaker(tok, speaker) if speaker else e.speakers.get(src.speaker_id)
             if not conn:
                 raise ToolError("the requesting speaker went offline")
-            conn.route = route                 # type: ignore[attr-defined]
+            conn.route = route
             where = f"the {conn.name} speaker"
         elif src and src.kind == "phone" and src.call_id and e.calls.get(src.call_id):
             e.calls.get(src.call_id).route = route   # type: ignore[union-attr]
@@ -479,7 +479,7 @@ def _speaker_words(text: str) -> str:
 
 
 def pick_speaker(ref, clients):
-    """'the speaker in my room' -> the client named/roomed 'my room' (or the one clearly closest)."""
+    """'the speaker in my room' -> the speaker named/roomed 'my room' (or the one clearly closest)."""
     r = _speaker_words(ref)
     for c in clients:                                   # exact id, name or room
         if ref.strip().lower() in (c.id, c.name.lower(), c.room.lower()) or (r and r in (_speaker_words(c.name), _speaker_words(c.room))):

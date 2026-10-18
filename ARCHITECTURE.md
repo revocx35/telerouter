@@ -50,7 +50,9 @@ telerouter/
   engine.py            wiring: SIP UA + accounts, agent runtimes, integration clients, contact lookups
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
   voice/
-    client_conn.py     one speaker connection: paced audio out, mic in, state
+    client_conn.py     one speaker device connection (client): paced audio out, mic in, state
+    speaker.py         VirtualSpeaker: a mic device + an output device; play/cue/live routing
+    cast.py            Google Cast outputs: Cast v2 control (TLS :8009), mDNS discovery, plain-HTTP media listener
     assistant.py       wake -> listen -> STT -> agent -> TTS turn; mic routing; speakable()
     speech.py          Wyoming clients (Whisper, Piper, openWakeWord WakeStream)
     vad.py             Silero endpointing
@@ -71,6 +73,48 @@ tools/                 sip_phone.py (scriptable SIP phone), fake-agent/ (sshd + 
 ```
 
 ## 3. Speakers
+
+A **speaker** (`models.Speaker`, runtime `voice/speaker.py: VirtualSpeaker`) is what agents and the owner
+talk to. It is built from devices: its **microphone** is an enrolled client (`Client`), its **output** an
+enrolled client or a **Google Cast speaker** (`CastDevice`). The classic case is one client for both (every
+enrolled client gets such a speaker, with the client's id); "odam" = the Raqqa laptop's mic + the Mi Smart
+Speaker's loudspeaker. `Engine.sync_speakers()` turns config + connected devices into online
+VirtualSpeakers (online = mic device connected and output there); a changed binding builds a new one, like
+a reconnect. A microphone feeds one speaker (the API moves it). Device ids and speaker ids are separate
+lists; MCP token allow-lists (`McpToken.clients`) and "ring a speaker" (`inbound_client`) hold speaker ids.
+
+| VirtualSpeaker | audio | goes to |
+|---|---|---|
+| `play()` | answers, announcements, "Calling dad", incoming ring | the output |
+| `cue()` | blips and thinking ticks | the output, or the mic device (`cues`; `auto` = mic device when the output is Cast) |
+| `live()` | live call audio, ring-back | the output if `live_ok` (a client), otherwise the mic device |
+
+Barge-in (AEC) only when mic and output are the same client. Wake detection pauses while any of the
+speaker's outputs plays.
+
+### 3.0 Google Cast outputs (`voice/cast.py`)
+
+Control is Cast v2: TLS to the device's port 8009, length-prefixed protobuf `CastMessage` frames
+(hand-encoded, six fields), JSON payloads; heartbeat PING/PONG. telerouter launches the Default Media
+Receiver (`CC1AD845`) on first use (or ahead, `prepare()`, when a turn starts listening), keeps it, and stops
+it after 5 idle minutes. Measured on a Mi Smart Speaker Lite (Cast firmware 1.52):
+
+| what | result |
+|---|---|
+| launch the receiver | ~1.3-1.5 s |
+| LOAD of a complete WAV -> PLAYING | ~0.15 s; `IDLE/FINISHED` arrives when playback ends |
+| live WAV stream (unknown length) | starts only after ~7 s of 16 kHz audio is buffered, then stalls: unusable |
+
+So `CastOutput` cuts audio into segments (what arrives within 120 ms: a sentence, a beep), LOADs each as a
+complete WAV and waits for FINISHED (exact `drained()`); sentences that arrive while one plays become the
+next segment. `flush()` sends media STOP. `live_ok = False`: calls play on the mic device. When the device
+is unreachable the audio is handed to the speaker's mic device (`spill`) and the device is skipped for
+60 s; its mDNS id finds it again after a DHCP move (`discover()`, `_googlecast._tcp.local`).
+
+The receiver fetches the media itself, and Cast accepts HTTPS only with a publicly trusted certificate,
+so `CastMedia` is a small plain-HTTP listener (`TELEROUTER_CAST_PORT`, 8480, started on first use): only
+`GET /cast/<128-bit random>.wav`, only from the address of the device it was offered to, gone after
+FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 
 ### 3.1 Protocol
 
@@ -269,6 +313,8 @@ integration tokens, SSH key).
 | Plain-text credentials on the wire | HTTPS only (self-signed CA; clients and the installer pin it); integrations over HTTPS with a pinned certificate; agent MCP inside SSH |
 | Stolen/leaked tokens | random 256-bit tokens, only SHA-256 stored, sent in headers, revocable (speaker removal, MCP token revoke, integration token rotation); agent MCP token rotates on every session start; secrets write-only in the API |
 | Rogue speaker client | needs an enrollment code (single use, 15 min, throttled); WebSocket frames size/rate capped; max clients |
+| Eavesdropping on Cast speaker audio | Cast receivers fetch media only over plain HTTP (no publicly trusted certificate on a LAN): what a Cast output plays (answers, announcements; never live calls or microphone audio) crosses the LAN unencrypted. Single-use 128-bit URLs, served only to that device's address, withdrawn after playback / 60 s; the listener runs only once a Cast output is used. The Cast control channel is TLS but unauthenticated (device certificates are self-signed and rotate; Cast device auth is not implemented), so a LAN attacker who impersonates the device can get those URLs too. Don't use Cast outputs for private answers on an untrusted network |
+| Rogue Cast device address | admin-only; telerouter only sends control messages and serves the offered WAV to it; mDNS updates the address only for the stored device id |
 | Spoofed SIP INVITEs | PBX account only from the PBX's IP; direct address is a 128-bit secret and only from linked integrations' IPs; unknown callers rejected; optional DTMF PIN before the agent; wa2sip/cam2sip tickets are single-use, 30 s, bound to the requesting IP |
 | Spoofed caller ID on the PBX | caller policy per contact; use the agent PIN if the PBX takes calls from outside |
 | A voice request makes the agent do harm | the agent runs with the permission mode you choose (default `auto`); permission prompts are announced, never auto-approved; the agent instructions forbid calling anyone not asked for; MCP tokens can be limited to contacts/speakers |

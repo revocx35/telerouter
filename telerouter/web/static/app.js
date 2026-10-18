@@ -199,21 +199,21 @@ function poll(fn, ms) { S.timer = setInterval(() => fn().catch(() => {}), ms); }
 async function dashboard(main) {
   const box = el("div");
   main.replaceChildren(el("h1", {}, "Dashboard"), box);
-  const [agentsCfg, clientsCfg] = await Promise.all([api("GET", "/api/agents"), api("GET", "/api/clients")]);
+  const [agentsCfg, spCfg] = await Promise.all([api("GET", "/api/agents"), api("GET", "/api/speakers")]);
   let speech = null;
   api("GET", "/api/speech").then(s => { speech = s; draw(); }).catch(() => {});
   let st = await api("GET", "/api/status");
   function draw() {
-    const online = Object.fromEntries(st.clients.map(c => [c.id, c]));
+    const online = Object.fromEntries(st.speakers.map(c => [c.id, c]));
     const speakers = el("div", { class: "card" }, el("h2", {}, "Speakers"),
-      clientsCfg.clients.length ? el("table", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "State"), el("th", { class: "hide-sm" }, "Last heard"), el("th", {}, "")),
-        clientsCfg.clients.map(c => {
+      spCfg.speakers.length ? el("table", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "State"), el("th", { class: "hide-sm" }, "Last heard"), el("th", {}, "")),
+        spCfg.speakers.map(c => {
           const o = online[c.id];
           return el("tr", {}, el("td", {}, c.name, c.room ? el("span", { class: "muted" }, ` · ${c.room}`) : ""),
             el("td", {}, stateDot(o ? o.state : "offline"), el("span", { class: "state" }, o ? o.state : "offline"),
               o && o.aec ? el("span", { class: "chip", title: "client echo cancellation" }, " AEC") : ""),
-            el("td", { class: "hide-sm muted" }, o ? (o.last_text || "") : `seen ${ago(c.last_seen)}`),
-            el("td", {}, o && o.state === "idle" ? el("button", { class: "small", onclick: () => act(() => api("POST", `/api/clients/${c.id}/talk`), "Listening…") }, "Talk") : ""));
+            el("td", { class: "hide-sm muted" }, o ? (o.last_text || "") : ""),
+            el("td", {}, o && o.state === "idle" && c.mic ? el("button", { class: "small", onclick: () => act(() => api("POST", `/api/speakers/${c.id}/talk`), "Listening…") }, "Talk") : ""));
         })) : el("p", { class: "hint" }, "No speakers yet. ", el("a", { href: "#/speakers" }, "Add one")));
     const agentsBox = el("div", { class: "card" }, el("h2", {}, "Agents"),
       agentsCfg.agents.length ? agentsCfg.agents.map(a => {
@@ -240,65 +240,145 @@ async function dashboard(main) {
 }
 
 // ---------------------------------------------------------------------------------------------- speakers
+// A speaker (what agents see, e.g. "odam") takes its microphone from one device and its output from another
+// or the same: an enrolled client (mic + loudspeaker) or a Google Cast speaker (output only).
+function deviceOptions(clients, casts) {
+  return {
+    mics: [["", "none (announcements only)"], ...clients.map(d => [d.id, d.name])],
+    outs: [["", "none"], ...clients.map(d => ["client:" + d.id, d.name]), ...casts.map(d => ["cast:" + d.id, `${d.name} (Cast)`])],
+  };
+}
+
 async function speakers(main) {
-  const [data, agentsCfg, settings] = await Promise.all([api("GET", "/api/clients"), api("GET", "/api/agents"), api("GET", "/api/settings")]);
+  const [spD, devD, castD, agentsCfg, settings] = await Promise.all([api("GET", "/api/speakers"), api("GET", "/api/clients"),
+    api("GET", "/api/casts"), api("GET", "/api/agents"), api("GET", "/api/settings")]);
   let wakeModels = [];
   try { wakeModels = (await api("GET", "/api/speech")).wake_models; } catch { }
-  let st = await api("GET", "/api/status");
-  const list = el("div");
-  function draw() {
-    const online = Object.fromEntries(st.clients.map(c => [c.id, c]));
-    list.replaceChildren(...data.clients.map(c => {
-      const o = online[c.id];
-      const f = el("div", { class: "form2" },
-        field("Name (what agents see)", inp("name", c.name)), field("Room", inp("room", c.room)),
-        field("Agent", sel("agent_id", c.agent_id, [["", "default agent"], ...agentsCfg.agents.map(a => [a.id, a.name])])),
-        field("Wake word", sel("wake_word", (c.wake_words || [])[0] || "", [["", `default (${settings.voice.wake_words.join(", ")})`], ...wakeModels.map(m => [m.name, m.phrase])])),
-        field("Volume %", num("volume", c.volume, { min: 0, max: 200 })),
-        field("Beeps while the agent works", sel("thinking_cue", c.thinking_cue || "default", [["default", `default (${settings.voice.thinking_cue ? "on" : "off"})`], ["on", "on"], ["off", "off"]])));
-      const save = async () => {
-        const d = formData(f);
-        const body = { name: d.name, room: d.room, agent_id: d.agent_id, volume: d.volume, thinking_cue: d.thinking_cue,
-          wake_words: d.wake_word ? [d.wake_word] : [], enabled: $("input[name=enabled]", card).checked,
-          visible_to_agents: $("input[name=visible_to_agents]", card).checked };
-        await act(() => api("PUT", `/api/clients/${c.id}`, body), "Saved");
-      };
-      const card = el("div", { class: "card" },
-        el("div", { class: "row" }, stateDot(o ? o.state : "offline"), el("h2", {}, c.name), el("span", { class: "chip" }, o ? o.state : "offline"),
-          el("span", { class: "muted" }, c.platform || ""), c.client_version ? el("span", { class: "muted" }, `client ${c.client_version}`) : "",
-          el("span", { class: "spacer" }), el("span", { class: "muted" }, o ? `connected ${ago(o.connected_at)}` : `last seen ${ago(c.last_seen)}`)),
-        f, el("div", { class: "row" }, chk("enabled", c.enabled, "Enabled"), chk("visible_to_agents", c.visible_to_agents, "Agents may use it (announce / calls)")),
-        o ? el("div", { class: "row muted" }, `mic ${o.mic_level} dBFS`, o.last_text ? ` · heard: "${o.last_text}"` : "") : "",
-        el("div", { class: "row" },
-          el("button", { class: "primary", onclick: save }, "Save"),
-          el("button", { disabled: !o, onclick: () => act(() => api("POST", `/api/clients/${c.id}/talk`), "Listening…") }, "Talk (like the wake word)"),
-          el("button", { disabled: !o, onclick: () => { const t = prompt("Say on " + c.name + ":"); if (t) act(() => api("POST", `/api/clients/${c.id}/say`, { text: t })); } }, "Say…"),
-          el("span", { class: "spacer" }),
-          el("button", { class: "danger", onclick: async () => { if (confirm(`Remove ${c.name}? Its token stops working.`)) { await act(() => api("DELETE", `/api/clients/${c.id}`), "Removed"); route(); } } }, "Remove")));
-      return card;
-    }));
+  const st = await api("GET", "/api/status");
+  const online = Object.fromEntries(st.speakers.map(x => [x.id, x]));
+  const devOnline = Object.fromEntries(st.clients.map(x => [x.id, x]));
+  const opts = deviceOptions(devD.clients, castD.casts);
+  const devName = Object.fromEntries([...devD.clients.map(d => [d.id, d.name]), ...devD.clients.map(d => ["client:" + d.id, d.name]),
+    ...castD.casts.map(d => ["cast:" + d.id, d.name])]);
+  const micOwner = mic => spD.speakers.find(x => x.mic === mic);
+
+  async function saveSpeaker(sp, body) {
+    const owner = body.mic && micOwner(body.mic);
+    if (owner && (!sp || owner.id !== sp.id) && !confirm(`${devName[body.mic]}'s microphone is used by "${owner.name}". Move it to this speaker? ("${owner.name}" keeps its output.)`)) return;
+    await act(() => sp ? api("PUT", `/api/speakers/${sp.id}`, body) : api("POST", "/api/speakers", body), "Saved");
+    route();
   }
-  const addForm = el("form", { class: "row" }, inp("name", "", { placeholder: "Name, e.g. Kitchen", required: true }), inp("room", "", { placeholder: "Room (optional)" }),
-    el("button", { class: "primary", type: "submit" }, "Add speaker"));
+
+  const cards = spD.speakers.map(sp => {
+    const o = online[sp.id];
+    const f = el("div", { class: "form2" },
+      field("Name (what agents see)", inp("name", sp.name)), field("Room", inp("room", sp.room)),
+      field("Microphone", sel("mic", sp.mic, opts.mics)),
+      field("Output", sel("output", sp.output, opts.outs), sp.output.startsWith("cast:") ? "The Cast speaker plays answers; live calls are heard on the microphone's device." : null),
+      field("Beeps", sel("cues", sp.cues, [["auto", "auto (mic device when the output is Cast)"], ["output", "on the output"], ["mic", "on the mic device (faster)"]])),
+      field("Agent", sel("agent_id", sp.agent_id, [["", "default agent"], ...agentsCfg.agents.map(a => [a.id, a.name])])),
+      field("Wake word", sel("wake_word", (sp.wake_words || [])[0] || "", [["", `default (${settings.voice.wake_words.join(", ")})`], ...wakeModels.map(m => [m.name, m.phrase])])),
+      field("Volume %", num("volume", sp.volume, { min: 0, max: 200 })),
+      field("Beeps while the agent works", sel("thinking_cue", sp.thinking_cue || "default", [["default", `default (${settings.voice.thinking_cue ? "on" : "off"})`], ["on", "on"], ["off", "off"]])));
+    const card = el("div", { class: "card" },
+      el("div", { class: "row" }, stateDot(o ? o.state : "offline"), el("h2", {}, sp.name), el("span", { class: "chip" }, o ? o.state : "offline"),
+        el("span", { class: "muted" }, `mic: ${devName[sp.mic] || "none"} · output: ${devName[sp.output] || "none"}`),
+        o && o.aec ? el("span", { class: "chip", title: "client echo cancellation" }, "AEC") : ""),
+      f, el("div", { class: "row" }, chk("enabled", sp.enabled, "Enabled"), chk("visible_to_agents", sp.visible_to_agents, "Agents may use it (announce / calls)")),
+      o && o.mic_level !== null ? el("div", { class: "row muted" }, `mic ${o.mic_level} dBFS`, o.last_text ? ` · heard: "${o.last_text}"` : "") : "",
+      el("div", { class: "row" },
+        el("button", { class: "primary", onclick: () => {
+          const d = formData(f);
+          saveSpeaker(sp, { name: d.name, room: d.room, mic: d.mic, output: d.output, cues: d.cues, agent_id: d.agent_id, volume: d.volume,
+            thinking_cue: d.thinking_cue, wake_words: d.wake_word ? [d.wake_word] : [], enabled: $("input[name=enabled]", card).checked,
+            visible_to_agents: $("input[name=visible_to_agents]", card).checked });
+        } }, "Save"),
+        el("button", { disabled: !o || !sp.mic, onclick: () => act(() => api("POST", `/api/speakers/${sp.id}/talk`), "Listening…") }, "Talk (like the wake word)"),
+        el("button", { disabled: !o, onclick: () => { const t = prompt("Say on " + sp.name + ":"); if (t) act(() => api("POST", `/api/speakers/${sp.id}/say`, { text: t })); } }, "Say…"),
+        el("span", { class: "spacer" }),
+        el("button", { class: "danger", onclick: async () => { if (confirm(`Remove the speaker ${sp.name}? Its devices stay.`)) { await act(() => api("DELETE", `/api/speakers/${sp.id}`), "Removed"); route(); } } }, "Remove")));
+    return card;
+  });
+
+  function newSpeaker() {
+    const f = el("div", {}, field("Name (what agents see)", inp("name", "", { placeholder: "e.g. odam" })), field("Room", inp("room", "")),
+      field("Microphone", sel("mic", "", opts.mics)), field("Output", sel("output", "", opts.outs)));
+    modal("New speaker", f, close => [el("button", { class: "primary", onclick: async () => {
+      const d = formData(f);
+      await saveSpeaker(null, { name: d.name, room: d.room, mic: d.mic, output: d.output }); close();
+    } }, "Create")]);
+  }
+
+  // devices: enrolled clients
+  const devTable = devD.clients.length ? el("table", {}, el("tr", {}, ["Device", "State", "Used by", ""].map(t => el("th", {}, t))),
+    devD.clients.map(d => {
+      const o = devOnline[d.id];
+      const used = spD.speakers.filter(x => x.mic === d.id || x.output === "client:" + d.id).map(x => x.name);
+      return el("tr", {}, el("td", {}, el("b", {}, d.name), el("div", { class: "muted" }, [d.platform, d.client_version ? `client ${d.client_version}` : ""].filter(Boolean).join(" · "))),
+        el("td", {}, stateDot(o ? "connected" : "offline"), o ? `connected · mic ${o.mic_level} dBFS` : `last seen ${ago(d.last_seen)}`),
+        el("td", {}, used.join(", ") || el("span", { class: "muted" }, "no speaker")),
+        el("td", {}, el("button", { class: "small danger", onclick: async () => { if (confirm(`Remove the device ${d.name}? Its token stops working.`)) { await act(() => api("DELETE", `/api/clients/${d.id}`), "Removed"); route(); } } }, "Remove")));
+    })) : el("p", { class: "hint" }, "No device yet.");
+  const addForm = el("form", { class: "row" }, inp("name", "", { placeholder: "Device name, e.g. Kitchen", required: true }), inp("room", "", { placeholder: "Room (optional)" }),
+    el("button", { class: "primary", type: "submit" }, "Add device"));
   addForm.addEventListener("submit", async e => {
     e.preventDefault();
     const r = await act(() => api("POST", "/api/clients/enroll", formData(addForm)));
     addForm.reset();
     modal("Install the speaker client", el("div", {},
-      el("p", {}, "On the Linux or macOS machine with the microphone and speaker, run this as the user who should own the client (not root). It installs into ~/.local/share/telerouter-client and starts it as a user service. The code works once, for 15 minutes."),
+      el("p", {}, "On the Linux or macOS machine with the microphone and speaker, run this as the user who should own the client (not root). It installs into ~/.local/share/telerouter-client and starts it as a user service. The code works once, for 15 minutes. The device gets its own speaker; you can also use its microphone or loudspeaker in other speakers."),
       copyBox(r.command),
       el("h3", {}, "Needs"),
       el("p", { class: "hint" }, "Python 3.9+ with venv, curl; on Linux also PortAudio (Debian/Ubuntu: sudo apt install python3-venv libportaudio2). The command pins this server's certificate, so it is safe on an untrusted network."),
       el("h3", {}, "Manual install"),
       el("p", { class: "hint" }, `Code ${r.code} · server ${r.server} · CA sha256 ${r.ca_sha256}`)));
   });
+
+  // Google Cast speakers
+  const castTable = castD.casts.length ? el("table", {}, el("tr", {}, ["Cast speaker", "State", "Used by", ""].map(t => el("th", {}, t))),
+    castD.casts.map(d => {
+      const rt = castD.runtime[d.id];
+      const used = spD.speakers.filter(x => x.output === "cast:" + d.id).map(x => x.name);
+      const s = !d.enabled ? "disabled" : rt ? rt.state : "idle";
+      return el("tr", {}, el("td", {}, el("b", {}, d.name), el("div", { class: "muted mono" }, `${d.host}${d.model ? " · " + d.model : ""}`)),
+        el("td", {}, stateDot(s === "idle" ? "ready" : s), s, rt && rt.error ? el("div", { class: "err" }, rt.error) : ""),
+        el("td", {}, used.join(", ") || el("span", { class: "muted" }, "no speaker")),
+        el("td", {}, el("div", { class: "row" },
+          el("button", { class: "small", disabled: !d.enabled, onclick: () => act(() => api("POST", `/api/casts/${d.id}/test`), "Played") }, "Test"),
+          el("button", { class: "small", onclick: async () => { await act(() => api("PUT", `/api/casts/${d.id}`, { enabled: !d.enabled }), d.enabled ? "Disabled" : "Enabled"); route(); } }, d.enabled ? "Disable" : "Enable"),
+          el("button", { class: "small danger", onclick: async () => { if (confirm(`Remove ${d.name}?`)) { await act(() => api("DELETE", `/api/casts/${d.id}`), "Removed"); route(); } } }, "Remove"))));
+    })) : el("p", { class: "hint" }, "No Cast speaker yet.");
+  async function findCasts() {
+    const box = el("div", {}, el("p", { class: "hint" }, "Looking for Cast speakers on the network…"));
+    modal("Google Cast speakers", box);
+    const r = await act(() => api("GET", "/api/casts/discover"));
+    box.replaceChildren(r.found.length ? el("table", {}, r.found.map(f => el("tr", {},
+      el("td", {}, el("b", {}, f.name || f.uuid), el("div", { class: "muted mono" }, `${f.host} · ${f.model}`)),
+      el("td", {}, f.added ? el("span", { class: "muted" }, "added") : el("button", { class: "small primary", onclick: async () => {
+        await act(() => api("POST", "/api/casts", { name: f.name || f.model || "Cast speaker", host: f.host, port: f.port, uuid: f.uuid, model: f.model }), "Added");
+        document.querySelector(".modal-bg").remove(); route();
+      } }, "Add")))))
+      : el("p", { class: "hint" }, "None found. mDNS needs telerouter on the same network as the speaker (host networking); you can add one by its address."));
+  }
+  const castForm = el("form", { class: "row" }, inp("name", "", { placeholder: "Name", required: true }), inp("host", "", { placeholder: "Address, e.g. 192.168.1.38", required: true }),
+    el("button", { type: "submit" }, "Add by address"));
+  castForm.addEventListener("submit", async e => {
+    e.preventDefault();
+    await act(() => api("POST", "/api/casts", formData(castForm)), "Added"); route();
+  });
+
   main.replaceChildren(el("h1", {}, "Speakers"),
-    el("div", { class: "card" }, el("h2", {}, "Add a speaker"),
-      el("p", { class: "hint" }, "A speaker is a small client on a Linux or macOS machine: it streams its microphone here and plays what telerouter sends. Wake words, speech recognition and the agent all run on this server."),
-      addForm), list);
-  draw();
-  poll(async () => { st = await api("GET", "/api/status"); updateStates(); }, 3000);
-  function updateStates() { /* keep forms untouched while typing; a full redraw happens on navigation */ }
+    el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "Speakers"), el("span", { class: "spacer" }),
+        el("button", { class: "primary", onclick: newSpeaker }, "New speaker")),
+      el("p", { class: "hint" }, "A speaker is what you and the agents talk to. Each one takes its microphone from a device and its output from the same or another device, e.g. a laptop's microphone with a Cast speaker's loudspeaker. A microphone feeds one speaker.")),
+    ...cards,
+    el("div", { class: "card" }, el("h2", {}, "Devices"),
+      el("p", { class: "hint" }, "A device is a small client on a Linux or macOS machine: it streams its microphone here and plays what telerouter sends. Wake words, speech recognition and the agent all run on this server."),
+      devTable, el("h3", {}, "Add a device"), addForm),
+    el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "Google Cast speakers"), el("span", { class: "spacer" }),
+        el("button", { onclick: findCasts }, "Find on the network")),
+      el("p", { class: "hint" }, "Chromecast built-in speakers (Google Nest, Mi Smart Speaker…) as outputs. They have no microphone telerouter can use, so pair one with a device's microphone in a speaker. Answers start in about 0.2 s; the first one after a few idle minutes takes ~1.5 s longer, and taking over the speaker stops whatever else it was casting. Cast speakers fetch the audio over plain HTTP on port " + (castD.port || 8480) + " (single-use links only they may fetch)."),
+      castTable, el("h3", {}, "Add by address"), castForm));
 }
 
 // ---------------------------------------------------------------------------------------------- agents
@@ -462,7 +542,7 @@ const GROUPS = [["pbx", "Phone extensions", "PBX"], ["whatsapp", "WhatsApp", "wa
 S.open = S.open || new Set();
 
 async function connectionsPage(main) {
-  const [data, clientsCfg, agentsCfg] = await Promise.all([api("GET", "/api/contacts"), api("GET", "/api/clients"), api("GET", "/api/agents")]);
+  const [data, spCfg, agentsCfg] = await Promise.all([api("GET", "/api/contacts"), api("GET", "/api/speakers"), api("GET", "/api/agents")]);
   const drafts = new Map();              // id -> changed fields
   const byId = new Map(data.contacts.map(c => [c.id, c]));
   const filter = inp("q", "", { placeholder: "Filter all connections…" });
@@ -486,16 +566,16 @@ async function connectionsPage(main) {
     const text = (k, ph) => { const i = inp(k, value(c, k), { placeholder: ph }); i.addEventListener("input", () => change(c, k, i.value)); return i; };
     const vis = el("input", { type: "checkbox", checked: value(c, "enabled"), title: "visible to agents" });
     vis.addEventListener("change", () => change(c, "enabled", vis.checked));
-    const canCall = !c.missing && clientsCfg.clients.length;
+    const canCall = !c.missing && spCfg.speakers.length;
     return el("tr", { class: c.missing ? "gone" : "" },
       el("td", {}, vis),
       el("td", {}, el("div", {}, c.name), el("div", { class: "muted" }, c.source_name + (c.missing ? " · gone" : ""))),
       el("td", {}, text("alias", c.name)),
       el("td", { class: "hide-sm" }, text("description", c.kind === "tmux" ? "what is this session for?" : "e.g. my father")),
       el("td", { class: "hide-sm mono" }, c.number || ""),
-      el("td", {}, ["pbx", "whatsapp"].includes(c.kind) ? inboundPicker(c, clientsCfg, agentsCfg, value, change) : ""),
+      el("td", {}, ["pbx", "whatsapp"].includes(c.kind) ? inboundPicker(c, spCfg, agentsCfg, value, change) : ""),
       el("td", {}, el("div", { class: "row" },
-        canCall ? el("button", { class: "small", onclick: () => callDialog(c, clientsCfg) }, c.kind === "tmux" ? "Connect" : "Call") : "",
+        canCall ? el("button", { class: "small", onclick: () => callDialog(c, spCfg) }, c.kind === "tmux" ? "Connect" : "Call") : "",
         c.source === "manual" || c.missing ? el("button", { class: "small danger", onclick: async () => {
           if (confirm(`Delete ${c.alias || c.name}?`)) { await act(() => api("DELETE", `/api/contacts/${c.id}`)); drafts.delete(c.id); route(); } } }, "Delete") : "")));
   }
@@ -545,9 +625,9 @@ async function connectionsPage(main) {
   draw();
 }
 
-function inboundPicker(c, clientsCfg, agentsCfg, value, change) {
+function inboundPicker(c, spCfg, agentsCfg, value, change) {
   const policy = sel("inbound", value(c, "inbound"), [["default", "default"], ["agent", "talk to agent"], ["client", "ring speaker"], ["reject", "reject"]]);
-  const speaker = sel("inbound_client", value(c, "inbound_client"), [["", "which speaker?"], ...clientsCfg.clients.map(x => [x.id, x.name])]);
+  const speaker = sel("inbound_client", value(c, "inbound_client"), [["", "which speaker?"], ...spCfg.speakers.filter(x => x.mic).map(x => [x.id, x.name])]);
   const agent = agentsCfg.agents.length > 1 ? sel("inbound_agent", value(c, "inbound_agent"), [["", "default agent"], ...agentsCfg.agents.map(x => [x.id, x.name])]) : null;
   const sync = () => { speaker.classList.toggle("hidden", policy.value !== "client"); if (agent) agent.classList.toggle("hidden", policy.value !== "agent"); };
   policy.addEventListener("change", () => { change(c, "inbound", policy.value); sync(); });
@@ -557,13 +637,13 @@ function inboundPicker(c, clientsCfg, agentsCfg, value, change) {
   return el("div", {}, policy, speaker, agent);
 }
 
-function callDialog(c, clientsCfg) {
-  const s = sel("client", "", clientsCfg.clients.map(x => [x.id, x.name]));
+function callDialog(c, spCfg) {
+  const s = sel("speaker", "", spCfg.speakers.filter(x => x.mic).map(x => [x.id, x.name]));
   const tmux = c.kind === "tmux";
   modal(`${tmux ? "Connect to" : "Call"} ${c.alias || c.name}`, el("div", {}, field("Speaker", s),
     tmux ? el("p", { class: "hint" }, "The speaker then talks to this session (after the wake word) until you say \"back to Jarvis\".") : null),
     close => [el("button", { class: "primary", onclick: async () => {
-      await act(() => api("POST", `/api/contacts/${c.id}/call`, { client_id: s.value }), tmux ? "Connected" : "Calling…"); close();
+      await act(() => api("POST", `/api/contacts/${c.id}/call`, { speaker_id: s.value }), tmux ? "Connected" : "Calling…"); close();
     } }, tmux ? "Connect" : "Call")]);
 }
 
@@ -634,7 +714,7 @@ function integrationForm(i) {
 
 // ---------------------------------------------------------------------------------------------- voice & calls
 async function voice(main) {
-  const [settings, clientsCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/clients")]);
+  const [settings, spCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/speakers")]);
   let sp = { health: {}, wake_models: [], voices: [] };
   try { sp = await api("GET", "/api/speech"); } catch { }
   const v = settings.voice, c = settings.calls;
@@ -667,7 +747,7 @@ async function voice(main) {
     el("div", { class: "form2" },
       field("Ring timeout (s)", num("ring_timeout", c.ring_timeout)),
       field("Known contacts calling in (policy 'default')", sel("inbound_default", c.inbound_default, [["reject", "reject"], ["agent", "talk to the agent"], ["client", "ring a speaker"]])),
-      field("Speaker for 'ring a speaker'", sel("inbound_default_client", c.inbound_default_client, [["", "—"], ...clientsCfg.clients.map(x => [x.id, x.name])])),
+      field("Speaker for 'ring a speaker'", sel("inbound_default_client", c.inbound_default_client, [["", "—"], ...spCfg.speakers.filter(x => x.mic).map(x => [x.id, x.name])])),
       field("Unknown callers", sel("unknown_callers", c.unknown_callers, [["reject", "reject"], ["agent", "talk to the agent (not recommended)"]])),
       field("Agent greeting", inp("agent_greeting", c.agent_greeting)),
       field("PIN before talking to the agent (DTMF)", inp("agent_call_pin", c.agent_call_pin, { placeholder: "none", inputmode: "numeric" })),
@@ -719,14 +799,14 @@ async function voice(main) {
 
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
-  const [data, contactsD, clientsD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/clients")]);
+  const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
   const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"]];
   const f = el("form", {}, el("div", { class: "form2" }, field("Name", inp("name", "", { placeholder: "e.g. claude on my laptop", required: true }))),
     el("div", {}, SC.map(([k, t]) => chk("s_" + k, true, t))),
     field("Contacts it may use", sel("contacts_mode", "*", [["*", "all visible contacts"], ["pick", "only these…"]])),
     el("div", { class: "row", id: "pick" }, contactsD.contacts.filter(c => c.enabled).map(c => chk("c_" + c.id, false, c.alias || c.name))),
     field("Speakers it may use", sel("clients_mode", "*", [["*", "all"], ["pick", "only these…"]])),
-    el("div", { class: "row" }, clientsD.clients.map(c => chk("k_" + c.id, false, c.name))),
+    el("div", { class: "row" }, spD.speakers.map(c => chk("k_" + c.id, false, c.name))),
     el("button", { class: "primary", type: "submit" }, "Create token"));
   f.addEventListener("submit", async e => {
     e.preventDefault();
