@@ -328,3 +328,29 @@ def test_speakers_from_devices_via_the_api(c):
     assert {s["name"]: s["output"] for s in c.get("/api/speakers").json()["speakers"]}["odam"] == ""
     assert c.delete(f"/api/clients/{laptop['client_id']}", headers=h).status_code == 200
     assert c.get("/api/speakers").json()["speakers"] == []
+
+
+async def test_a_call_saying_the_wake_word_does_not_start_a_turn_on_a_speaker():
+    from types import SimpleNamespace
+
+    from telerouter.models import Config
+    from telerouter.voice.assistant import VoiceAssistant
+    calls = []
+    eng = SimpleNamespace(store=SimpleNamespace(config=Config()), calls=SimpleNamespace(active=lambda: calls))
+    va = VoiceAssistant(eng)
+    dev = FakeOut("client", "Raqqa laptop")
+    vs = VirtualSpeaker(Speaker(id="0000000a", name="Raqqa", mic="0000000a", output="client:0000000a"), dev, dev)
+    started = []
+    va.start_turn = lambda conn: started.append(conn.name)
+    calls.append(SimpleNamespace(state="active", client_id=""))       # telerouter phoning you (phone_message)
+    va._on_wake(vs, "hey_jarvis")
+    assert started == []
+    calls[0].client_id = vs.id                                         # a call on this very speaker: unchanged
+    va._on_wake(vs, "hey_jarvis")
+    calls.clear()
+    va._on_wake(vs, "hey_jarvis")
+    assert started == ["Raqqa", "Raqqa"]
+    calls.append(SimpleNamespace(state="active", client_id=""))
+    eng.store.config.voice.wake_during_calls = True                    # the owner wants it anyway
+    va._on_wake(vs, "hey_jarvis")
+    assert len(started) == 3

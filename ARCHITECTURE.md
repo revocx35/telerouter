@@ -161,7 +161,9 @@ sequenceDiagram
 ```
 
 Mic routing by state: `idle` -> wake word; `listening` -> endpointer; `call` -> SIP call + wake word
-(the wake word hangs up); `ringing` -> wake word (answers). Whenever wake feeding resumes after a pause
+(the wake word hangs up); `ringing` -> wake word (answers). While a call that is not on this speaker is in
+progress, the wake word does not start a turn (a phone near the speaker saying "Hey Jarvis" must not trigger
+it; Voice setting `wake_during_calls`). Whenever wake feeding resumes after a pause
 the wake stream is reset (new AudioStart), otherwise the wake word that started the last turn, still in
 openWakeWord's window, fires again.
 

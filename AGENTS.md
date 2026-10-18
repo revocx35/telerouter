@@ -130,6 +130,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   answers the trust dialog with `drivers.claude_dialog_keys` (shared with the agents' start-up). Verified
   with a real Claude Code 2.1.302: trust dialog at 1 s, settled and `~/.claude/sessions/<pid>.json` present
   at 6 s. Off per machine until the admin ticks *New sessions*.
+- **A call can trigger a speaker** (0.7.1): telerouter phoned the owner and said "Hey Jarvis" on the IP phone;
+  the Raqqa laptop's mic heard it and started a turn. While any call that is not on that speaker is going on,
+  the wake word no longer starts a turn there (`VoiceAssistant._other_call`; Voice setting `wake_during_calls`
+  turns it back on). The wake word still answers/hangs up a call on the speaker itself.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -148,7 +152,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.7.0, 2026-10-18)
+## Status (v0.7.1, 2026-10-18)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=0.5` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the

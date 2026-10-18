@@ -740,11 +740,12 @@ async function voice(main) {
       field("Longest request (s)", num("max_utterance", v.max_utterance)),
       field("Speech detection threshold", num("vad_threshold", v.vad_threshold, { step: 0.05, min: 0.1, max: 0.95 }))),
     el("p", { class: "hint" }, "Names Whisper often mishears can be listed in WHISPER_PROMPT in the server's .env (restart the whisper container)."),
-    el("div", { class: "row" }, chk("follow_up", v.follow_up, "Keep listening after an answer (no wake word for a follow-up)"), chk("thinking_cue", v.thinking_cue, "Soft tick while the agent works")),
+    el("div", { class: "row" }, chk("follow_up", v.follow_up, "Keep listening after an answer (no wake word for a follow-up)"), chk("thinking_cue", v.thinking_cue, "Soft tick while the agent works"),
+      chk("wake_during_calls", v.wake_during_calls, "Wake word works during phone calls (off: a speaker that hears a call saying \"Hey Jarvis\" stays quiet)")),
     el("div", { class: "row" }, el("button", { class: "primary", onclick: async () => {
       const d = formData(vf);
       const ww = Object.keys(d).filter(k => k.startsWith("ww_") && d[k]).map(k => k.slice(3));
-      const body = { wake_words: ww }; for (const k of ["language", "tts_voice", "beep_volume", "listen_timeout", "end_silence_ms", "phone_end_silence_ms", "max_utterance", "vad_threshold", "follow_up", "thinking_cue"]) body[k] = d[k];
+      const body = { wake_words: ww }; for (const k of ["language", "tts_voice", "beep_volume", "listen_timeout", "end_silence_ms", "phone_end_silence_ms", "max_utterance", "vad_threshold", "follow_up", "thinking_cue", "wake_during_calls"]) body[k] = d[k];
       await act(() => api("PUT", "/api/settings", { voice: body }), "Saved");
     } }, "Save"), el("button", { onclick: async () => {
       const blob = await act(() => api("POST", "/api/speech/preview", { text: "Hello! This is how I sound." }));

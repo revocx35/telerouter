@@ -135,12 +135,20 @@ class VoiceAssistant:
             if s:
                 asyncio.create_task(self.engine.calls.hangup(s, "hung up by voice"))
             return
+        if st in ("idle", "speaking") and self._other_call(conn):
+            log.info("wake word on %s ignored: a phone call is going on", conn.name)
+            return
         if st == "speaking" and conn.aec and conn.busy_task:
             conn.busy_task.cancel()
             conn.flush()
         elif st != "idle":
             return
         self.start_turn(conn)
+
+    def _other_call(self, conn: VirtualSpeaker) -> bool:
+        if self.engine.store.config.voice.wake_during_calls:
+            return False
+        return any(s.state != "ended" and s.client_id != conn.id for s in self.engine.calls.active())
 
     def start_turn(self, conn: VirtualSpeaker) -> None:
         if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):

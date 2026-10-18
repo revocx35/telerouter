@@ -446,6 +446,9 @@ class VoiceSettings(BaseModel):
     vad_threshold: float = Field(default=0.5, ge=0.1, le=0.95)
     follow_up: bool = False           # listen again (no wake word) right after a reply
     thinking_cue: bool = True         # soft tick while the agent works (every few seconds)
+    # a phone call's audio (e.g. telerouter itself saying "Hey Jarvis" on your phone) must not start a turn
+    # on a speaker that hears it: no new turns while a call that isn't on that speaker is going on
+    wake_during_calls: bool = False
 
     @field_validator("wake_words")
     @classmethod
