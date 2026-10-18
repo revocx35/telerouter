@@ -249,6 +249,15 @@ Hermes sessions fall back to watching the pane until it is quiet.
 the phone call. Their following requests go to the session instead of the agent; a short "back to <agent>",
 "disconnect" or "leave the session" (≤ 7 words) ends it, and so do 15 idle minutes.
 
+**New sessions** (MCP `new_session`, agent-only scope, machines with `allow_new_sessions`): telerouter runs
+`mkdir -p <folder> && tmux new-session -d -s <name> -c <folder> '<agent>; exec $SHELL -l'` over the machine's
+SSH connection (`claude -n <name> [--model] [--permission-mode]`, from the machine's new-session settings;
+`hermes` on Hermes machines), answers Claude Code's start-up dialogs (workspace trust, auto mode) on the
+pane, waits until the UI is still and `~/.claude/sessions/<pid>.json` exists (so the first routed request
+finds the transcript), lists the sessions (the new one becomes a tmux contact) and routes the requester to
+it. Names: `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, not `telerouter-*`, not an existing session; folders: plain
+paths without `..` (quoted; `~` = the SSH user's home).
+
 ## 5. Calls
 
 `router/calls.py`. Every call is a `CallSession` with one SIP leg (`router/sipaudio.py`: G.711 <-> 16 kHz,
@@ -294,6 +303,7 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | start_voice_call, say, listen, hang_up, list_calls | calls | agent-led conversation |
 | announce, ask_speaker | speak | talk/ask through a speaker |
 | context_status, reset_context | (agents telerouter runs) | own context size; compact/clear after the current reply |
+| new_session | (agents telerouter runs) | new tmux session with a fresh agent on a machine that allows it; connects the requester |
 
 The SDK's FastMCP API changed in mcp 2.x; the protocol surface needed here (initialize, ping,
 tools/list, tools/call, notifications) is small, so it is implemented directly and tested.
@@ -319,6 +329,7 @@ integration tokens, SSH key).
 | Spoofed caller ID on the PBX | caller policy per contact; use the agent PIN if the PBX takes calls from outside |
 | A voice request makes the agent do harm | the agent runs with the permission mode you choose (default `auto`); permission prompts are announced, never auto-approved; the agent instructions forbid calling anyone not asked for; MCP tokens can be limited to contacts/speakers |
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
+| Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | SSRF via integration URLs | admin-only, HTTPS only, no redirects followed; the SIP address from the integration is rewritten to the integration's own host |

@@ -26,6 +26,7 @@ class FakeEngine:
         self.store = FakeStore()
         self.speakers = {}
         self.agent_rts = {}
+        self.machine_rts = {}
 
     @property
     def agents(self):
@@ -195,3 +196,19 @@ def test_speakers_by_room_or_loose_name():
     assert pick_speaker("k3", cs).id == "k3"
     assert pick_speaker("garage", cs) is None
     assert pick_speaker("Odam", cs).id == "k4"
+
+
+async def test_new_session_is_only_for_telerouters_agents(mcp):
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert "new_session" not in {t["name"] for t in r["result"]["tools"]}       # a plain token doesn't see it
+    from telerouter.models import Machine
+
+    class Rt:
+        def __init__(self, name, allow):
+            self.machine = Machine(name=name, host=name.replace(" ", "-") + ".lan", username="u", allow_new_sessions=allow)
+    mcp.engine.machine_rts = {"a": Rt("claude lxc", True), "b": Rt("laptop", False)}
+    assert mcp._session_machine("").machine.name == "claude lxc"
+    assert mcp._session_machine("Claude LXC").machine.name == "claude lxc"
+    from telerouter.mcp import ToolError
+    with pytest.raises(ToolError, match="allows new sessions"):
+        mcp._session_machine("laptop")

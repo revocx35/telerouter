@@ -126,6 +126,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   Lite), complete WAVs start in ~0.15 s and report FINISHED. Hence one LOAD per segment and no live calls on
   Cast outputs. Cast media is plain HTTP by necessity (receivers need publicly trusted HTTPS). When testing
   on a real Cast speaker at night, mute it (`SET_VOLUME {"muted": true}`) and unmute in a `finally`.
+- **new_session** (0.7): `MachineRuntime.new_session` starts `claude -n <name>` in a new tmux session and
+  answers the trust dialog with `drivers.claude_dialog_keys` (shared with the agents' start-up). Verified
+  with a real Claude Code 2.1.302: trust dialog at 1 s, settled and `~/.claude/sessions/<pid>.json` present
+  at 6 s. Off per machine until the admin ticks *New sessions*.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -144,7 +148,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.6.0, 2026-10-18)
+## Status (v0.7.0, 2026-10-18)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=0.5` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the

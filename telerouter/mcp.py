@@ -258,6 +258,34 @@ class McpServer:
                             "direction": s.direction})
             return {"calls": out}
 
+        @tool("new_session", "agent",
+              "Start a new tmux session with a fresh agent (Claude Code, or Hermes on Hermes machines) on a machine "
+              "and connect the person who asked to it: from their next sentence on they talk to that session until "
+              "they say 'back to <your name>'. Only on machines where the owner allowed new sessions.",
+              _obj({"name": {**S, "description": "session name: letters, digits, - _ . (e.g. pokerbot)"},
+                    "folder": {**S, "description": "working directory, e.g. ~/projects/pokerbot (created if missing); "
+                                                 "default the home folder"},
+                    "machine": {**S, "description": "machine name; omit when only one machine allows new sessions"},
+                    "connect": {"type": "boolean", "default": True, "description": "connect the person to it now"}},
+                   ["name"]))
+        async def new_session(tok, name: str, folder: str = "~", machine: str = "", connect: bool = True):
+            from .agents.runtime import AgentError
+            e = self.engine
+            if "*" not in tok.contacts:
+                raise ToolError("this token may only use the contacts it lists")
+            rt = self._session_machine(machine)
+            try:
+                info = await rt.new_session(name, folder or "~")
+            except AgentError as ex:
+                raise ToolError(str(ex)) from ex
+            started = {"started": info["name"], "machine": rt.machine.name, "folder": info.get("path", "")}
+            c = next((c for c in e.store.config.contacts if c.kind == "tmux" and c.source == rt.machine.id
+                      and c.source_ref == info["name"]), None)
+            src = self._source(tok)
+            if not connect or c is None or not src:
+                return started
+            return {**started, **self._connect_tmux(tok, c, src, "")}
+
         @tool("context_status", "agent",
               "Your own conversation size in tokens (measured after your last finished turn) and whether a "
               "context reset is already scheduled.", _obj({}))
@@ -330,6 +358,24 @@ class McpServer:
         return {"connected": c.label, "where": where,
                 "note": f"From the next sentence on, the person talks to the {c.label} session directly. Tell them "
                         f"in a few words, and that saying '{back}' returns to you."}
+
+    def _session_machine(self, ref: str):
+        rts = [rt for rt in self.engine.machine_rts.values() if rt.machine.allow_new_sessions]
+        if ref:
+            r = " ".join(ref.lower().split())
+            hits = [rt for rt in rts if r in (rt.machine.id, rt.machine.name.lower())] or \
+                   [rt for rt in rts if r in rt.machine.name.lower() or r in rt.machine.host.lower()]
+            if len(hits) == 1:
+                return hits[0]
+            if not hits:
+                raise ToolError(f"no machine '{ref}' allows new sessions"
+                                + (f" (these do: {', '.join(rt.machine.name for rt in rts)})" if rts else ""))
+            rts = hits
+        if not rts:
+            raise ToolError("no machine allows new sessions; the owner can turn it on under Agents & machines")
+        if len(rts) > 1:
+            raise ToolError("which machine? " + ", ".join(rt.machine.name for rt in rts))
+        return rts[0]
 
     async def _quiet_gate(self, what: str) -> None:
         allowed, why = await self.engine.quiet.calls_allowed()

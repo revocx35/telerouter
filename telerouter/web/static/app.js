@@ -467,7 +467,8 @@ function cfgId(a) { return el("span", { class: "muted mono" }, a.id); }
 
 function machineForm(m, mdata) {
   const isNew = !m;
-  m = m || { name: "", host: "", port: 22, username: "root", host_key: "", enabled: true, agent_kind: "claude", list_tmux: true, reply_timeout: 600 };
+  m = m || { name: "", host: "", port: 22, username: "root", host_key: "", enabled: true, agent_kind: "claude", list_tmux: true, reply_timeout: 600,
+    allow_new_sessions: false, new_session_model: "", new_session_permission_mode: "auto" };
   let hostKey = m.host_key;
   const fp = el("div", { class: "hint" }, m.host_key ? `Host key confirmed: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
   const f = el("div", {},
@@ -479,6 +480,12 @@ function machineForm(m, mdata) {
       field("Agent type in its tmux sessions", sel("agent_kind", m.agent_kind, [["claude", "Claude Code"], ["hermes", "Hermes Agent"]])),
       field("Wait for a session's answer (s)", num("reply_timeout", m.reply_timeout))),
     el("div", { class: "row" }, chk("enabled", m.enabled, "Enabled"), chk("list_tmux", m.list_tmux, "List its tmux sessions under Connections")),
+    el("h3", {}, "New sessions"),
+    el("div", { class: "row" }, chk("allow_new_sessions", m.allow_new_sessions, "Agents may start new tmux sessions here (\"start a new Claude session called pokerbot\")")),
+    el("div", { class: "form2" },
+      field("Model of new sessions", inp("new_session_model", m.new_session_model, { placeholder: "agent default" })),
+      field("Permission mode of new sessions", sel("new_session_permission_mode", m.new_session_permission_mode, PERMS))),
+    el("p", { class: "hint" }, "A new session runs the machine's agent type in a folder the agent names (created if missing), as this machine's SSH user. It shows up under Connections → tmux; the person who asked is connected to it."),
     el("div", { class: "row" }, el("button", { onclick: async () => {
       const d = formData(f);
       const r = await act(() => api("POST", "/api/agents/hostkey", { host: d.host, port: d.port }));

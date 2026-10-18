@@ -134,7 +134,10 @@ NODE_EXTRA_CA_CERTS=~/.config/telerouter/ca.pem claude
 Tools: `list_contacts`, `list_speakers`, `connect_call`, `phone_message`, `start_voice_call`, `say`,
 `listen`, `hang_up`, `list_calls`, `announce`, `ask_speaker`. Example: *"phone_message(contact='me',
 message='The deploy finished')"* rings your extension and reads it to you; with `wait_for_reply` it returns
-what you answered.
+what you answered. Agents telerouter runs (Jarvis) also get `new_session`: *"start a new Claude session
+called pokerbot in projects/pokerbot"* starts a fresh Claude Code (or Hermes) in a new tmux session on a
+machine and connects you to it. Allow it per machine (*Agents & machines → edit → New sessions*; off by
+default), with the model and permission mode new sessions get.
 
 ## Calls into telerouter
 

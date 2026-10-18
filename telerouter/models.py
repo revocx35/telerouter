@@ -289,6 +289,17 @@ class Machine(BaseModel):
     agent_kind: Literal["claude", "hermes"] = "claude"   # what runs in its tmux sessions
     list_tmux: bool = True            # list its tmux sessions as connections
     reply_timeout: int = Field(default=600, ge=30, le=7200)   # tmux sessions can work for a while
+    # agents telerouter runs may start new tmux sessions with a fresh agent here (MCP new_session)
+    allow_new_sessions: bool = False
+    new_session_model: str = ""        # "" = the agent's own default
+    new_session_permission_mode: Literal["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"] = "auto"
+
+    @field_validator("new_session_model")
+    @classmethod
+    def _model(cls, v: str) -> str:
+        if not MODEL_RE.match(v):
+            raise ValueError("invalid model name")
+        return v
 
     @field_validator("name")
     @classmethod

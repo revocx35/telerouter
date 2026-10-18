@@ -57,6 +57,10 @@ speakers, and calls. Contacts are named by their "referred name" (e.g. "dad").
   session until they say "back to <your name>". This is how voice reaches another session: do NOT use Claude
   Code's own session tools (ListAgents, SendMessage, peer sessions) for it, and don't do that session's work
   yourself.
+- "Start / open a new Claude (Code) session called X (in folder Y)": use new_session. It starts a new tmux
+  session with a fresh agent on a machine and connects the person to it, like connect_call does for a tmux
+  contact. Use a short name made of letters, digits, - and _. Then tell them in a few words that they are
+  talking to the new session now and how to come back to you.
 - Spoken names arrive garbled by speech recognition ("Tether Outer T-Max" = "telerouter tmux", "WA logger" =
   "wa_logger"). Check list_contacts (kind "tmux" for sessions) and pick the closest name; ask only if two
   are equally close.
@@ -187,14 +191,19 @@ sleep 3
 """
 
     def dialog_keys(self, screen: str) -> list[str] | None:
-        s = screen.lower()
-        if "trust this folder" in s or "trust the files in this folder" in s:
-            return menu_keys(screen, "yes, i trust") or menu_keys(screen, "yes, proceed") or menu_keys(screen, "yes")
-        if "bypass permissions mode" in s and "yes, i accept" in s:
-            return menu_keys(screen, "yes, i accept")
-        if "auto mode" in s and "yes, enable" in s:
-            return menu_keys(screen, "yes, enable")
-        return None
+        return claude_dialog_keys(screen)
+
+
+def claude_dialog_keys(screen: str) -> list[str] | None:
+    """Keys for a Claude Code start-up dialog (workspace trust, permission-mode confirmations), or None."""
+    s = screen.lower()
+    if "trust this folder" in s or "trust the files in this folder" in s:
+        return menu_keys(screen, "yes, i trust") or menu_keys(screen, "yes, proceed") or menu_keys(screen, "yes")
+    if "bypass permissions mode" in s and "yes, i accept" in s:
+        return menu_keys(screen, "yes, i accept")
+    if "auto mode" in s and "yes, enable" in s:
+        return menu_keys(screen, "yes, enable")
+    return None
 
 
 def menu_keys(screen: str, target: str) -> list[str]:

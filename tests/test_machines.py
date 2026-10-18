@@ -104,3 +104,78 @@ def test_claude_project_dir_naming():
     from telerouter.agents.machine import claude_project_dir
     assert claude_project_dir("/root/jarvis") == "-root-jarvis"
     assert claude_project_dir("/tmp/claude-0/-root-telerouter/x.y/cltest") == "-tmp-claude-0--root-telerouter-x-y-cltest"
+
+
+def _fast_sleep():
+    import asyncio
+    orig = asyncio.sleep
+
+    async def fast(s):
+        await orig(0)
+    return orig, fast
+
+
+async def test_new_session_starts_claude_in_tmux_and_answers_the_trust_dialog():
+    import asyncio
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", allow_new_sessions=True,
+                                        new_session_model="claude-sonnet-5-5"))
+    rt.state = "ready"
+    sent, screens = [], ["Do you trust the files in this folder?\n❯ 1. No, exit\n  2. Yes, I trust this folder\n",
+                         "│ > │", "│ > │", "│ > │", "│ > │"]
+    made = {}
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if "list-sessions" in cmd:
+            return "wa_logger|~|claude|~|/root\n" + ("pokerbot|~|claude|~|/root/projects/pokerbot\n" if made else "")
+        if "new-session" in cmd:
+            made["cmd"] = cmd
+            return "ok /root/projects/pokerbot"
+        if "capture-pane" in cmd:
+            return screens.pop(0) if len(screens) > 1 else screens[0]
+        if "send-keys" in cmd:
+            sent.append(cmd.rsplit(" ", 1)[1])
+            return ""
+        if "sessions/$c.json" in cmd:
+            return json.dumps({"sessionId": "26e646fc-fdd6-4f2f-ab9d-ff9e40dbc292", "cwd": "/root/projects/pokerbot"})
+        if cmd.startswith("ls -t"):
+            return ""
+        return ""
+    rt._sh = fake_sh
+    rt.home = "/root"
+    orig, fast = _fast_sleep()
+    asyncio.sleep = fast
+    try:
+        info = await rt.new_session("pokerbot", "~/projects/pokerbot")
+    finally:
+        asyncio.sleep = orig
+    assert info["name"] == "pokerbot" and info["path"] == "/root/projects/pokerbot"
+    cmd = made["cmd"]
+    assert "D=\"$HOME\"/projects/pokerbot" in cmd and "tmux new-session -d -s pokerbot -c \"$D\"" in cmd
+    assert "claude -n pokerbot --model claude-sonnet-5-5 --permission-mode auto" in cmd
+    assert sent == ["Down", "Enter"]                  # moved off the preselected "No, exit"
+
+
+async def test_new_session_refusals():
+    from telerouter.agents.runtime import AgentError
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u"))
+    rt.state = "ready"
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        assert "new-session" not in cmd
+        return "wa_logger|~|claude|~|/root\n"
+    rt._sh = fake_sh
+    for name, folder, why in (("x", "~", "not allowed"), ):
+        try:
+            await rt.new_session(name, folder)
+            raise AssertionError("expected a refusal")
+        except AgentError as e:
+            assert why in str(e)
+    rt.machine.allow_new_sessions = True
+    for name, folder, why in (("wa_logger", "~", "already exists"), ("telerouter-x", "~", "names"),
+                              ("bad name", "~", "names"), ("ok", "~/../etc", "plain path"), ("ok", "$(rm -rf ~)", "plain path"),
+                              ("ok", "~/a;b", "plain path")):
+        try:
+            await rt.new_session(name, folder)
+            raise AssertionError(f"expected a refusal for {name} {folder}")
+        except AgentError as e:
+            assert why in str(e), (name, folder, str(e))

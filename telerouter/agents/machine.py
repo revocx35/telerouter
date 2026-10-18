@@ -23,6 +23,7 @@ import asyncssh
 
 from ..models import Machine
 from . import ssh
+from .drivers import claude_dialog_keys
 from .runtime import AgentError, _paths, _short, turn_end_without_stop
 
 if TYPE_CHECKING:
@@ -33,6 +34,8 @@ log = logging.getLogger("telerouter.machine")
 LIST_INTERVAL = 60
 SESSION_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,64}$")
 INTERNAL_PREFIX = "telerouter-"           # sessions of telerouter's own agents are not listed
+NEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+WORKDIR_RE = re.compile(r"^~?[A-Za-z0-9_./ -]{0,200}$")
 
 
 class MachineRuntime:
@@ -121,6 +124,70 @@ class MachineRuntime:
         self.sessions = found
         self.engine.merge_tmux_sessions(self.machine, found)
         return found
+
+    # -- starting a session ---------------------------------------------------------------------------
+    def launch_command(self, name: str) -> str:
+        m = self.machine
+        if m.agent_kind == "hermes":
+            return "hermes"
+        args = ["claude", "-n", name]
+        if m.new_session_model:
+            args += ["--model", m.new_session_model]
+        if m.new_session_permission_mode != "default":
+            args += ["--permission-mode", m.new_session_permission_mode]
+        return " ".join(ssh.q(a) for a in args)
+
+    async def new_session(self, name: str, workdir: str = "~") -> dict:
+        """Start a tmux session `name` with a fresh agent in `workdir` (created if missing); returns its listing."""
+        m = self.machine
+        if not m.allow_new_sessions:
+            raise AgentError(f"starting new sessions on {m.name} is not allowed (Agents & machines -> edit the machine)")
+        name = name.strip()
+        if not NEW_NAME_RE.match(name) or name.startswith(INTERNAL_PREFIX):
+            raise AgentError("session names: letters, digits, - _ . (up to 40), not starting with telerouter-")
+        workdir = " ".join((workdir or "~").split()) or "~"
+        if not WORKDIR_RE.match(workdir) or ".." in workdir.split("/"):
+            raise AgentError("the folder must be a plain path (letters, digits, _ . / - and spaces)")
+        if self.state != "ready":
+            raise AgentError(f"{m.name} is not reachable ({self.state}{': ' + self.error if self.error else ''})")
+        if any(x["name"] == name for x in await self.list_sessions()):
+            raise AgentError(f"a session called {name} already exists on {m.name}")
+        rest = workdir[1:].lstrip("/") if workdir.startswith("~") else ""
+        target = ('"$HOME"' + (f"/{ssh.q(rest)}" if rest else "")) if workdir.startswith("~") else ssh.q(workdir)
+        inner = f'{_paths()}; {self.launch_command(name)}; echo; echo "the agent exited"; exec "${{SHELL:-sh}}" -l'
+        out = await self._sh(f'{_paths()}; D={target}; {{ mkdir -p "$D" && tmux new-session -d -s {ssh.q(name)} '
+                             f'-c "$D" {ssh.q(inner)} && printf "ok %s" "$D"; }} 2>&1')
+        if not out.startswith("ok "):
+            raise AgentError(f"could not start the session: {out.strip()[:200] or 'tmux failed'}")
+        path = out[3:].strip()
+        log.info("[%s] started a new %s session %s in %s", m.name, m.agent_kind, name, path)
+        if m.agent_kind == "claude":
+            await self._settle(name)
+        found = await self.list_sessions()
+        return next((x for x in found if x["name"] == name), {"name": name, "command": m.agent_kind, "path": path})
+
+    async def _settle(self, session: str, timeout: int = 45) -> None:
+        """Answer Claude Code's start-up dialogs (workspace trust, auto mode) and wait until the UI is still."""
+        pane = f"={session}:"
+        stable, last, answered = 0, "", ""
+        for _ in range(timeout):
+            await asyncio.sleep(1)
+            screen = await self._sh(self._tmux("capture-pane", "-p", "-t", pane), timeout=10)
+            tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
+            keys = claude_dialog_keys(tail) if screen != answered else None
+            if keys:
+                answered = screen
+                log.info("[%s] %s: answering a start-up dialog", self.machine.name, session)
+                for k in keys:
+                    await self._sh(self._tmux("send-keys", "-t", pane, k))
+                    await asyncio.sleep(0.3)
+                stable = 0
+                continue
+            stable = stable + 1 if screen == last and screen.strip() else 0
+            last = screen
+            if stable >= 3 and await self.claude_transcript(session):
+                return
+        log.warning("[%s] %s: the new session did not settle within %d s", self.machine.name, session, timeout)
 
     # -- talking to a session ------------------------------------------------------------------------
     async def ask(self, session: str, text: str, label: str, on_wait=None) -> str:
