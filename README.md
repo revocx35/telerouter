@@ -114,6 +114,12 @@ Away from home the app uses `TELEROUTER_PUBLIC_URL` (for example `https://jarvis
 proxy with a public certificate in front of telerouter. Forward **only** `/ws/client` (WebSocket) and
 `/api/client/enroll` to `https://<telerouter>:8443`. The admin UI then stays on your LAN. Set
 `TELEROUTER_TRUSTED_PROXIES` to the proxy's address, so the per-address throttling sees the real clients.
+With Nginx Proxy Manager: a proxy host (scheme https, port 8443) with *Websockets support*, *Force SSL* and a
+Let's Encrypt certificate, and this under *Advanced*:
+
+```nginx
+if ($uri !~ "^/(ws/client|api/client/enroll)$|^/\.well-known/acme-challenge/") { return 404; }
+```
 
 ## Quiet hours (do not disturb)
 
