@@ -198,7 +198,10 @@ A speaker device like the Linux client, with two protocol extensions (both opt-i
 The phone connects only for a conversation (LAN address with the pinned CA first, then `public_url` with a
 public certificate) and sends its mic only while the server listens or a call is on.
 `/api/clients/enroll` returns `app_link` =
-`telerouter://setup?v=1&server=<the address the admin UI was opened with>&ca=<CA sha256>&code=<code>[&public=<public_url>]`.
+`telerouter://setup?v=1&server=<the address the admin UI was opened with>&lan=<an address telerouter's own certificate
+covers>&ca=<CA sha256>&code=<code>[&public=<public_url>]`. `lan` (`own_address`) is the page's address if the
+certificate covers it, else the LAN IP: a page opened through a proxy has the proxy's certificate, and pinning
+telerouter's CA there fails. The Linux install command uses `lan` for the same reason.
 
 ## 4. Agents
 

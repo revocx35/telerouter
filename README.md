@@ -107,11 +107,12 @@ Assistant's companion app), so nothing is sent until you say it, and the phone c
 conversation.
 
 Set up: on the phone's browser, open telerouter → *Speakers → Add device* → *Open in the telerouter app*
-(or copy the link into the app). The link carries this server's address, its certificate's fingerprint (the
-app pins telerouter's CA) and the one-time code.
+(or copy the link into the app). The link carries the internet address, telerouter's own LAN address with its
+certificate's fingerprint, and the one-time code.
 
-Away from home the app uses `TELEROUTER_PUBLIC_URL` (for example `https://jarvis.example.org`): a reverse
-proxy with a public certificate in front of telerouter. Forward **only** `/ws/client` (WebSocket) and
+The app connects through `TELEROUTER_PUBLIC_URL` (for example `https://jarvis.example.org`) first, at home too.
+That's a reverse proxy with a public certificate in front of telerouter. The LAN address, with telerouter's CA
+pinned, is only the backup. Forward **only** `/ws/client` (WebSocket) and
 `/api/client/enroll` to `https://<telerouter>:8443`. The admin UI then stays on your LAN. Set
 `TELEROUTER_TRUSTED_PROXIES` to the proxy's address, so the per-address throttling sees the real clients.
 With Nginx Proxy Manager: a proxy host (scheme https, port 8443) with *Websockets support*, *Force SSL* and a

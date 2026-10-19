@@ -85,14 +85,24 @@ def test_device_enrollment_gives_the_android_app_a_setup_link(settings):
 
     from .test_web import setup_admin
     settings.public_url = "https://jarvis.example.org"
-    public, _ = create_app(settings, tls.ensure(settings.data_dir, []))
+    t = tls.ensure(settings.data_dir, [])
+    public, _ = create_app(settings, t)
     with TestClient(public, base_url="https://testserver") as c:
         h = {"X-CSRF-Token": setup_admin(c)}
         r = c.post("/api/clients/enroll", json={"name": "Phone"}, headers=h).json()
         u = urlsplit(r["app_link"])
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         assert (u.scheme, u.netloc) == ("telerouter", "setup")
+        # the page came through a name telerouter's certificate doesn't cover (a proxy): "server" is that page's
+        # address (a public certificate), "lan" an address the own certificate covers (for the pinned CA)
+        lan = q.pop("lan")
+        assert lan.startswith("https://") and lan.rsplit(":", 1)[1] == str(settings.https_port)
+        assert lan[8:].rsplit(":", 1)[0] in t.names
         assert q == {"v": "1", "server": "https://testserver", "ca": r["ca_sha256"], "code": r["code"],
                      "public": "https://jarvis.example.org"}
+        assert r["server"] == lan                              # the Linux installer pins too: own address
+        # opened with a name the certificate covers: that name is the LAN address as well
+        r2 = c.post("/api/clients/enroll", json={"name": "Phone 2"}, headers={**h, "host": "localhost:8443"}).json()
+        assert "lan=https%3A%2F%2Flocalhost%3A8443" in r2["app_link"]
         got = c.post("/api/client/enroll", json={"code": q["code"], "platform": "android"}).json()
         assert got["token"].startswith("trc_")

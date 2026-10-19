@@ -151,7 +151,9 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - **Android app** (0.9, repo telerouter-android): `talk` with `"cue": false` must install the endpointer in
   `start_turn` itself (synchronously). The audio the phone sends right after the message is handled before
   the turn's task runs, and with the old flow it went to the wake word stream and was lost. Transcripts only
-  go to devices whose hello said `"transcript": true`.
+  go to devices whose hello said `"transcript": true`. In 0.9.0 the setup link named the page's address
+  for pinning; opened through the owner's reverse proxy (a public name), the page presented Let's Encrypt and setup
+  failed ("does not match"). Since 0.9.1 the link has `lan` (`own_address`) and the app enrolls through the internet address first.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -170,7 +172,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.9.0, 2026-10-19)
+## Status (v0.9.1, 2026-10-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the

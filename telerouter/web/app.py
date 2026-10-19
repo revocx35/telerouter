@@ -500,14 +500,28 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         return Response(pcmmod.to_wav(audio), media_type="audio/wav")
 
     # -- speaker devices (clients) ------------------------------------------------------------------------------
-    def install_command(request: Request, code: str) -> dict:
+    def own_address(request: Request) -> str:
+        """An https address telerouter's own certificate covers: the one the page was opened with, unless that
+        went through a reverse proxy with another certificate (e.g. a public name); then the LAN address.
+        Clients that pin telerouter's CA need it (a proxy's certificate would rightly fail the pin)."""
         host = request.headers.get("host", f"localhost:{settings.https_port}")
-        server = f"https://{host}"
+        name = host[1:host.index("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
+        if name in tls.names:
+            return f"https://{host}"
+        lan = [n for n in tls.names if re.match(r"^\d+\.\d+\.\d+\.\d+$", n) and not n.startswith("127.")]
+        if settings.advertise_ip in lan:
+            lan.insert(0, settings.advertise_ip)
+        return f"https://{lan[0]}:{settings.https_port}" if lan else f"https://{host}"
+
+    def install_command(request: Request, code: str) -> dict:
+        server = own_address(request)
         pin = f"sha256//{tls.server_spki}"
         cmd = (f"curl -fsSk --pinnedpubkey '{pin}' {server}/client/install.sh | "
                f"sh -s -- --server {server} --ca-sha256 {tls.ca_sha256} --code {code}")
-        # the Android app: this address with the pinned CA, plus the public address (a public certificate)
-        q = {"v": "1", "server": server, "ca": tls.ca_sha256, "code": code}
+        # the Android app: the internet address first (public certificate), the page's address, and telerouter's
+        # own address with its CA fingerprint as the LAN backup
+        host = request.headers.get("host", f"localhost:{settings.https_port}")
+        q = {"v": "1", "server": f"https://{host}", "lan": server, "ca": tls.ca_sha256, "code": code}
         public = settings.public_url
         if public and re.match(r"^https://[A-Za-z0-9.-]+(:\d{1,5})?$", public):
             q["public"] = public
