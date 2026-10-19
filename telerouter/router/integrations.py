@@ -60,6 +60,25 @@ async def fetch_certificate(url: str) -> tuple[str, str]:
     return ssl.DER_cert_to_PEM_cert(der), hashlib.sha256(der).hexdigest()
 
 
+async def fetch_ca(url: str) -> tuple[str, str]:
+    """(PEM, sha256 hex) of the top certificate a server presents (its CA when it sends its chain), without
+    verifying it: the admin compares the fingerprint before it is pinned."""
+    u = urlsplit(url)
+    host, port = u.hostname or "", u.port or 443
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port, ssl=ctx, server_hostname=host or None), 8)
+    try:
+        sobj = writer.get_extra_info("ssl_object")
+        chain = [c if isinstance(c, bytes) else c.public_bytes(ssl.ENCODING_DER) for c in sobj.get_unverified_chain()]
+    finally:
+        writer.close()
+    if not chain:
+        raise IntegrationError("no certificate received")
+    return ssl.DER_cert_to_PEM_cert(chain[-1]), hashlib.sha256(chain[-1]).hexdigest()
+
+
 class IntegrationClient:
     def __init__(self, integ: Integration, cert_pem: str):
         self.integ = integ

@@ -248,6 +248,23 @@ class ExtraMcpServer(BaseModel):
     description: str = ""              # what it is for, told to the agent ("lights, switches, sensors")
     enabled: bool = True
     auto_approve: bool = True          # allow its tools without permission prompts (voice can't answer them)
+    # its own CA (PEM) for servers with a private certificate (e.g. the Zigbee IR Remote app); "" = public CAs
+    tls_ca: str = ""
+
+    @field_validator("tls_ca")
+    @classmethod
+    def _ca(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return ""
+        import ssl
+        if len(v) > 8000 or v.count("-----BEGIN CERTIFICATE-----") != 1:
+            raise ValueError("one PEM certificate")
+        try:
+            ssl.create_default_context(cadata=v)       # parses it for real (base64 alone is not enough)
+        except (ValueError, ssl.SSLError) as e:
+            raise ValueError("not a PEM certificate") from e
+        return v + "\n"
 
     @field_validator("name")
     @classmethod

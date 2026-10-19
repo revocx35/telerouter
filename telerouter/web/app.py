@@ -31,7 +31,7 @@ from ..logbuffer import LogBuffer
 from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
                       Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, VoiceSettings)
 from ..router.calls import CallError
-from ..router.integrations import IntegrationError, fetch_certificate
+from ..router.integrations import IntegrationError, fetch_ca, fetch_certificate
 from ..settings import Settings
 from ..store import Store, write_private
 from ..tls import TlsFiles
@@ -734,6 +734,22 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                            for a in cfg.agents],
                 "ssh_public_key": engine.ssh_keys.public, "default_agent_id": cfg.default_agent_id,
                 "runtime": {aid: rt.info() for aid, rt in engine.agent_rts.items()}}
+
+    @app.post("/api/agents/mcp-certificate")
+    async def mcp_server_cert(body: UrlBody):
+        """The CA of an extra MCP server with a private certificate, to pin after comparing the fingerprint."""
+        from ..models import ExtraMcpServer
+        try:
+            url = ExtraMcpServer(name="x", url=body.url).url
+        except ValidationError as e:
+            raise HTTPException(422, "use https://host:port/...") from e
+        if not url.startswith("https://"):
+            raise HTTPException(422, "only https:// servers have certificates")
+        try:
+            pem, fp = await fetch_ca(url)
+        except Exception as e:
+            raise HTTPException(502, f"could not fetch the certificate: {e}") from e
+        return {"pem": pem, "fingerprint": ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)).upper()}
 
     @app.post("/api/agents/hostkey")
     async def agent_hostkey(body: HostKeyBody):

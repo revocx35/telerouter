@@ -160,7 +160,14 @@ class ClaudeDriver(Driver):
         out[f"{self.dir}/mcp.json"] = (json.dumps(mcp, indent=1), 0o600)
         out[f"{self.dir}/instructions.md"] = (voice_instructions(self.agent), 0o600)
         out[f"{self.dir}/start.sh"] = (self.launch_script(), 0o700)
+        # pinned CAs of extra MCP servers with private certificates: Claude Code (Node/Bun) trusts them
+        # through NODE_EXTRA_CA_CERTS, in addition to the public CAs
+        out[self.ca_path] = ("".join(s.tls_ca for s in self.extra_servers if s.tls_ca), 0o600)
         return out
+
+    @property
+    def ca_path(self) -> str:
+        return f"{self.dir}/extra-ca.pem"
 
     def launch_script(self) -> str:
         a = self.agent
@@ -177,6 +184,7 @@ class ClaudeDriver(Driver):
 # started by telerouter in tmux session {a.session_name}; attach with: tmux attach -t {a.session_name}
 {PATHS}
 DIR={d}
+[ -s "$DIR/extra-ca.pem" ] && export NODE_EXTRA_CA_CERTS="$DIR/extra-ca.pem"
 cd {shlex.quote(self.workdir)} 2>/dev/null || cd "$HOME"
 if ls "$HOME"/.claude/projects/*/{uuid}.jsonl >/dev/null 2>&1; then SESS="--resume {uuid}"; else SESS="--session-id {uuid}"; fi
 # without this, a resumed conversation keeps the system prompt it started with (our instructions would go stale)

@@ -280,3 +280,49 @@ async def test_mid_turn_detection_from_events():
     assert not await rt._mid_turn()
     lines["v"] = "\n".join([ev("Stop"), ev("UserPromptSubmit")])
     assert await rt._mid_turn()
+
+
+def _ca_and_chain(tmp_path):
+    """A CA and a server certificate for 127.0.0.1 signed by it (openssl CLI)."""
+    def ossl(*a):
+        subprocess.run(["openssl", *a], check=True, capture_output=True, cwd=tmp_path)
+    ossl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "ca.key",
+         "-out", "ca.pem", "-days", "30", "-subj", "/CN=Test CA", "-addext", "basicConstraints=critical,CA:TRUE",
+         "-addext", "keyUsage=critical,keyCertSign")
+    ossl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", "srv.key",
+         "-out", "srv.csr", "-subj", "/CN=127.0.0.1")
+    (tmp_path / "ext.cnf").write_text("subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n")
+    ossl("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-days", "30",
+         "-out", "srv.pem", "-extfile", "ext.cnf")
+    (tmp_path / "chain.pem").write_text((tmp_path / "srv.pem").read_text() + (tmp_path / "ca.pem").read_text())
+    return (tmp_path / "ca.pem").read_text()
+
+
+def test_extra_mcp_server_with_a_pinned_ca_reaches_claude(tmp_path):
+    from telerouter.models import ExtraMcpServer
+    ca = _ca_and_chain(tmp_path)
+    s = ExtraMcpServer(name="ir-remote", url="https://192.168.1.20:8098/mcp", token="irr_x", tls_ca=ca)
+    files = make_driver(agent(mcp_servers=[s, ExtraMcpServer(name="ha", url="https://ha.example.com/api/mcp")]),
+                        "/d", "/w", "http://127.0.0.1:47801/mcp").files("trm_x")
+    assert files["/d/extra-ca.pem"] == (ca.strip() + "\n", 0o600)
+    assert 'export NODE_EXTRA_CA_CERTS="$DIR/extra-ca.pem"' in files["/d/start.sh"][0]
+    assert make_driver(agent(), "/d", "/w", "u").files("t")["/d/extra-ca.pem"][0] == ""   # none: the file is empty
+    for bad in ("not a cert", ca + ca, "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----"):
+        with pytest.raises(ValueError):
+            ExtraMcpServer(name="x", url="https://a.b/mcp", tls_ca=bad)
+
+
+async def test_fetch_ca_takes_the_top_of_the_presented_chain(tmp_path):
+    import ssl
+
+    from telerouter.router.integrations import fetch_ca
+    ca = _ca_and_chain(tmp_path)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(tmp_path / "chain.pem", tmp_path / "srv.key")
+    server = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0, ssl=ctx)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        pem, fp = await fetch_ca(f"https://127.0.0.1:{port}/mcp")
+    finally:
+        server.close()
+    assert ssl.PEM_cert_to_DER_cert(pem) == ssl.PEM_cert_to_DER_cert(ca) and len(fp) == 64

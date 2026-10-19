@@ -447,6 +447,16 @@ async function agents(main) {
   }
 }
 function serverRow(s) {
+  // a server with its own private certificate (e.g. the Zigbee IR Remote app): pin its CA
+  const caIn = el("input", { type: "hidden", "data-k": "tls_ca", value: s.tls_ca || "" });
+  const caNote = el("span", { class: "hint" }, s.tls_ca ? "Its own certificate is pinned." : "Public certificate (or none pinned).");
+  const caBtn = el("button", { class: "small", onclick: async () => {
+    const url = $("[data-k=url]", row).value.trim();
+    const r = await act(() => api("POST", "/api/agents/mcp-certificate", { url }));
+    if (confirm(`Trust this certificate for ${url}?\n\nSHA-256 ${r.fingerprint}\n\nCompare it with the fingerprint the server shows (Zigbee IR Remote: Settings → AI agents).`)) {
+      caIn.value = r.pem; caNote.textContent = `Pinned: ${r.fingerprint.slice(0, 23)}… (saved when you press Save)`;
+    }
+  } }, "Fetch & pin its certificate");
   const tok = el("input", { type: "password", "data-k": "token", autocomplete: "new-password",
     placeholder: s.token_set ? "(unchanged)" : "token (e.g. HA long-lived access token)" });
   const row = el("div", { class: "card" },
@@ -459,7 +469,8 @@ function serverRow(s) {
       el("label", { class: "chk" }, el("input", { type: "checkbox", "data-k": "enabled", checked: s.enabled }), "Enabled"),
       el("label", { class: "chk" }, el("input", { type: "checkbox", "data-k": "auto_approve", checked: s.auto_approve }), "Use its tools without permission prompts"),
       el("span", { class: "spacer" }),
-      el("button", { class: "small danger", onclick: () => row.remove() }, "Remove")));
+      el("button", { class: "small danger", onclick: () => row.remove() }, "Remove")),
+    el("div", { class: "row" }, caBtn, caNote, caIn));
   return row;
 }
 
@@ -529,6 +540,7 @@ function agentForm(a, data) {
     servers,
     el("div", { class: "row" },
       el("button", { onclick: () => servers.append(serverRow({ name: "home-assistant", url: "", description: "Home Assistant: lights, switches, covers, climate, media and sensors", enabled: true, auto_approve: true })) }, "Add Home Assistant"),
+      el("button", { onclick: () => servers.append(serverRow({ name: "ir-remote", url: "https://homeassistant.local:8098/mcp", description: "Zigbee IR Remote: room climate (target temperature, humidity, on/off) and IR remote buttons (AC, TV)", enabled: true, auto_approve: true })) }, "Add Zigbee IR Remote"),
       el("button", { onclick: () => servers.append(serverRow({ name: "", url: "", description: "", enabled: true, auto_approve: true })) }, "Add other MCP server")),
     el("div", { class: "row" }, chk("enabled", a.enabled, "Enabled"), chk("autostart", a.autostart, "Start the tmux session automatically")));
   modal(isNew ? "Add agent" : `Edit ${a.name}`, f, close => [el("button", { class: "primary", onclick: async () => {
@@ -537,7 +549,7 @@ function agentForm(a, data) {
     d.mcp_servers = [...servers.children].map(r => ({
       name: $("[data-k=name]", r).value.trim(), url: $("[data-k=url]", r).value.trim(), token: $("[data-k=token]", r).value,
       description: $("[data-k=description]", r).value, enabled: $("[data-k=enabled]", r).checked,
-      auto_approve: $("[data-k=auto_approve]", r).checked })).filter(s => s.name || s.url);
+      auto_approve: $("[data-k=auto_approve]", r).checked, tls_ca: $("[data-k=tls_ca]", r).value })).filter(s => s.name || s.url);
     await act(() => isNew ? api("POST", "/api/agents", d) : api("PUT", `/api/agents/${a.id}`, d), "Saved");
     close(); route();
   } }, "Save")]);

@@ -213,7 +213,12 @@ compact (keeping what it names) or clear; telerouter types `/compact <keep>` / `
 `mcp.json` (with `permissions.allow: mcp__<name>` when auto-approve is on) or to Hermes' `mcp_servers`
 (telerouter remembers which names it added in `hermes-managed.json` and removes them again). HTTPS only
 (plain http only for 127.0.0.1), bearer token write-only in the API; the voice instructions list them and tell
-the agent to use them directly for smart-home requests.
+the agent to use them directly for smart-home requests. A server with a private certificate gets it pinned
+(`ExtraMcpServer.tls_ca`). `POST /api/agents/mcp-certificate` fetches the top certificate of the chain the server
+presents (its CA, unverified), and the admin compares the fingerprint before saving. The Claude driver writes the
+pinned CAs to `extra-ca.pem` and start.sh exports `NODE_EXTRA_CA_CERTS`. Claude Code then adds them to the
+public CAs, and hostname checks stay on (verified with Claude Code 2.1.303: "Failed to connect" without it,
+"Connected" with it).
 
 **Correlation**: each request carries a nonce (`[telerouter #a1b2 · Kitchen speaker] ...`). Claude: the
 UserPromptSubmit event whose `prompt` contains the nonce names the session; the next Stop of that
@@ -365,6 +370,7 @@ integration tokens, SSH key).
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
 | Scheduled tasks run prompts unattended | only the admin creates them (UI/API with session + CSRF; no MCP tool); sessions start as the machine's SSH user with the machine's new-session model/permission mode (`by_admin` skips only the agents' `allow_new_sessions` switch); session names and folders validated and shell-quoted; only sessions the task started are closed; quiet hours still gate the calls they make; a run has a timeout |
+| MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | SSRF via integration URLs | admin-only, HTTPS only, no redirects followed; the SIP address from the integration is rewritten to the integration's own host |

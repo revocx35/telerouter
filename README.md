@@ -144,6 +144,12 @@ Then *"Hey Jarvis, turn off the kitchen lights"*. Any other MCP server (HTTPS + 
 way. Tokens are write-only in the UI; telerouter writes them only into the agent's own `mcp.json` (0600) on
 the agent host.
 
+A server with its own private certificate, like the **Zigbee IR Remote** app (room climate and IR buttons;
+*Settings → AI agents* in the app makes the token and shows the certificate's fingerprint): *Add Zigbee IR
+Remote*, fix the URL (`https://<HA host>:8098/mcp`), paste the token, press **Fetch & pin its certificate**,
+compare the fingerprint, then save. Claude Code then trusts that certificate (only for this agent, through
+`NODE_EXTRA_CA_CERTS`). Hermes agents only take servers with public certificates.
+
 ## Use telerouter from other agents (MCP)
 
 *MCP access* → *New token* (choose scopes and which contacts/speakers it may use). For Claude Code:
