@@ -62,12 +62,20 @@ def sentences(text: str) -> list[str]:
     return out
 
 
+# a phone and a speaker that heard the same "Hey Jarvis" start their turns within this many seconds
+SAME_WAKE_S = 4.0
+
+
 class VoiceAssistant:
     def __init__(self, engine: "Engine"):
         self.engine = engine
         self.wake: dict[str, WakeStream] = {}
         self._listeners: dict[str, Endpointer] = {}
         self._listen_done: dict[str, asyncio.Event] = {}
+        # one "Hey Jarvis", several devices: the phone (its own wake word) answers, speakers that heard the
+        # same phrase stand down (see _phone_wins)
+        self._wake_turns: dict[str, float] = {}       # speaker id -> when its wake word started a turn
+        self._device_wake: tuple[float, str] = (0.0, "")
 
     # -- speaker lifecycle -------------------------------------------------------------------------------
     def attach(self, conn: VirtualSpeaker) -> None:
@@ -138,12 +146,17 @@ class VoiceAssistant:
         if st in ("idle", "speaking") and self._other_call(conn):
             log.info("wake word on %s ignored: a phone call is going on", conn.name)
             return
+        at, phone = self._device_wake
+        if phone != conn.id and time.monotonic() - at < SAME_WAKE_S:
+            log.info("wake word on %s ignored: %s heard it and answers", conn.name, self._name(phone))
+            return
         if st == "speaking" and conn.aec and conn.busy_task:
             conn.busy_task.cancel()
             conn.flush()
         elif st != "idle":
             return
         self.start_turn(conn)
+        self._wake_turns[conn.id] = time.monotonic()
 
     def _other_call(self, conn: VirtualSpeaker) -> bool:
         if self.engine.store.config.voice.wake_during_calls:
@@ -157,10 +170,30 @@ class VoiceAssistant:
         if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):
             return
         if not cue:
+            self._phone_wins(conn)
             conn.flush()
             conn.set_state("listening")
             self._listeners[conn.id] = Endpointer(self._endpoint_cfg(None))
         conn.busy_task = asyncio.create_task(self._turn(conn, cue))
+
+    def _phone_wins(self, phone: VirtualSpeaker) -> None:
+        """The phone heard "Hey Jarvis" itself: a speaker that the same phrase woke (it reacts first, the phone
+        still has to connect) stops listening, so only the phone answers."""
+        now = time.monotonic()
+        self._device_wake = (now, phone.id)
+        for sid, at in list(self._wake_turns.items()):
+            other = self.engine.speakers.get(sid)
+            if sid == phone.id or now - at > SAME_WAKE_S or other is None:
+                continue
+            if other.state == "listening" and other.busy_task and not other.busy_task.done():
+                log.info("%s heard the wake word too: %s answers", other.name, phone.name)
+                other.busy_task.cancel()
+                other.flush()
+            self._wake_turns.pop(sid, None)
+
+    def _name(self, sid: str) -> str:
+        vs = self.engine.speakers.get(sid)
+        return vs.name if vs else sid
 
     # -- one conversation turn ------------------------------------------------------------------------------
     async def _turn(self, conn: VirtualSpeaker, cue: bool = True) -> None:

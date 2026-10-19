@@ -106,3 +106,38 @@ def test_device_enrollment_gives_the_android_app_a_setup_link(settings):
         assert "lan=https%3A%2F%2Flocalhost%3A8443" in r2["app_link"]
         got = c.post("/api/client/enroll", json={"code": q["code"], "platform": "android"}).json()
         assert got["token"].startswith("trc_")
+
+
+def _two_devices():
+    phone_vs, _, phone_text, _ = phone()
+    spk_vs, _, _, spk_played = phone(wants_text=False)
+    spk_vs.cfg = Speaker(id="0000000e", name="Raqqa laptop", mic="0000000e", output="client:0000000e")
+    spk_vs.id = "0000000e"
+    va, _ = assistant()
+    va.engine.speakers = {phone_vs.id: phone_vs, spk_vs.id: spk_vs}
+    return va, phone_vs, spk_vs
+
+
+async def test_one_hey_jarvis_two_devices_the_phone_answers():
+    import telerouter.voice.assistant as A
+    # the speaker reacts first (server-side wake word), the phone's talk arrives a moment later
+    va, phone_vs, spk = _two_devices()
+    va._on_wake(spk, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    assert spk.state == "listening"
+    va.start_turn(phone_vs, cue=False)
+    await asyncio.sleep(0.05)
+    assert spk.busy_task.done() and spk.state == "idle"          # the speaker stood down
+    assert phone_vs.state == "listening"
+    # the other order: the phone first, the speaker's wake word right after is ignored
+    va2, phone2, spk2 = _two_devices()
+    va2.start_turn(phone2, cue=False)
+    va2._on_wake(spk2, "hey_jarvis")
+    assert spk2.busy_task is None and spk2.state == "idle"
+    # a wake word on the speaker later is a new request: it answers
+    va2._device_wake = (A.time.monotonic() - A.SAME_WAKE_S - 1, phone2.id)
+    va2._on_wake(spk2, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    assert spk2.state == "listening"
+    for t in (phone_vs.busy_task, phone2.busy_task, spk2.busy_task):
+        t.cancel()

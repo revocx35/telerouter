@@ -195,6 +195,11 @@ A speaker device like the Linux client, with two protocol extensions (both opt-i
   This was verified end to end with real Whisper: "Call my mom please." sent right behind `talk` was
   transcribed whole.
 
+**One "Hey Jarvis", two devices**: the speakers' wake word runs on the server and reacts first, while the phone
+first has to connect. When a phone starts a turn with `cue: false`, any speaker that a wake word put into
+listening within `SAME_WAKE_S` (4 s) stops (its turn is cancelled, its start beep cut off), and speaker wake
+words in the 4 s after a phone's are ignored. The phone answers, as chosen by the owner.
+
 The phone connects only for a conversation (LAN address with the pinned CA first, then `public_url` with a
 public certificate) and sends its mic only while the server listens or a call is on.
 `/api/clients/enroll` returns `app_link` =
