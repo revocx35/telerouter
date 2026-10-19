@@ -181,6 +181,25 @@ key (`curl --pinnedpubkey`) and the CA fingerprint; the client downloads `/ca.pe
 then enrolls over TLS that trusts only that CA and gets a `trc_` token (only its hash is stored). The
 installer creates a systemd user service (Linux) or a launchd agent (macOS).
 
+### 3.4 Android app (separate repo, telerouter-android)
+
+A speaker device like the Linux client, with two protocol extensions (both opt-in, old clients unaffected):
+
+- `hello` with `"transcript": true`: the server sends `{"type":"transcript","role":"user"|"assistant","text"}`
+  when it has heard a request (`listen`) and when it speaks an answer (`speak`). `VirtualSpeaker.transcript`
+  sends them to the client devices of that speaker that asked for them.
+- `{"type":"button","action":"talk","cue":false}`: the phone detected the wake word itself (microWakeWord) and
+  played its own start sound. `start_turn(cue=False)` sets the state to listening and installs the
+  endpointer before returning, so the audio the phone sends right behind the message (what was said after
+  "Hey Jarvis", buffered while the connection opened) reaches the endpointer instead of the wake word stream.
+  This was verified end to end with real Whisper: "Call my mom please." sent right behind `talk` was
+  transcribed whole.
+
+The phone connects only for a conversation (LAN address with the pinned CA first, then `public_url` with a
+public certificate) and sends its mic only while the server listens or a call is on.
+`/api/clients/enroll` returns `app_link` =
+`telerouter://setup?v=1&server=<the address the admin UI was opened with>&ca=<CA sha256>&code=<code>[&public=<public_url>]`.
+
 ## 4. Agents
 
 `agents/runtime.py`, one `AgentRuntime` per agent:
@@ -370,6 +389,7 @@ integration tokens, SSH key).
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
 | Scheduled tasks run prompts unattended | only the admin creates them (UI/API with session + CSRF; no MCP tool); sessions start as the machine's SSH user with the machine's new-session model/permission mode (`by_admin` skips only the agents' `allow_new_sessions` switch); session names and folders validated and shell-quoted; only sessions the task started are closed; quiet hours still gate the calls they make; a run has a timeout |
+| Exposing the phone endpoints to the internet (`TELEROUTER_PUBLIC_URL`) | only `/ws/client` (bearer `trc_` token, 256-bit, hashed; per-IP throttle on bad tokens) and `/api/client/enroll` (one-time 15-min code, throttled) are meant to be proxied; the admin UI stays on the LAN; set `TELEROUTER_TRUSTED_PROXIES` so throttles see real client IPs; a lost phone is revoked by removing its device |
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |

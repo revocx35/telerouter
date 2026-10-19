@@ -57,6 +57,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 button { background: var(--chip); border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
 button:hover { filter: brightness(.97); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
+a.button { display: inline-block; text-decoration: none; background: var(--chip); border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; color: inherit; }
+a.button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
 button.danger { color: var(--bad); }
 button.small { padding: 3px 8px; font-size: 12.5px; }
 button:disabled { opacity: .55; cursor: default; }

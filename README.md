@@ -96,6 +96,25 @@ With a Cast speaker as output:
   HTTP** (`TELEROUTER_CAST_PORT`, default 8480): each sentence gets a random single-use link that only that
   speaker's address may fetch, for at most 60 s. Keep it on your LAN.
 
+## Android app (instead of Google Assistant)
+
+The [telerouter Android app](https://github.com/revocx35/telerouter-android) makes your phone a speaker:
+*"Hey Jarvis"* or the assistant button/gesture opens a sheet over whatever is on screen, and Jarvis
+answers as on any speaker, with the conversation shown as text. You can also make calls through it ("call
+my dad"). Set it as the phone's *digital assistant app* and the power-button or corner-swipe gesture opens
+Jarvis, also on the lock screen. The wake word is recognised on the phone (microWakeWord, as in Home
+Assistant's companion app), so nothing is sent until you say it, and the phone connects only for the
+conversation.
+
+Set up: on the phone's browser, open telerouter → *Speakers → Add device* → *Open in the telerouter app*
+(or copy the link into the app). The link carries this server's address, its certificate's fingerprint (the
+app pins telerouter's CA) and the one-time code.
+
+Away from home the app uses `TELEROUTER_PUBLIC_URL` (for example `https://jarvis.example.org`): a reverse
+proxy with a public certificate in front of telerouter. Forward **only** `/ws/client` (WebSocket) and
+`/api/client/enroll` to `https://<telerouter>:8443`. The admin UI then stays on your LAN. Set
+`TELEROUTER_TRUSTED_PROXIES` to the proxy's address, so the per-address throttling sees the real clients.
+
 ## Quiet hours (do not disturb)
 
 *Voice & calls → Quiet hours*: pick a time range. Speakers still answer quick requests (lights, mail,
@@ -188,6 +207,7 @@ rejected by default; set a DTMF PIN in *Voice & calls* if your PBX takes outside
 | `TELEROUTER_ADVERTISE_IP` | auto | address put into SIP/SDP |
 | `TELEROUTER_INTERNAL_PORT` | 47700 | loopback MCP port for agent tunnels |
 | `TELEROUTER_TRUSTED_PROXIES` | none | `private` or CIDRs whose X-Forwarded-For is trusted |
+| `TELEROUTER_PUBLIC_URL` | | `https://host[:port]` where the Android app reaches telerouter from the internet (put in its setup link) |
 | `TELEROUTER_SETUP_CODE` | random | fixed first-setup code |
 | `WHISPER_MODEL` | small-int8 | tiny/base/small/medium-int8 |
 | `WHISPER_PROMPT` | "Hey Jarvis. Call dad…" | names Whisper should expect, e.g. your tmux session names ("Connect me to the wa_logger tmux.") |

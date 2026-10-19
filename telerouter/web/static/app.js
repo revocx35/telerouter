@@ -331,7 +331,11 @@ async function speakers(main) {
       el("h3", {}, "Needs"),
       el("p", { class: "hint" }, "Python 3.9+ with venv, curl; on Linux also PortAudio (Debian/Ubuntu: sudo apt install python3-venv libportaudio2). The command pins this server's certificate, so it is safe on an untrusted network."),
       el("h3", {}, "Manual install"),
-      el("p", { class: "hint" }, `Code ${r.code} · server ${r.server} · CA sha256 ${r.ca_sha256}`)));
+      el("p", { class: "hint" }, `Code ${r.code} · server ${r.server} · CA sha256 ${r.ca_sha256}`),
+      el("h3", {}, "Android phone (telerouter app)"),
+      el("p", { class: "hint" }, "Open this page on the phone and tap the button, or copy the link into the app (Set up → Paste link). It carries this server's address, its certificate's fingerprint and the one-time code" + (r.public_url ? `, and the internet address ${r.public_url}.` : ". Set TELEROUTER_PUBLIC_URL for use outside home.")),
+      el("div", { class: "row" }, el("a", { class: "button primary", href: r.app_link }, "Open in the telerouter app")),
+      copyBox(r.app_link)));
   });
 
   // Google Cast speakers

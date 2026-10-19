@@ -150,20 +150,27 @@ class VoiceAssistant:
             return False
         return any(s.state != "ended" and s.client_id != conn.id for s in self.engine.calls.active())
 
-    def start_turn(self, conn: VirtualSpeaker) -> None:
+    def start_turn(self, conn: VirtualSpeaker, cue: bool = True) -> None:
+        """Start a voice turn. cue=False: the device already played its own start sound (the phone app after
+        its on-device wake word) and streams what was said right after it, so listening starts at once and
+        no audio is lost waiting for the task to run."""
         if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):
             return
-        conn.busy_task = asyncio.create_task(self._turn(conn))
+        if not cue:
+            conn.flush()
+            conn.set_state("listening")
+            self._listeners[conn.id] = Endpointer(self._endpoint_cfg(None))
+        conn.busy_task = asyncio.create_task(self._turn(conn, cue))
 
     # -- one conversation turn ------------------------------------------------------------------------------
-    async def _turn(self, conn: VirtualSpeaker) -> None:
+    async def _turn(self, conn: VirtualSpeaker, cue: bool = True) -> None:
         e = self.engine
         try:
             follow = True
             first = True
             while follow:
                 follow = False
-                text = await self.listen(conn, None if first else 5.0)
+                text = await self.listen(conn, None if first else 5.0, cue=cue or not first)
                 first = False
                 if text is None:
                     return
@@ -186,29 +193,39 @@ class VoiceAssistant:
                 conn.set_state("idle")
             self.reset_wake(conn)
 
-    async def listen(self, conn: VirtualSpeaker, start_timeout: float | None = None) -> str | None:
-        """Blip, record one utterance, blip, transcribe. None: nothing was said."""
+    def _endpoint_cfg(self, start_timeout: float | None) -> EndpointConfig:
+        v = self.engine.store.config.voice
+        return EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
+                              end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
+                              threshold=v.vad_threshold)
+
+    async def listen(self, conn: VirtualSpeaker, start_timeout: float | None = None, cue: bool = True) -> str | None:
+        """Blip, record one utterance, blip, transcribe. None: nothing was said. cue=False: start_turn already
+        set up the endpointer (the device played its own start sound)."""
         e = self.engine
         v = e.store.config.voice
-        conn.flush()
         conn.prepare()                 # a Cast output launches its receiver while the person talks
-        conn.set_state("listening")
-        conn.cue(pcmmod.cue("start", v.beep_volume))
-        await conn.drained(0.05)
-        cfg = EndpointConfig(start_timeout_ms=int((start_timeout or v.listen_timeout) * 1000),
-                             end_silence_ms=v.end_silence_ms, max_ms=int(v.max_utterance * 1000),
-                             threshold=v.vad_threshold)
+        first = self._listeners.get(conn.id) if not cue else None
+        if first is None:
+            conn.flush()
+            conn.set_state("listening")
+            conn.cue(pcmmod.cue("start", v.beep_volume))
+            await conn.drained(0.05)
+            first = Endpointer(self._endpoint_cfg(start_timeout))
+        cfg = self._endpoint_cfg(start_timeout)
 
         async def record(ep: Endpointer, wait: float) -> Endpointer:
             ev = asyncio.Event()
             self._listen_done[conn.id] = ev
             self._listeners[conn.id] = ep
+            if ep.result:                   # it already ended on the audio that came before
+                return ep
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(ev.wait(), wait)
             return ep
 
         try:
-            ep = await record(Endpointer(cfg), v.max_utterance + v.listen_timeout + 5)
+            ep = await record(first, v.max_utterance + v.listen_timeout + 5)
             if ep.result == "timeout" or not ep.started:
                 conn.set_state("idle")
                 return None
@@ -241,6 +258,7 @@ class VoiceAssistant:
         log.info("[%s] heard (%.1f s audio, %.2f s stt): %s", conn.name, len(audio) / 32000,
                  time.monotonic() - t0, text)
         conn.last_text = text
+        conn.transcript("user", text)
         return text
 
     async def _ask_agent(self, conn: VirtualSpeaker, text: str) -> str | None:
@@ -316,9 +334,11 @@ class VoiceAssistant:
     async def speak(self, conn: VirtualSpeaker, text: str) -> None:
         """Say `text` on the speaker (sentence by sentence, so it starts quickly)."""
         e = self.engine
+        shown = text
         text = speakable(text)
         if not text:
             return
+        conn.transcript("assistant", shown)
         conn.set_state("speaking")
         try:
             for part in sentences(text):

@@ -18,6 +18,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -505,7 +506,14 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         pin = f"sha256//{tls.server_spki}"
         cmd = (f"curl -fsSk --pinnedpubkey '{pin}' {server}/client/install.sh | "
                f"sh -s -- --server {server} --ca-sha256 {tls.ca_sha256} --code {code}")
-        return {"server": server, "command": cmd, "ca_sha256": tls.ca_sha256, "spki_pin": pin}
+        # the Android app: this address with the pinned CA, plus the public address (a public certificate)
+        q = {"v": "1", "server": server, "ca": tls.ca_sha256, "code": code}
+        public = settings.public_url
+        if public and re.match(r"^https://[A-Za-z0-9.-]+(:\d{1,5})?$", public):
+            q["public"] = public
+        link = "telerouter://setup?" + urlencode(q)
+        return {"server": server, "command": cmd, "ca_sha256": tls.ca_sha256, "spki_pin": pin, "app_link": link,
+                "public_url": q.get("public", "")}
 
     @app.get("/api/clients")
     async def list_clients():
@@ -1286,13 +1294,14 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                 t = obj.get("type")
                 if t == "hello":
                     conn.aec = bool(obj.get("aec"))
+                    conn.wants_text = obj.get("transcript") is True
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()
                 elif t == "button":               # the device's buttons act on the speaker using its mic
                     vs = engine.speaker_for_mic(client.id)
                     if vs and obj.get("action") == "talk" and vs.state == "idle":
-                        engine.voice.start_turn(vs)
+                        engine.voice.start_turn(vs, cue=obj.get("cue") is not False)
                     elif vs and obj.get("action") == "cancel" and vs.busy_task:
                         vs.busy_task.cancel()
                         vs.flush()

@@ -5,13 +5,16 @@ as its output (`play` gets audio the speaker already scaled to its volume).
 
 Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client token>`):
 
-  client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool}
+  client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool, "transcript": bool}
                     binary 16 kHz mono PCM16 LE microphone audio (any size up to 64 KiB, usually 20 ms)
-                    text   {"type": "pong"} / {"type": "button", "action": "talk"|"cancel"}
+                    text   {"type": "pong"} / {"type": "button", "action": "talk"|"cancel", "cue": bool}
+                           talk with "cue": false = the device played its own start sound (on-device wake
+                           word): listening starts at once, audio sent right after the message counts
   server -> client  binary 16 kHz mono PCM16 LE audio to play
                     text   {"type": "state", "state": "idle|listening|thinking|speaking|ringing|call"}
                            {"type": "flush"}   drop everything queued for playback now
                            {"type": "ping"}    {"type": "config", "volume": 100}
+                           {"type": "transcript", "role": "user"|"assistant", "text"}  (hello transcript: true)
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ class ClientConn:
         self.closed = asyncio.Event()
         self.mic_bytes = 0
         self.mic_level = -120.0
+        self.wants_text = False             # hello "transcript": true (a device with a screen)
 
     @property
     def name(self) -> str:
@@ -77,6 +81,9 @@ class ClientConn:
             await self._send_text(json.dumps(obj))
         except Exception:
             pass
+
+    def send_text(self, role: str, text: str) -> None:
+        asyncio.create_task(self.send_json({"type": "transcript", "role": role, "text": text[:4000]}))
 
     # -- microphone ------------------------------------------------------------------------------
     def mic(self, data: bytes) -> None:

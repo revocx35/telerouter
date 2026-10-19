@@ -119,6 +119,14 @@ class VirtualSpeaker:
             if isinstance(d, ClientConn):
                 d.set_state(state)
 
+    def transcript(self, role: str, text: str) -> None:
+        """What was heard ("user") or answered ("assistant"), for devices with a screen (the phone app)."""
+        seen = []
+        for d in (self.mic_dev, self.out):
+            if isinstance(d, ClientConn) and d.wants_text and all(d is not x for x in seen):
+                seen.append(d)
+                d.send_text(role, text)
+
     async def close(self) -> None:
         self.closed.set()
         if self.busy_task and not self.busy_task.done():

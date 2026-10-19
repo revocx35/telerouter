@@ -43,6 +43,9 @@ class Settings:
     advertise_ip: str = field(default_factory=lambda: _env("ADVERTISE_IP"))
     # plain-HTTP listener Google Cast speakers fetch their audio from (single-use URLs; only used with Cast outputs)
     cast_port: int = field(default_factory=lambda: _int("CAST_PORT", 8480))
+    # https://host[:port] where the phone app reaches telerouter from the internet (a reverse proxy with a public
+    # certificate in front of /ws/client); "" = only the address the admin UI was opened with
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
     whisper_uri: str = field(default_factory=lambda: _env("WHISPER_URI", "tcp://127.0.0.1:10300"))
     piper_uri: str = field(default_factory=lambda: _env("PIPER_URI", "tcp://127.0.0.1:10200"))
     wake_uri: str = field(default_factory=lambda: _env("WAKE_URI", "tcp://127.0.0.1:10400"))

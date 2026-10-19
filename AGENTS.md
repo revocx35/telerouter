@@ -148,6 +148,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   private CA is "✘ Failed to connect" without it and "✔ Connected" with it (`claude mcp get <name>` checks
   without spending tokens). Pinned CAs (`ExtraMcpServer.tls_ca`) use this. The Zigbee IR Remote app (1.3.0)
   serves MCP on :8098 with its own CA.
+- **Android app** (0.9, repo telerouter-android): `talk` with `"cue": false` must install the endpointer in
+  `start_turn` itself (synchronously). The audio the phone sends right after the message is handled before
+  the turn's task runs, and with the old flow it went to the wake word stream and was lost. Transcripts only
+  go to devices whose hello said `"transcript": true`.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -166,7 +170,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.8.1, 2026-10-19)
+## Status (v0.9.0, 2026-10-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
