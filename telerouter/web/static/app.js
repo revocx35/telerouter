@@ -165,7 +165,7 @@ function totpPage() {
 
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
-  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["connections", "Connections"],
+  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
   ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
 ];
@@ -187,7 +187,7 @@ function route() {
   document.querySelectorAll("nav.side a").forEach(a => a.classList.toggle("active", a.dataset.p === id));
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
-  const fn = { dashboard, speakers, agents, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+  const fn = { dashboard, speakers, agents, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
     history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
@@ -541,6 +541,108 @@ function agentForm(a, data) {
     await act(() => isNew ? api("POST", "/api/agents", d) : api("PUT", `/api/agents/${a.id}`, d), "Saved");
     close(); route();
   } }, "Save")]);
+}
+
+// ---------------------------------------------------------------------------------------------- scheduled tasks
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+async function tasksPage(main) {
+  const list = el("div");
+  let data;
+  const agentName = () => (data.agents.find(a => a.id === data.default_agent_id) || data.agents[0] || { name: "the agent" }).name;
+  async function load() {
+    data = await api("GET", "/api/tasks");
+    list.replaceChildren(...(data.tasks.length ? data.tasks.map(taskCard) : [el("div", { class: "card" }, el("p", { class: "hint" }, "No scheduled task yet."))]));
+  }
+  function taskCard(t) {
+    const status = t.running ? "thinking" : t.enabled ? "ready" : "disabled";
+    return el("div", { class: "card" },
+      el("div", { class: "row" }, stateDot(status), el("h2", {}, t.name), el("span", { class: "chip" }, t.schedule_text),
+        el("span", { class: "chip" }, t.where), t.target === "task_session" && t.context_limit_k ? el("span", { class: "chip" }, `advised context ${t.context_limit_k}k`) : "",
+        t.enabled ? "" : el("span", { class: "chip warn" }, "off"), el("span", { class: "spacer" }),
+        t.running ? el("button", { onclick: async () => { await act(() => api("POST", `/api/tasks/${t.id}/stop`), "Stopped"); load(); } }, "Stop run")
+          : el("button", { onclick: async () => { await act(() => api("POST", `/api/tasks/${t.id}/run`), "Started"); load(); } }, "Run now"),
+        el("button", { onclick: () => taskForm(t) }, "Edit"),
+        el("button", { onclick: async () => { await act(() => api("PUT", `/api/tasks/${t.id}`, { enabled: !t.enabled }), t.enabled ? "Turned off" : "Turned on"); load(); } }, t.enabled ? "Turn off" : "Turn on"),
+        el("button", { class: "danger", onclick: async () => { if (confirm(`Remove the task ${t.name}? Its tmux sessions stay open.`)) { await act(() => api("DELETE", `/api/tasks/${t.id}`), "Removed"); load(); } } }, "Remove")),
+      el("p", { class: "hint" }, t.running ? "Running now. " : "", t.next ? `Next run: ${t.next_local}${t.timezone !== Intl.DateTimeFormat().resolvedOptions().timeZone ? " (" + t.timezone + ")" : ""}` : "No next run.",
+        t.sessions.length && t.target !== "agent" ? ` · sessions: ${t.sessions.join(", ")}` : ""),
+      el("p", { class: "muted" }, t.prompt.length > 240 ? t.prompt.slice(0, 240) + "…" : t.prompt),
+      t.runs.length ? el("table", {}, el("tr", {}, ["Started", "Result", "Took", "Answer"].map(x => el("th", {}, x))),
+        t.runs.map(r => el("tr", {},
+          el("td", {}, when(r.started), r.trigger === "manual" ? el("span", { class: "muted" }, " (by hand)") : ""),
+          el("td", {}, el("span", { class: "chip " + (r.status === "ok" ? "ok" : r.status === "running" ? "warn" : "bad") }, r.status),
+            r.session ? el("div", { class: "muted mono" }, r.session) : "",
+            r.context_k !== undefined ? el("div", { class: "muted" }, `context ${r.context_k}k`) : ""),
+          el("td", {}, r.ended ? `${Math.max(1, Math.round((r.ended - r.started) / 60))} min` : ""),
+          el("td", {}, r.error ? el("span", { class: "err" }, r.error) : "",
+            r.reply ? (r.reply.length > 200 ? el("details", {}, el("summary", {}, r.reply.slice(0, 200) + "…"), el("pre", { class: "screen" }, r.reply)) : r.reply) : "",
+            r.context_note ? el("div", { class: "muted" }, r.context_note) : "")))) : null);
+  }
+  function taskForm(t) {
+    const isNew = !t;
+    t = t || { name: "", prompt: "", enabled: true, target: "agent", agent_id: "", machine_id: (data.machines[0] || {}).id || "", folder: "~",
+      session_name: "", keep_sessions: 3, context_limit_k: 300, schedule: "daily", times: ["09:00"], days: [], every_minutes: 60, at: "", cron: "",
+      timezone: data.timezone, timeout_minutes: 60, calls: "agent" };
+    const box = (...kids) => el("div", {}, ...kids);
+    const agentBox = box(data.agents.length > 1 ? field("Agent", sel("agent_id", t.agent_id || data.default_agent_id, data.agents.map(a => [a.id, a.name]))) : "",
+      el("p", { class: "hint" }, "Typed into the agent's ongoing conversation: it remembers earlier runs and everything else you talked about. While a run is going on, voice requests to it get \"busy with the scheduled task\"."));
+    const machineHint = el("p", { class: "hint" });
+    const sessBox = box(el("div", { class: "form2" },
+      field("Machine", sel("machine_id", t.machine_id, data.machines.map(m => [m.id, m.name]))),
+      field("Folder", inp("folder", t.folder), "Created if missing.")), machineHint);
+    const newBox = box(field("Keep the sessions of the last … runs", num("keep_sessions", t.keep_sessions, { min: 1, max: 20 }), "Each run starts a fresh session (<name>-MMDD-HHMM); older ones are closed."));
+    const ownBox = box(el("div", { class: "form2" },
+      field("Session name", inp("session_name", t.session_name, { placeholder: t.tmux_name || "task-<name>" }), "Started on the first run, then reused."),
+      field("Advised context (k tokens)", num("context_limit_k", t.context_limit_k, { min: 0, max: 2000 }), "300 = 300k tokens; 0 = off.")),
+      el("p", { class: "hint" }, "Above the advised size, after a run the agent gets a gentle reminder that its context is high and it may clear or compact it if it isn't working on something and doesn't need it. It's only a suggestion: the agent decides, and if it keeps its context it is reminded again only after its context grew another 10%."));
+    const target = sel("target", t.target, [["agent", `In ${agentName()}'s conversation`], ["new_session", "A new session for every run"], ["task_session", "Its own session, kept between runs"]]);
+    const dayBoxes = DAYS.map((d, i) => chk(`day${i}`, t.days.includes(i), d));
+    const dailyBox = box(field("Times of day", inp("times", t.times.join(", "), { placeholder: "09:00, 18:00" }), "24 h, separated by commas."),
+      el("div", { class: "row" }, dayBoxes), el("p", { class: "hint" }, "No day ticked = every day."));
+    const intervalBox = box(field("Every … minutes", num("every_minutes", t.every_minutes, { min: 5 }), "At least 5. Counted from when you save."));
+    const onceBox = box(field("Date and time", el("input", { type: "datetime-local", name: "at", value: t.at })));
+    const cronBox = box(field("Cron expression", inp("cron", t.cron, { placeholder: "0 8 * * 1-5" }), "minute hour day month weekday, e.g. 0 8 * * 1-5 = weekdays at 08:00, */30 * * * * = every 30 minutes."));
+    const kind = sel("schedule", t.schedule, [["daily", "At times of day"], ["interval", "Every few minutes or hours"], ["once", "Once"], ["cron", "Cron expression"]]);
+    function sync() {
+      agentBox.classList.toggle("hidden", target.value !== "agent");
+      sessBox.classList.toggle("hidden", target.value === "agent");
+      newBox.classList.toggle("hidden", target.value !== "new_session");
+      ownBox.classList.toggle("hidden", target.value !== "task_session");
+      const m = data.machines.find(x => x.id === $("[name=machine_id]", sessBox).value);
+      machineHint.textContent = m ? `Sessions run ${m.agent_kind === "hermes" ? "Hermes" : "Claude Code"} as the machine's SSH user, with its settings for new sessions (model ${m.new_session_model || "default"}, permission mode ${m.new_session_permission_mode}; edit them under Agents & machines). Nobody can answer a permission prompt during a run, so use a mode that doesn't ask.${m.agent_kind === "hermes" ? " The advised context size works with Claude Code only." : ""}` : "Add a machine under Agents & machines first.";
+      for (const [v, b] of [["daily", dailyBox], ["interval", intervalBox], ["once", onceBox], ["cron", cronBox]]) b.classList.toggle("hidden", kind.value !== v);
+    }
+    const f = el("div", {},
+      el("div", { class: "form2" }, field("Name", inp("name", t.name, { placeholder: "e.g. morning mail summary" })), field("Where it runs", target)),
+      field("What to do", el("textarea", { name: "prompt", rows: 5, placeholder: "e.g. Check my mail and call me if anything is urgent." }, t.prompt)),
+      agentBox, sessBox, newBox, ownBox,
+      el("h3", {}, "When"),
+      el("div", { class: "form2" }, field("Repeat", kind), field("Time zone", inp("timezone", t.timezone))),
+      dailyBox, intervalBox, onceBox, cronBox,
+      el("div", { class: "form2" }, field("Stop waiting after (minutes)", num("timeout_minutes", t.timeout_minutes, { min: 1 })),
+        field("Calls about a run", sel("calls", t.calls, [["agent", "The agent's own rules decide"], ["task", "Only if the task asks for it"]]),
+          "With its own rules, an agent that is told to call you when a scheduled check is done (e.g. in your CLAUDE.md) phones you after every run.")),
+      el("div", { class: "row" }, chk("enabled", t.enabled, "On")));
+    target.addEventListener("change", sync); kind.addEventListener("change", sync);
+    $("[name=machine_id]", sessBox).addEventListener("change", sync);
+    sync();
+    modal(isNew ? "New scheduled task" : `Edit ${t.name}`, f, close => [el("button", { class: "primary", onclick: async () => {
+      const d = formData(f);
+      d.days = DAYS.map((_, i) => d[`day${i}`] ? i : -1).filter(i => i >= 0);
+      DAYS.forEach((_, i) => delete d[`day${i}`]);
+      d.times = d.times.split(/[ ,;]+/).filter(Boolean);
+      await act(() => isNew ? api("POST", "/api/tasks", d) : api("PUT", `/api/tasks/${t.id}`, d), "Saved");
+      close(); load();
+    } }, "Save")]);
+  }
+  main.replaceChildren(el("h1", {}, "Scheduled tasks"),
+    el("div", { class: "card" },
+      el("p", { class: "hint" }, "A scheduled task types its instructions into an agent at the times you pick and keeps the answer below. It runs in one of three places: the ongoing conversation of your assistant, a new tmux session for every run (a fresh start each time), or a tmux session of its own that it keeps between runs (it remembers earlier runs; you can give it an advised context size). Sessions show up under Connections → tmux, so you can attach or talk to them. Tasks run during quiet hours too, but quiet hours still block their calls."),
+      el("div", { class: "row" }, el("button", { class: "primary", onclick: () => taskForm(null) }, "New task"))),
+    list);
+  await load();
+  poll(async () => { if (!list.querySelector("details[open]")) await load(); }, 10000);
 }
 
 // ---------------------------------------------------------------------------------------------- connections

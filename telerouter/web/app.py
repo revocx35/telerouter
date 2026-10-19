@@ -29,7 +29,7 @@ from ..agents import ssh as sshmod
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
-                      Machine, McpToken, Pbx, QuietHours, SecuritySettings, Speaker, VoiceSettings)
+                      Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_certificate
 from ..settings import Settings
@@ -778,6 +778,9 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         users = [a.name for a in cfg.agents if a.machine_id == mid]
         if users:
             raise HTTPException(409, f"agents run on it: {', '.join(users)}")
+        tasks = [t.name for t in cfg.tasks if t.target != "agent" and t.machine_id == mid]
+        if tasks:
+            raise HTTPException(409, f"scheduled tasks start sessions on it: {', '.join(tasks)}")
         cfg.machines.remove(m)
         store.save()
         await engine.apply_config()
@@ -794,6 +797,78 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         except Exception as e:
             raise HTTPException(502, str(e)) from e
         return {"sessions": sessions}
+
+    # -- scheduled tasks ----------------------------------------------------------------------------------
+    def check_task(t: ScheduledTask) -> None:
+        if t.target == "agent":
+            if t.agent_id and not store.agent(t.agent_id) or not t.agent_id and not store.default_agent():
+                raise HTTPException(422, "pick the agent")
+            return
+        if not store.machine(t.machine_id):
+            raise HTTPException(422, "pick the machine its sessions start on")
+        if t.target == "task_session":
+            for x in cfg.tasks:
+                if x.id != t.id and x.target == "task_session" and x.machine_id == t.machine_id \
+                        and x.tmux_name == t.tmux_name:
+                    raise HTTPException(409, f"the task {x.name} already uses the session {t.tmux_name}")
+
+    def task_out(t: ScheduledTask) -> dict:
+        return {**t.model_dump(), "tmux_name": t.tmux_name, **engine.scheduler.info(t)}
+
+    @app.get("/api/tasks")
+    async def list_tasks():
+        return {"tasks": [task_out(t) for t in cfg.tasks],
+                "agents": [{"id": a.id, "name": a.name} for a in cfg.agents],
+                "default_agent_id": getattr(store.default_agent(), "id", ""),
+                "machines": [{"id": m.id, "name": m.name, "agent_kind": m.agent_kind,
+                              "new_session_model": m.new_session_model,
+                              "new_session_permission_mode": m.new_session_permission_mode} for m in cfg.machines],
+                "timezone": cfg.quiet.timezone}
+
+    @app.post("/api/tasks")
+    async def create_task(payload: dict):
+        t = merge(ScheduledTask, None, payload, protected={"id"})
+        check_task(t)
+        cfg.tasks.append(t)
+        store.save()
+        engine.scheduler.plan(t)
+        return task_out(t)
+
+    @app.put("/api/tasks/{tid}")
+    async def update_task(tid: str, payload: dict):
+        t = find(cfg.tasks, tid)
+        new = merge(ScheduledTask, t, payload, protected={"id"})
+        check_task(new)
+        replace(cfg.tasks, new)
+        store.save()
+        engine.scheduler.plan(new)
+        return task_out(new)
+
+    @app.delete("/api/tasks/{tid}")
+    async def delete_task(tid: str):
+        t = find(cfg.tasks, tid)
+        engine.scheduler.stop_run(tid)
+        cfg.tasks.remove(t)
+        store.save()
+        engine.scheduler.forget(tid)
+        return {"ok": True}
+
+    @app.post("/api/tasks/{tid}/run")
+    async def run_task(tid: str):
+        from ..agents.runtime import AgentError
+        t = find(cfg.tasks, tid)
+        try:
+            run = engine.scheduler.run_now(t)
+        except AgentError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"run": run}
+
+    @app.post("/api/tasks/{tid}/stop")
+    async def stop_task(tid: str):
+        find(cfg.tasks, tid)
+        if not engine.scheduler.stop_run(tid):
+            raise HTTPException(409, "it is not running")
+        return {"ok": True}
 
     AGENT_PROTECTED = {"id", "session_uuid", "mcp_token_id", "host", "port", "username", "host_key"}
 

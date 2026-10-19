@@ -105,6 +105,30 @@ incoming calls are rejected and agents can't call you or talk through a speaker 
 your Home Assistant desk sensors (motion/occupancy) says you're at your desk. Calls you ask for yourself still
 work. Each speaker can also turn the thinking beeps off (*Speakers → Beeps while the agent works*).
 
+## Scheduled tasks
+
+*Scheduled tasks → New task*: instructions for an agent ("Check my mail and call me if anything is
+urgent") and when to run them: at times of day (on chosen weekdays), every few minutes or hours, once, or a
+cron expression, in a time zone. Each task runs in one of three places:
+
+- **Jarvis's conversation**: typed into your assistant's ongoing conversation, so it remembers earlier runs
+  and everything else you talked about. While a run is going on, voice requests to it hear that it is busy
+  with the task.
+- **A new session for every run**: a new tmux session with a fresh Claude Code (`<task>-MMDD-HHMM`) on a
+  machine, in a folder you pick. The sessions of the last few runs stay open for you to look at.
+- **Its own session**: one tmux session the task keeps between runs (`task-<name>`), started on its first
+  run. Give it an **advised context size** (e.g. 300 = 300k tokens): when the context is above it after a
+  run, the agent gets a gentle reminder that its context is high and that it may clear or compact it if it
+  isn't working on something and doesn't need it. The agent decides. If it keeps its context, it is
+  reminded again only after its context has grown another 10%.
+
+The page keeps each run's answer, how long it took and the session it ran in, with *Run now* and *Stop run*.
+Sessions use the machine's new-session model and permission mode. Nobody can answer a permission prompt
+during a run, so use `auto` or another mode that doesn't ask. *Calls about a run* sets who decides whether
+the agent phones you afterwards: its own rules (an agent told in its CLAUDE.md to call when a scheduled check is
+done will call after every run), or only the task. Tasks run during quiet hours too, but quiet hours
+still block their calls.
+
 ## Home Assistant (lights, switches, …)
 
 Give your agent Home Assistant's own tools:

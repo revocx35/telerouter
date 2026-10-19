@@ -23,8 +23,8 @@ import asyncssh
 
 from ..models import Machine
 from . import ssh
-from .drivers import claude_dialog_keys
-from .runtime import AgentError, _paths, _short, turn_end_without_stop
+from .drivers import claude_dialog_keys, claude_reset_keys
+from .runtime import AgentError, _paths, _short, context_size, turn_end_without_stop
 
 if TYPE_CHECKING:
     from ..engine import Engine
@@ -137,10 +137,11 @@ class MachineRuntime:
             args += ["--permission-mode", m.new_session_permission_mode]
         return " ".join(ssh.q(a) for a in args)
 
-    async def new_session(self, name: str, workdir: str = "~") -> dict:
-        """Start a tmux session `name` with a fresh agent in `workdir` (created if missing); returns its listing."""
+    async def new_session(self, name: str, workdir: str = "~", by_admin: bool = False) -> dict:
+        """Start a tmux session `name` with a fresh agent in `workdir` (created if missing); returns its listing.
+        Agents need the machine's allow_new_sessions; the admin's scheduled tasks (`by_admin`) do not."""
         m = self.machine
-        if not m.allow_new_sessions:
+        if not m.allow_new_sessions and not by_admin:
             raise AgentError(f"starting new sessions on {m.name} is not allowed (Agents & machines -> edit the machine)")
         name = name.strip()
         if not NEW_NAME_RE.match(name) or name.startswith(INTERNAL_PREFIX):
@@ -190,8 +191,44 @@ class MachineRuntime:
         log.warning("[%s] %s: the new session did not settle within %d s", self.machine.name, session, timeout)
 
     # -- talking to a session ------------------------------------------------------------------------
-    async def ask(self, session: str, text: str, label: str, on_wait=None) -> str:
-        """Type a spoken request into `session` and return the agent's answer when its turn is over."""
+    async def has_session(self, session: str) -> bool:
+        return any(x["name"] == session for x in await self.list_sessions())
+
+    async def kill_session(self, session: str) -> None:
+        if not SESSION_RE.match(session) or session.startswith(INTERNAL_PREFIX):
+            raise AgentError("invalid session name")
+        await self._sh(self._tmux("kill-session", "-t", "=" + session) + " 2>/dev/null")
+        log.info("[%s] closed the tmux session %s", self.machine.name, session)
+        self.refresh()
+
+    async def context_tokens(self, session: str) -> int | None:
+        """Context size of the Claude Code conversation in `session` after its last turn (None: unknown)."""
+        path = await self.claude_transcript(session)
+        if not path:
+            return None
+        return context_size(await self._sh(f"tail -n 80 {ssh.q(path)} 2>/dev/null", timeout=15))
+
+    async def reset_context(self, session: str, mode: str, keep: str = "") -> None:
+        """Type /clear or /compact into an idle Claude Code session."""
+        keys = claude_reset_keys(mode, keep)
+        if not keys or not SESSION_RE.match(session):
+            raise AgentError(f"can't {mode} that session")
+        pane = f"={session}:"
+        async with self._locks.setdefault(session, asyncio.Lock()):
+            await asyncio.sleep(1.5)                     # let the TUI return to its prompt
+            for k in keys:
+                if k == "Enter":
+                    await self._sh(self._tmux("send-keys", "-t", pane, "Enter"))
+                else:
+                    await self._sh(self._tmux("send-keys", "-t", pane, "-l", "--", k))
+                    await asyncio.sleep(0.5)
+            log.info("[%s] %s: context %s", self.machine.name, session, mode)
+            await asyncio.sleep(3 if mode == "clear" else 30)   # /compact takes a while
+
+    async def ask(self, session: str, text: str, label: str, on_wait=None, header: str = "",
+                  timeout: float | None = None) -> str:
+        """Type a spoken request into `session` and return the agent's answer when its turn is over.
+        With `header` the text is not a spoken request (a scheduled task): "[telerouter #nonce · header] text"."""
         if not SESSION_RE.match(session):
             raise AgentError("invalid session name")
         if self.state != "ready":
@@ -199,11 +236,15 @@ class MachineRuntime:
         lock = self._locks.setdefault(session, asyncio.Lock())
         async with lock:
             nonce = secrets.token_hex(3)
-            prompt = (f"[telerouter #{nonce} · {label}: spoken request, answer in a few plain sentences for "
-                      f"text-to-speech, no markdown] {' '.join(text.split())}")
+            if header:
+                prompt = f"[telerouter #{nonce} · {header}] {text.strip()}"
+            else:
+                prompt = (f"[telerouter #{nonce} · {label}: spoken request, answer in a few plain sentences for "
+                          f"text-to-speech, no markdown] {' '.join(text.split())}")
+            timeout = timeout or self.machine.reply_timeout
             if self.machine.agent_kind == "claude":
-                return await self._ask_claude(session, prompt, nonce)
-            return await self._ask_screen(session, prompt)
+                return await self._ask_claude(session, prompt, nonce, timeout)
+            return await self._ask_screen(session, prompt, timeout)
 
     async def _type(self, session: str, text: str) -> None:
         pane = f"={session}:"
@@ -232,32 +273,32 @@ class MachineRuntime:
             path = f"{self.home}/.claude/projects/{claude_project_dir(cwd)}/{sid}.jsonl"
         return path if re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path) else ""
 
-    async def _ask_claude(self, session: str, prompt: str, nonce: str) -> str:
+    async def _ask_claude(self, session: str, prompt: str, nonce: str, timeout: float) -> str:
         path = await self.claude_transcript(session)
         if not path:
             raise AgentError(f"no Claude Code is running in the {session} session")
         start = int((await self._sh(f"wc -l < {ssh.q(path)} 2>/dev/null || echo 0")).strip() or 0)
         await self._type(session, prompt)
-        deadline = time.monotonic() + self.machine.reply_timeout
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
             out = await self._sh(f"tail -n +{start + 1} {ssh.q(path)} 2>/dev/null | head -c 4000000", timeout=30)
             reply = turn_end_without_stop(out, nonce)
             if reply is not None:
                 return reply or "Done."
-            if f"#{nonce}" not in out and time.monotonic() > deadline - self.machine.reply_timeout + 30:
+            if f"#{nonce}" not in out and time.monotonic() > deadline - timeout + 30:
                 # never accepted (e.g. the session was cleared and the file changed): look again once
                 newer = await self.claude_transcript(session)
                 if newer and newer != path:
                     path, start = newer, 0
         raise AgentError(f"the {session} session is still working; I stopped waiting")
 
-    async def _ask_screen(self, session: str, prompt: str) -> str:
+    async def _ask_screen(self, session: str, prompt: str, timeout: float) -> str:
         pane = f"={session}:"
         before = await self._sh(self._tmux("capture-pane", "-p", "-t", pane))
         await self._type(session, prompt)
         last, stable, changed = "", 0, False
-        deadline = time.monotonic() + self.machine.reply_timeout
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
             now = await self._sh(self._tmux("capture-pane", "-p", "-t", pane))

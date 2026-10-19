@@ -8,7 +8,7 @@ import secrets
 import time
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def new_id() -> str:
@@ -545,6 +545,136 @@ class QuietHours(BaseModel):
         return v
 
 
+TASK_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
+
+
+class ScheduledTask(BaseModel):
+    """A prompt that runs on a schedule: in an agent's conversation (Jarvis), in a new tmux session each run,
+    or in one tmux session the task keeps (with an advised context size)."""
+    id: str = Field(default_factory=new_id)
+    name: str
+    enabled: bool = True
+    prompt: str
+    target: Literal["agent", "new_session", "task_session"] = "agent"
+    agent_id: str = ""                # agent: "" = the default agent
+    machine_id: str = ""              # sessions: where they start (as the machine's SSH user)
+    folder: str = "~"                 # sessions: working folder (created if missing)
+    session_name: str = ""            # task_session: its tmux session ("" = task-<name>)
+    keep_sessions: int = Field(default=3, ge=1, le=20)        # new_session: the last runs' sessions kept
+    context_limit_k: int = Field(default=0, ge=0, le=2000)    # task_session: gentle reminder above this (k tokens)
+    schedule: Literal["daily", "interval", "once", "cron"] = "daily"
+    times: list[str] = Field(default_factory=lambda: ["09:00"], max_length=24)   # daily: HH:MM
+    days: list[int] = Field(default_factory=list)            # daily: 0 = Monday; empty = every day
+    every_minutes: int = Field(default=60, ge=5, le=60 * 24 * 31)
+    at: str = ""                      # once: local date and time ("2026-10-20T09:00")
+    cron: str = ""
+    timezone: str = Field(default_factory=lambda: os.environ.get("TZ") or "UTC")
+    timeout_minutes: int = Field(default=60, ge=1, le=24 * 60)
+    # "agent": the agent's own rules decide whether it phones you about a run (e.g. your CLAUDE.md);
+    # "task": it is told not to phone, message or announce anything unless the task asks for it
+    calls: Literal["agent", "task"] = "agent"
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        return _name(v)
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 8000:
+            raise ValueError("1-8000 characters")
+        return v
+
+    @field_validator("folder")
+    @classmethod
+    def _folder(cls, v: str) -> str:
+        v = " ".join(v.split()) or "~"
+        if not re.match(r"^~?[A-Za-z0-9_./ -]{0,200}$", v) or ".." in v.split("/"):
+            raise ValueError("plain path (letters, digits, _ . / - and spaces)")
+        return v
+
+    @field_validator("session_name")
+    @classmethod
+    def _session(cls, v: str) -> str:
+        v = v.strip()
+        if v and (not TASK_SESSION_RE.match(v) or v.startswith("telerouter-")):
+            raise ValueError("letters, digits, - _ . (up to 40), not starting with telerouter-")
+        return v
+
+    @field_validator("times")
+    @classmethod
+    def _times(cls, v: list[str]) -> list[str]:
+        v = [t.strip() for t in v if t.strip()]
+        for t in v:
+            if not HHMM_RE.match(t):
+                raise ValueError("times as HH:MM (24 h)")
+        return sorted(set(v))
+
+    @field_validator("days")
+    @classmethod
+    def _days(cls, v: list[int]) -> list[int]:
+        if any(d < 0 or d > 6 for d in v):
+            raise ValueError("weekdays are 0 (Monday) to 6 (Sunday)")
+        return sorted(set(v))
+
+    @field_validator("at")
+    @classmethod
+    def _at(cls, v: str) -> str:
+        v = v.strip()
+        if v:
+            import datetime as dt
+            try:
+                v = dt.datetime.fromisoformat(v).replace(tzinfo=None, second=0, microsecond=0).isoformat(timespec="minutes")
+            except ValueError as e:
+                raise ValueError("date and time like 2026-10-20T09:00") from e
+        return v
+
+    @field_validator("cron")
+    @classmethod
+    def _cron(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if v:
+            from .cron import Cron
+            Cron(v)
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        return _check_tz(v)
+
+    @model_validator(mode="after")
+    def _schedule(self):
+        if self.schedule == "daily" and not self.times:
+            raise ValueError("pick at least one time of day")
+        if self.schedule == "once" and not self.at:
+            raise ValueError("pick the date and time")
+        if self.schedule == "cron" and not self.cron:
+            raise ValueError("enter the cron expression")
+        return self
+
+    @property
+    def tmux_name(self) -> str:
+        """task_session: the session it keeps."""
+        return self.session_name or task_slug("task-" + self.name)
+
+
+def task_slug(text: str, n: int = 40) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:n].strip("-")
+    return s or "task"
+
+
+def _check_tz(v: str) -> str:
+    from zoneinfo import ZoneInfo
+    try:
+        ZoneInfo(v)
+    except Exception as e:
+        raise ValueError("unknown time zone (e.g. Europe/Istanbul)") from e
+    return v
+
+
 class SecuritySettings(BaseModel):
     session_idle_minutes: int = Field(default=30, ge=5, le=24 * 60)
     session_absolute_hours: int = Field(default=12, ge=1, le=24 * 30)
@@ -568,5 +698,6 @@ class Config(BaseModel):
     calls: CallSettings = Field(default_factory=CallSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     quiet: QuietHours = Field(default_factory=QuietHours)
+    tasks: list[ScheduledTask] = Field(default_factory=list)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

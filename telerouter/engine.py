@@ -69,6 +69,8 @@ class Engine:
         self._sync_now = asyncio.Event()
         from .mcp import McpServer
         self.mcp = McpServer(self)
+        from .scheduler import Scheduler
+        self.scheduler = Scheduler(self)
 
     # small facades used by other modules
     @property
@@ -98,10 +100,13 @@ class Engine:
         await self.ua.start()
         await self.apply_config()
         self._spawn(self._sync_loop())
+        self.scheduler.resume()
+        self._spawn(self.scheduler.loop())
 
     async def stop(self) -> None:
         for t in list(self._tasks):
             t.cancel()
+        self.scheduler.stop()
         for vs in list(self.speakers.values()):
             await vs.close()
         for conn in list(self.clients.values()):

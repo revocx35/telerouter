@@ -117,8 +117,10 @@ class McpServer:
         return conn
 
     def _source(self, tok: McpToken):
+        """The person's request the agent works on now; None when it acts on its own (or on a scheduled task)."""
         rt = self.engine.agents.get(tok.agent_id) if tok.agent_id else None
-        return rt.current_source if rt else None
+        src = rt.current_source if rt else None
+        return None if src is None or src.kind == "schedule" else src
 
     # -- tools ------------------------------------------------------------------------------------------
     def _define(self) -> None:

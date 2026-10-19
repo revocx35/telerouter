@@ -48,6 +48,8 @@ telerouter/
   security.py          argon2id, tokens (stored as SHA-256), TOTP, LoginThrottle, server-side sessions
   tls.py               local CA + server certificate (re-issued when names change; CA stays)
   engine.py            wiring: SIP UA + accounts, agent runtimes, integration clients, contact lookups
+  scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
+  cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
   voice/
     client_conn.py     one speaker device connection (client): paced audio out, mic in, state
@@ -260,6 +262,36 @@ finds the transcript), lists the sessions (the new one becomes a tmux contact) a
 it. Names: `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, not `telerouter-*`, not an existing session; folders: plain
 paths without `..` (quoted; `~` = the SSH user's home).
 
+### 4.2 Scheduled tasks (`scheduler.py`)
+
+A `ScheduledTask` (config) holds the prompt, the target and the schedule; the run state (next run time,
+the last 20 runs, the task's sessions, the context size it was last reminded at) lives in `/data/tasks.json`,
+so config.json is not rewritten every run. `Scheduler.loop()` ticks every 15 s and starts due runs. One run per
+task at a time: a run that comes due while the previous one is going on is recorded as skipped. A one-off
+task turns itself off after it ran. At start-up, runs cut off by the restart are marked failed, and a run
+missed while telerouter was down still runs if it was due less than 15 minutes ago. Older missed runs are
+skipped.
+
+| Target | What a run does |
+|---|---|
+| `agent` | `AgentRuntime.ask(prompt, Source("schedule", 'scheduled task "X"'), timeout)`: the agent's ongoing conversation. Other requests to that agent fail fast with "busy with the scheduled task" while it runs, instead of waiting up to an hour behind its lock |
+| `new_session` | `MachineRuntime.new_session("<slug>-MMDD-HHMM", folder, by_admin=True)`, then `ask(..., header=...)`. The sessions beyond `keep_sessions` (the oldest ones this task started) are closed |
+| `task_session` | the task's own session `task-<slug>` (or its `session_name`), created when missing, then `ask`. Afterwards: the context check |
+
+Prompts are headed `[telerouter #nonce · scheduled task "X" (date time): an automatic run nobody is
+watching. Do the task, then end with a short summary of the result (telerouter keeps it)]`, not as spoken
+requests. With `calls: "task"` the header (or, for an agent, a line after the prompt) adds "Don't phone,
+message or announce anything about this run unless the task asks you to". MCP `_source()` treats a
+scheduled run like the agent acting on its own (no requesting speaker, quiet hours apply).
+
+**Context reminder** (`task_session`, Claude Code, `context_limit_k` > 0): after the run telerouter reads the
+context size from the session's transcript (the usage of the last assistant message). At or above the limit
+it sends a gentle note: the size, the advised size, that this is only a suggestion, and how to answer.
+`TELEROUTER_CLEAR` on its own line makes telerouter type `/clear`, `TELEROUTER_COMPACT: <keep>` makes it type
+`/compact <keep>`, and anything else ("keeping it") makes telerouter remember the size and remind again only
+after the context grew by another 10% of the limit. `/clear` gives the session a new id; Claude Code
+updates `~/.claude/sessions/<pid>.json`, so the next run finds the new transcript (verified on 2.1.303).
+
 ## 5. Calls
 
 `router/calls.py`. Every call is a `CallSession` with one SIP leg (`router/sipaudio.py`: G.711 <-> 16 kHz,
@@ -332,6 +364,7 @@ integration tokens, SSH key).
 | A voice request makes the agent do harm | the agent runs with the permission mode you choose (default `auto`); permission prompts are announced, never auto-approved; the agent instructions forbid calling anyone not asked for; MCP tokens can be limited to contacts/speakers |
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
+| Scheduled tasks run prompts unattended | only the admin creates them (UI/API with session + CSRF; no MCP tool); sessions start as the machine's SSH user with the machine's new-session model/permission mode (`by_admin` skips only the agents' `allow_new_sessions` switch); session names and folders validated and shell-quoted; only sessions the task started are closed; quiet hours still gate the calls they make; a run has a timeout |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | SSRF via integration URLs | admin-only, HTTPS only, no redirects followed; the SIP address from the integration is rewritten to the integration's own host |

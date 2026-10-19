@@ -134,6 +134,16 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   the Raqqa laptop's mic heard it and started a turn. While any call that is not on that speaker is going on,
   the wake word no longer starts a turn there (`VoiceAssistant._other_call`; Voice setting `wake_during_calls`
   turns it back on). The wake word still answers/hangs up a call on the speaker itself.
+- **Scheduled tasks** (0.8, `scheduler.py`): run state is in `/data/tasks.json`, not config.json. Prompts
+  carry a `scheduled task "X"` header (not "spoken request"), and a Jarvis run uses `Source("schedule", ...)`.
+  MCP `_source()` returns None for it, so it counts as the agent acting on its own, and other voice requests
+  to Jarvis fail fast with "busy with the scheduled task" instead of queueing behind the lock.
+- **The owner's global CLAUDE.md on the agent host says to phone them when "a scheduled/cron check produced
+  a result"**: a test run of a scheduled-task prompt in a scratch session phoned the owner twice (unanswered).
+  That's why the task setting `calls` exists ("task" = told not to phone unless the task asks). Test
+  scheduled-task prompts with `calls: "task"` wording, or on a machine without that CLAUDE.md.
+- Real Claude Code 2.1.303 answered the context reminder with exactly `TELEROUTER_CLEAR` in a session with
+  nothing in progress; after `/clear`, `~/.claude/sessions/<pid>.json` names the new session id at once.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -152,10 +162,10 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.7.1, 2026-10-18)
+## Status (v0.8.0, 2026-10-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
-`TELEROUTER_VERSION=0.5` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
+`TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
 Verified: speaker turn end to end with real Whisper/Piper/openWakeWord (WAV-driven client); agent
@@ -168,6 +178,10 @@ backend) in daily use; wa2sip/cam2sip linked and synced (no real WhatsApp contac
 0.6 virtual speakers: CastOutput against the real Mi Smart Speaker Lite (muted: launch, LOAD, FINISHED
 timing, flush, receiver stop), the rest with a fake Cast device in tests and the UI with Playwright.
 Not yet heard on the real speaker: audible quality/latency of answers through Cast.
+0.8 scheduled tasks: scheduler logic with fake agents/machines in tests, the UI with Playwright, and the
+session side by hand against a real Claude Code 2.1.303 (scheduled-task header, transcript reply,
+context size from the transcript, the reminder answered with TELEROUTER_CLEAR, /clear, the next run in the
+new conversation). Not yet run end to end in prod through the scheduler.
 Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
 Hermes install; echo cancellation on real hardware; quiet hours with real desk sensors (off in prod until the
 user enables them under Voice & calls -> Quiet hours).

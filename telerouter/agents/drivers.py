@@ -40,6 +40,9 @@ For those messages:
 - If the work takes longer, still finish with a short spoken summary of the result.
 - If an earlier spoken request got no answer from you (e.g. you hit a usage limit), do not carry it out
   later on your own: only act on what the person asks now.
+- Messages headed "[telerouter #... · scheduled task ...]" are not spoken: they are tasks the owner scheduled
+  in telerouter, and nobody is waiting on a speaker or the phone. Do the work completely, then end with a
+  short plain summary of the result (it is stored as the run's result).
 - Messages without that prefix were typed in this terminal: answer them normally."""
     if tools:
         text += """
@@ -134,12 +137,7 @@ class ClaudeDriver(Driver):
     kind = "claude"
 
     def reset_keys(self, mode: str, keep: str) -> list[str]:
-        if mode == "clear":
-            return ["/clear", "Enter"]
-        if mode == "compact":
-            keep = " ".join(keep.split())[:500]
-            return [f"/compact {keep}".strip(), "Enter"]
-        return []
+        return claude_reset_keys(mode, keep)
 
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         hook = shlex.quote(self.hook_path)
@@ -192,6 +190,16 @@ sleep 3
 
     def dialog_keys(self, screen: str) -> list[str] | None:
         return claude_dialog_keys(screen)
+
+
+def claude_reset_keys(mode: str, keep: str) -> list[str]:
+    """What to type to clear or compact a Claude Code conversation."""
+    if mode == "clear":
+        return ["/clear", "Enter"]
+    if mode == "compact":
+        keep = " ".join(keep.split())[:500]
+        return [f"/compact {keep}".strip(), "Enter"]
+    return []
 
 
 def claude_dialog_keys(screen: str) -> list[str] | None:

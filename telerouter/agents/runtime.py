@@ -38,7 +38,7 @@ class AgentError(Exception):
 @dataclass
 class Source:
     """Where a request to the agent came from (decides where replies and calls go)."""
-    kind: str                       # "speaker" | "phone" | "mcp"
+    kind: str                       # "speaker" | "phone" | "mcp" | "schedule"
     label: str                      # "Kitchen speaker", "phone call from Dad"
     speaker_id: str = ""            # speaker
     call_id: str = ""               # phone
@@ -340,11 +340,15 @@ class AgentRuntime:
         self.state = "idle"
 
     # -- requests ----------------------------------------------------------------------------------
-    async def ask(self, text: str, source: Source, on_note=None) -> str:
+    async def ask(self, text: str, source: Source, on_note=None, timeout: float | None = None) -> str:
         """Type `text` into the agent and wait for its final answer."""
         a = self.agent
         if self.state not in ("ready", "starting"):
             raise AgentError(f"{a.name} is not available ({self.state}{': ' + self.error if self.error else ''})")
+        busy = self.pending.source if self.pending else None
+        if busy and busy.kind == "schedule" and source.kind != "schedule":
+            # a scheduled task can work for an hour: don't leave a speaker or caller waiting behind it
+            raise AgentError(f"{a.name} is busy with the {busy.label}; try again when it is done")
         async with self._lock:
             try:
                 await asyncio.wait_for(self._ready.wait(), 60)
@@ -366,7 +370,7 @@ class AgentRuntime:
                 await self._type(prompt)
                 watch = asyncio.create_task(self._watch_turn_end(self.pending)) if a.kind == "claude" else None
                 try:
-                    reply = await asyncio.wait_for(fut, a.reply_timeout)
+                    reply = await asyncio.wait_for(fut, timeout or a.reply_timeout)
                 finally:
                     if watch:
                         watch.cancel()
@@ -374,7 +378,7 @@ class AgentRuntime:
                 return reply
             except TimeoutError as e:
                 entry["reply"] = "(no answer in time)"
-                raise AgentError(f"{a.name} did not answer within {a.reply_timeout} s") from e
+                raise AgentError(f"{a.name} did not answer within {round(timeout or a.reply_timeout)} s") from e
             finally:
                 self.pending = None
                 self.current_source = None      # later tool calls of this turn are no longer "asked by voice"
@@ -477,16 +481,9 @@ class AgentRuntime:
             out = await self._sh(f"tail -n 80 {ssh.q(path)}", timeout=10)
         except Exception:
             return
-        for line in reversed(out.splitlines()):
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            u = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
-            if isinstance(u, dict):
-                self.context_tokens = sum(int(u.get(k) or 0) for k in (
-                    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
-                return
+        size = context_size(out)
+        if size is not None:
+            self.context_tokens = size
 
     def request_reset(self, mode: str, keep: str) -> str:
         """Called by the agent through MCP; runs right after its current turn ends."""
@@ -570,6 +567,20 @@ def _paths() -> str:
 def _short(e: BaseException) -> str:
     s = str(e) or e.__class__.__name__
     return s if len(s) < 300 else s[:300] + "..."
+
+
+def context_size(transcript_tail: str) -> int | None:
+    """Context tokens after the last assistant message in a Claude Code transcript tail (None: none there)."""
+    for line in reversed(transcript_tail.splitlines()):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        u = (e.get("message") or {}).get("usage") if isinstance(e, dict) and e.get("type") == "assistant" else None
+        if isinstance(u, dict):
+            return sum(int(u.get(k) or 0) for k in (
+                "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+    return None
 
 
 def turn_end_without_stop(transcript_tail: str, nonce: str) -> str | None:
