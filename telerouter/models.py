@@ -22,7 +22,7 @@ USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\[\]-]{0,80}$")
 WAKE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
-SECRET_FIELDS = {"password", "token", "password_hash", "totp_secret", "token_hash", "code_hash"}
+SECRET_FIELDS = {"password", "token", "password_hash", "totp_secret", "token_hash", "code_hash", "client_secret"}
 
 
 def _name(v: str) -> str:
@@ -697,6 +697,60 @@ class SecuritySettings(BaseModel):
     session_absolute_hours: int = Field(default=12, ge=1, le=24 * 30)
 
 
+class SsoSettings(BaseModel):
+    """Single sign-on for the admin UI with an OpenID Connect provider (e.g. Authentik): authorization code flow
+    with PKCE. Only the people listed here may log in, as the admin."""
+    enabled: bool = False
+    label: str = Field(default="Authentik", max_length=40)      # "Sign in with <label>"
+    issuer: str = ""                  # e.g. https://auth.example.com/application/o/telerouter/
+    client_id: str = Field(default="", max_length=200)
+    client_secret: str = Field(default="", max_length=400)
+    scopes: str = Field(default="openid profile email", max_length=200)
+    allowed_users: list[str] = Field(default_factory=list)      # user names or e-mail addresses
+    allowed_groups: list[str] = Field(default_factory=list)
+    auto_redirect: bool = False       # the login page goes straight to the provider
+
+    @field_validator("issuer")
+    @classmethod
+    def _issuer(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^https://[A-Za-z0-9.\-\[\]:]+(/[A-Za-z0-9._~/%-]*)?$", v):
+            raise ValueError("must be an https:// URL (the provider's issuer, no query)")
+        return v
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, v: str) -> str:
+        return _name(v) if v.strip() else "single sign-on"
+
+    @field_validator("allowed_users", "allowed_groups")
+    @classmethod
+    def _names(cls, v: list[str]) -> list[str]:
+        out = [" ".join(x.split()) for x in v if x.strip()]
+        if any(len(x) > 120 or not NAME_RE.match(x) for x in out):
+            raise ValueError("names of 1-120 characters")
+        return out[:50]
+
+    @field_validator("scopes")
+    @classmethod
+    def _scopes(cls, v: str) -> str:
+        parts = v.split()
+        if "openid" not in parts:
+            parts.insert(0, "openid")
+        if any(not re.match(r"^[A-Za-z0-9_:.-]{1,60}$", p) for p in parts):
+            raise ValueError("space-separated scope names")
+        return " ".join(parts)
+
+    @model_validator(mode="after")
+    def _complete(self):
+        if self.enabled:
+            if not self.issuer or not self.client_id:
+                raise ValueError("single sign-on needs the issuer and the client ID")
+            if not self.allowed_users and not self.allowed_groups:
+                raise ValueError("list at least one allowed user or group")
+        return self
+
+
 class Config(BaseModel):
     version: int = 1
     admin: Admin | None = None
@@ -715,6 +769,7 @@ class Config(BaseModel):
     calls: CallSettings = Field(default_factory=CallSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     quiet: QuietHours = Field(default_factory=QuietHours)
+    sso: SsoSettings = Field(default_factory=SsoSettings)
     tasks: list[ScheduledTask] = Field(default_factory=list)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

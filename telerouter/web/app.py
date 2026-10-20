@@ -21,16 +21,18 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .. import security
+from .. import sso as ssomod
 from ..agents import ssh as sshmod
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
-                      Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, VoiceSettings)
+                      Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
+                      VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_ca, fetch_certificate
 from ..settings import Settings
@@ -81,6 +83,11 @@ class EnrollBody(BaseModel):
     code: str = Field(max_length=16)
     name: str = Field(default="", max_length=64)
     platform: str = Field(default="", max_length=64)
+
+
+class SsoBody(BaseModel):
+    password: str = Field(max_length=256)
+    sso: dict
 
 
 class TextBody(BaseModel):
@@ -208,6 +215,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     hash_slots = asyncio.Semaphore(2)
     tarball = client_tarball() if CLIENT_SRC.exists() else b""
     setup_code_path = Path(settings.data_dir) / "setup-code"
+    sso = ssomod.Sso(lambda: cfg.sso)
 
     def setup_code() -> str:
         if settings.setup_code:
@@ -232,6 +240,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     app.state.store = store
     app.state.sessions = sessions
     app.state.throttle = throttle
+    app.state.sso = sso
 
     # -- client IP / security headers / auth ---------------------------------------------------------------
     def client_ip(request: Request | WebSocket) -> str:
@@ -251,7 +260,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         return peer
 
     PUBLIC = {"/api/health", "/api/session", "/api/setup", "/api/login", "/api/login/totp", "/api/logout",
-              "/api/client/enroll"}
+              "/api/client/enroll", "/api/oidc/start", "/api/oidc/callback"}
 
     class Guard(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -310,7 +319,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         s = sessions.get(request.cookies.get(security.COOKIE))
         return {"setup_needed": cfg.admin is None, "logged_in": bool(s and not s.pending_totp),
                 "totp_needed": bool(s and s.pending_totp), "username": s.username if s else "",
-                "csrf": s.csrf if s and not s.pending_totp else "", "version": settings.version}
+                "csrf": s.csrf if s and not s.pending_totp else "", "version": settings.version,
+                "sso": {"label": cfg.sso.label, "auto": cfg.sso.auto_redirect} if cfg.sso.enabled and cfg.admin else None}
 
     @app.post("/api/setup")
     async def setup(body: SetupBody, request: Request, response: Response):
@@ -427,6 +437,99 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         store.save()
         log.info("2FA disabled for %s", admin.username)
         return {"ok": True}
+
+    # -- single sign-on (OpenID Connect, e.g. Authentik) ---------------------------------------------------------
+    SSO_COOKIE = "__Host-telerouter-sso"
+
+    def from_proxy(request: Request) -> bool:
+        try:
+            ip = ipaddress.ip_address(request.client.host if request.client else "")
+        except ValueError:
+            return False
+        return any(ip in n for n in trusted)
+
+    def callback_url(request: Request) -> str:
+        """The address the browser used: Host, or X-Forwarded-Host from a trusted proxy (some proxies, e.g. Caddy
+        towards an https upstream, send the upstream's address as Host)."""
+        fwd = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
+        host = fwd if fwd and from_proxy(request) else request.headers.get("host", "")
+        if not re.fullmatch(r"([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])(:\d{1,5})?", host):
+            raise HTTPException(400, "bad Host header")
+        return f"https://{host}/api/oidc/callback"
+
+    def sso_failed() -> Response:
+        r = RedirectResponse("/?sso=failed", status_code=303)
+        r.delete_cookie(SSO_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+        return r
+
+    @app.get("/api/oidc/start")
+    async def oidc_start(request: Request):
+        ip = client_ip(request)
+        if not cfg.sso.enabled or cfg.admin is None:
+            raise HTTPException(404, "single sign-on is off")
+        try:
+            throttle.check(f"ip:{ip}")
+            url, binding = await sso.start(callback_url(request))
+        except security.Locked:
+            return sso_failed()
+        except ssomod.SsoError as e:
+            log.warning("single sign-on could not start: %s", e)
+            return sso_failed()
+        r = RedirectResponse(url, status_code=303)
+        # SameSite=Lax: the provider's redirect back is a cross-site top-level navigation
+        r.set_cookie(SSO_COOKIE, binding, max_age=sso.TTL, httponly=True, secure=True, samesite="lax", path="/")
+        return r
+
+    @app.get("/api/oidc/callback")
+    async def oidc_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+        ip = client_ip(request)
+        try:
+            throttle.check(f"ip:{ip}")
+        except security.Locked:
+            return sso_failed()
+        try:
+            if cfg.admin is None:
+                raise ssomod.SsoError("no admin account yet")
+            claims = await sso.finish(state[:200], code[:2000], request.cookies.get(SSO_COOKIE, "")[:200], error)
+            who = sso.allowed(claims)
+            if not who:
+                raise ssomod.SsoError(f"'{sso.who(claims)}' is not in the allowed users or groups")
+        except ssomod.SsoError as e:
+            with contextlib.suppress(security.Locked):
+                throttle.begin(f"ip:{ip}")
+            log.warning("single sign-on failed from %s: %s", ip, e)
+            return sso_failed()
+        throttle.success(f"ip:{ip}")
+        r = RedirectResponse("/", status_code=303)
+        r.delete_cookie(SSO_COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+        start_session(request, r, cfg.admin.username)
+        log.info("admin login via single sign-on (%s) from %s", who, ip)
+        return r
+
+    @app.get("/api/account/sso")
+    async def get_sso(request: Request):
+        return {"sso": redact(cfg.sso), "redirect_uri": callback_url(request)}
+
+    @app.put("/api/account/sso")
+    async def put_sso(body: SsoBody, request: Request):
+        admin = cfg.admin
+        assert admin
+        ip = client_ip(request)
+        charge(f"ip:{ip}", f"user:{admin.username.lower()}")
+        if not await check_password(body.password, admin.password_hash):
+            raise HTTPException(401, "wrong password")
+        throttle.success(f"ip:{ip}", f"user:{admin.username.lower()}")
+        new = merge(SsoSettings, cfg.sso, body.sso)
+        if new.enabled:
+            try:
+                await sso.discovery(new)
+            except ssomod.SsoError as e:
+                raise HTTPException(422, f"the provider does not answer as expected: {e}") from e
+        cfg.sso = new
+        store.save()
+        sso.forget()
+        log.info("single sign-on %s (issuer %s) from %s", "on" if new.enabled else "off", new.issuer or "-", ip)
+        return {"sso": redact(new), "redirect_uri": callback_url(request)}
 
     @app.get("/api/account")
     async def account():
@@ -1240,7 +1343,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.websocket("/ws/client")
     async def ws_client(ws: WebSocket):
         ip = client_ip(ws)
-        token = security.bearer(ws.headers)
+        # X-Telerouter-Token: for phones behind a reverse proxy that uses Authorization itself (e.g. Authentik)
+        token = ws.headers.get("x-telerouter-token", "").strip() or security.bearer(ws.headers)
         try:
             throttle.check(f"ip:{ip}")
         except security.Locked:
@@ -1266,7 +1370,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         store.save()
         engine.attach_client(conn)
         log.info("speaker '%s' connected from %s", client.name, ip)
-        await conn.send_json({"type": "config", "volume": 100, "server_version": settings.version})
+        await conn.send_json({"type": "config", "volume": 100, "server_version": settings.version,
+                              "client_id": client.id, "name": client.name})
         bucket, bucket_t = 0, time.monotonic()
 
         async def pinger():
@@ -1309,6 +1414,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                 if t == "hello":
                     conn.aec = bool(obj.get("aec"))
                     conn.wants_text = obj.get("transcript") is True
+                    conn.speech = obj.get("speech") is not False
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()

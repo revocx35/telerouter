@@ -46,6 +46,7 @@ telerouter/
   models.py            pydantic config (Pbx, Integration, Contact, Client, Agent, McpToken, settings)
   store.py             /data/config.json (0600, atomic), history.json
   security.py          argon2id, tokens (stored as SHA-256), TOTP, LoginThrottle, server-side sessions
+  sso.py               single sign-on: OpenID Connect code flow + PKCE (e.g. Authentik), allowed users/groups
   tls.py               local CA + server certificate (re-issued when names change; CA stays)
   engine.py            wiring: SIP UA + accounts, agent runtimes, integration clients, contact lookups
   scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
@@ -120,17 +121,18 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 
 ### 3.1 Protocol
 
-`wss://<server>:8443/ws/client` with `Authorization: Bearer trc_...` (the client's token).
+`wss://<server>:8443/ws/client` with `Authorization: Bearer trc_...` (the client's token), or
+`X-Telerouter-Token: trc_...` when a reverse proxy in front uses `Authorization` itself (the phone app).
 
 | direction | frame | meaning |
 |---|---|---|
 | client -> server | binary | microphone, 16 kHz mono PCM16 LE, 20 ms blocks |
-| client -> server | `{"type":"hello","version","platform","aec"}` | after connecting |
+| client -> server | `{"type":"hello","version","platform","aec","transcript","speech"}` | after connecting; `speech: false` = answers as text only |
 | client -> server | `{"type":"button","action":"talk"\|"cancel"}` | optional push-to-talk |
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
 | server -> client | `{"type":"state","state":...}` | idle, listening, thinking, speaking, ringing, call |
 | server -> client | `{"type":"flush"}` | drop queued playback now (barge-in, call ended) |
-| server -> client | `{"type":"ping"}` / `{"type":"config","volume"}` | keep-alive, settings |
+| server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name"}` | keep-alive, settings, which device this is |
 
 The server paces playback (≤250 ms ahead of real time), so it always knows when the client has
 finished playing (`ClientConn.drained()`): blips end before listening starts, and wake-word detection is
@@ -183,11 +185,30 @@ installer creates a systemd user service (Linux) or a launchd agent (macOS).
 
 ### 3.4 Android app (separate repo, telerouter-android)
 
-A speaker device like the Linux client, with two protocol extensions (both opt-in, old clients unaffected):
+Since app 0.2 / telerouter 0.10 the app is telerouter's **web UI in a WebView** (the dashboard: every page and
+setting, no second implementation to keep in step) plus native parts: the assistant (on-device wake word, the
+conversation sheet) and a "This phone" screen. There is one address, the one the browser uses, and one sign-in:
+
+1. The app opens `https://<address>/` in its WebView. A proxy in front (e.g. Authentik forward auth) shows its
+   login; then telerouter's login page (password, or *Sign in with Authentik*, §7.1).
+2. Once `/api/session` says logged in (the app checks with the WebView's cookies), the app adds the phone as a
+   device with that admin session: `POST /api/clients/enroll` (CSRF) and `POST /api/client/enroll`. The `trc_`
+   token is sealed in the Android Keystore; the user never sees a code.
+3. Voice: `wss://<address>/ws/client` with `X-Telerouter-Token` and the WebView's cookies (the proxy's sign-in).
+   A redirect or 401 from the proxy makes the app follow `/api/health` through the proxy's redirects (they come
+   back at once while the identity provider's session lasts) and retry; otherwise the sheet asks to open the app.
+
+The web UI knows it runs in the app (user agent `telerouter-android/<version>`) and adds links the app intercepts:
+`telerouter-app://talk` (a *Talk* button in the phone top bar and the drawer) and `telerouter-app://assistant`
+("This phone"). The WebView has no JavaScript bridge and honours these links only on telerouter's own origin.
+On narrow screens the web UI has a top bar with the page name and a navigation drawer.
+
+Protocol extensions the phone uses (all opt-in, old clients unaffected):
 
 - `hello` with `"transcript": true`: the server sends `{"type":"transcript","role":"user"|"assistant","text"}`
-  when it has heard a request (`listen`) and when it speaks an answer (`speak`). `VirtualSpeaker.transcript`
-  sends them to the client devices of that speaker that asked for them.
+  when it has heard a request (`listen`) and when it answers (`speak`). `VirtualSpeaker.transcript` sends them
+  to the client devices of that speaker that asked for them. `"speech": false` (the app's *Spoken answers* off):
+  `VirtualSpeaker.speaks_answers` is false and `speak()` sends the text without synthesizing it.
 - `{"type":"button","action":"talk","cue":false}`: the phone detected the wake word itself (microWakeWord) and
   played its own start sound. `start_turn(cue=False)` sets the state to listening and installs the
   endpointer before returning, so the audio the phone sends right behind the message (what was said after
@@ -200,13 +221,8 @@ first has to connect. When a phone starts a turn with `cue: false`, any speaker 
 listening within `SAME_WAKE_S` (4 s) stops (its turn is cancelled, its start beep cut off), and speaker wake
 words in the 4 s after a phone's are ignored. The phone answers, as chosen by the owner.
 
-The phone connects only for a conversation (LAN address with the pinned CA first, then `public_url` with a
-public certificate) and sends its mic only while the server listens or a call is on.
-`/api/clients/enroll` returns `app_link` =
-`telerouter://setup?v=1&server=<the address the admin UI was opened with>&lan=<an address telerouter's own certificate
-covers>&ca=<CA sha256>&code=<code>[&public=<public_url>]`. `lan` (`own_address`) is the page's address if the
-certificate covers it, else the LAN IP: a page opened through a proxy has the proxy's certificate, and pinning
-telerouter's CA there fails. The Linux install command uses `lan` for the same reason.
+App 0.1.x (setup links with a pinned LAN CA, `TELEROUTER_PUBLIC_URL`) still works: `/api/clients/enroll` still
+returns `app_link`, and `Authorization: Bearer` still works on `/ws/client`.
 
 ## 4. Agents
 
@@ -397,7 +413,9 @@ integration tokens, SSH key).
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
 | Scheduled tasks run prompts unattended | only the admin creates them (UI/API with session + CSRF; no MCP tool); sessions start as the machine's SSH user with the machine's new-session model/permission mode (`by_admin` skips only the agents' `allow_new_sessions` switch); session names and folders validated and shell-quoted; only sessions the task started are closed; quiet hours still gate the calls they make; a run has a timeout |
-| Exposing the phone endpoints to the internet (`TELEROUTER_PUBLIC_URL`) | only `/ws/client` (bearer `trc_` token, 256-bit, hashed; per-IP throttle on bad tokens) and `/api/client/enroll` (one-time 15-min code, throttled) are meant to be proxied; the admin UI stays on the LAN; set `TELEROUTER_TRUSTED_PROXIES` so throttles see real client IPs; a lost phone is revoked by removing its device |
+| Single sign-on lets someone else in | off by default; the admin lists allowed user names/e-mails (verified e-mails only)/groups; code flow with PKCE, a random `state` bound to a `SameSite=Lax` cookie in the browser that started it (login CSRF), single-use, 10 min; `nonce`; the code is traded with the provider over verified TLS and the ID token's issuer, audience, expiry and nonce are checked (signature not needed for a token received directly from the token endpoint, OIDC Core 3.1.3.7); failures throttle the IP and only "failed" reaches the browser; changing the SSO settings needs the admin password (a stolen session can't add its own provider); the client secret is write-only. The provider's login (and its 2FA) replaces telerouter's for that sign-in |
+| Phone app behind a sign-in proxy | the WebView loads only https, never skips certificate errors, has no JavaScript bridge; links to other sites from telerouter's pages open the browser (sign-in redirects stay in the app); `telerouter-app://` links work only from telerouter's origin; the device token is Keystore-sealed and sent in its own header; the app adds itself only with a logged-in admin session, and *Sign out* deletes its device (token revoked) |
+| Exposing the phone endpoints to the internet (`TELEROUTER_PUBLIC_URL`, app 0.1.x) | only `/ws/client` (bearer `trc_` token, 256-bit, hashed; per-IP throttle on bad tokens) and `/api/client/enroll` (one-time 15-min code, throttled) are meant to be proxied; the admin UI stays on the LAN; set `TELEROUTER_TRUSTED_PROXIES` so throttles see real client IPs; a lost phone is revoked by removing its device |
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
@@ -406,6 +424,20 @@ integration tokens, SSH key).
 
 Not covered: SIP over TLS/SRTP (the PBX side is UDP/RTP on the LAN like the rest of the user's setup);
 the speech services trust anyone on the host's loopback.
+
+### 7.1 Single sign-on (`sso.py`)
+
+`GET /api/oidc/start` (only when enabled) discovers the provider (`<issuer>/.well-known/openid-configuration`,
+cached 1 h; its `issuer` must match, its endpoints must be https), keeps `state` → (hash of a binding value,
+nonce, PKCE verifier, redirect URI) in memory (10 min, max 100), sets the binding value as the cookie
+`__Host-telerouter-sso` (`SameSite=Lax`, so the provider's redirect back carries it) and redirects to the
+provider. `GET /api/oidc/callback` pops the state, compares the cookie, trades the code (with the verifier and
+`client_secret_basic`, or `_post` if that is all the provider offers), checks the ID token's claims, merges the
+userinfo answer (same `sub`), and matches `preferred_username`/`nickname`/verified `email` against the allowed
+users, or `groups` against the allowed groups. Success starts a normal session (no TOTP step); every failure
+ends at `/?sso=failed` and in the log with the reason. The redirect URI is `https://<Host>/api/oidc/callback`,
+with `X-Forwarded-Host` instead of Host when the request comes from `TELEROUTER_TRUSTED_PROXIES` (Caddy sends
+the upstream's address as Host towards an https upstream). The provider checks it against its registered URIs.
 
 ## 8. Design decisions
 
@@ -417,4 +449,6 @@ the speech services trust anyone on the host's loopback.
 | Reverse SSH tunnel for MCP | no network path from the agent host to telerouter needed, no CA trust on the agent host, encrypted |
 | Direct SIP to wa2sip/cam2sip with one-time addresses | no PBX extension needed per contact, no IVR digit games; the integration API gives names/ids |
 | Own MCP implementation | small surface, no dependency on a moving SDK API |
+| Phone app = the web UI in a WebView + native assistant | the same features and settings as the browser by construction (no second UI to keep in step); only what a page can't do is native (wake word, the sheet, the assistant role, screen and audio settings) |
+| SSO by OpenID Connect, not by trusting a proxy's user header | a header like `X-authentik-username` is only as safe as every path to telerouter (another proxy host without forward auth could forge it); OIDC needs no trust in the network path |
 | Shared SIP stack with wa2sip/cam2sip | proven against FreePBX 17; same author |

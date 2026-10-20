@@ -3,9 +3,11 @@
 The device is not the speaker agents see: a `VirtualSpeaker` (speaker.py) takes its microphone and/or uses it
 as its output (`play` gets audio the speaker already scaled to its volume).
 
-Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client token>`):
+Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client token>` or `X-Telerouter-Token:
+<client token>` when a reverse proxy in front uses the Authorization header itself):
 
-  client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool, "transcript": bool}
+  client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool, "transcript": bool,
+                            "speech": bool}   speech false = show answers as text only, don't speak them
                     binary 16 kHz mono PCM16 LE microphone audio (any size up to 64 KiB, usually 20 ms)
                     text   {"type": "pong"} / {"type": "button", "action": "talk"|"cancel", "cue": bool}
                            talk with "cue": false = the device played its own start sound (on-device wake
@@ -13,7 +15,7 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
   server -> client  binary 16 kHz mono PCM16 LE audio to play
                     text   {"type": "state", "state": "idle|listening|thinking|speaking|ringing|call"}
                            {"type": "flush"}   drop everything queued for playback now
-                           {"type": "ping"}    {"type": "config", "volume": 100}
+                           {"type": "ping"}    {"type": "config", "volume": 100, "server_version", "client_id", "name"}
                            {"type": "transcript", "role": "user"|"assistant", "text"}  (hello transcript: true)
 """
 
@@ -57,6 +59,7 @@ class ClientConn:
         self.mic_bytes = 0
         self.mic_level = -120.0
         self.wants_text = False             # hello "transcript": true (a device with a screen)
+        self.speech = True                  # hello "speech": false = answers as text only (with wants_text)
 
     @property
     def name(self) -> str:

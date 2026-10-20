@@ -1,7 +1,9 @@
 "use strict";
 // telerouter web UI: vanilla JS, no build step. DOM is built with el() (textContent only) - never innerHTML.
 
-const S = { csrf: "", user: "", version: "", timer: null, page: "" };
+const S = { csrf: "", user: "", version: "", timer: null, page: "", sso: null };
+// inside the telerouter Android app (its WebView adds this to the user agent): links to the phone's own screens
+const APP = /telerouter-android\//.test(navigator.userAgent);
 
 // ---------------------------------------------------------------------------------------------- helpers
 function el(tag, attrs, ...kids) {
@@ -108,10 +110,11 @@ async function boot() {
   let s;
   try { s = await (await fetch("/api/session", { credentials: "same-origin" })).json(); }
   catch { $("#app").replaceChildren(el("div", { class: "boot" }, "Cannot reach telerouter.")); return; }
-  S.csrf = s.csrf; S.user = s.username; S.version = s.version;
+  S.csrf = s.csrf; S.user = s.username; S.version = s.version; S.sso = s.sso;
   if (s.setup_needed) return setupPage();
   if (s.totp_needed) return totpPage();
   if (!s.logged_in) return loginPage();
+  if (location.search) history.replaceState(null, "", "/" + location.hash);     // drop ?sso=failed
   shell();
 }
 
@@ -139,17 +142,29 @@ function setupPage() {
   authCard("Welcome to telerouter", f, "Create the admin account. There is no default password.");
 }
 
+// after "Log out" the login page doesn't send you straight back to the single sign-on provider
+function noAuto(on) {
+  try { if (on === undefined) return sessionStorage.getItem("tr-no-auto") === "1"; on ? sessionStorage.setItem("tr-no-auto", "1") : sessionStorage.removeItem("tr-no-auto"); }
+  catch { return false; }
+}
+
 function loginPage() {
-  const err = el("div", { class: "err" });
+  const sso = S.sso;
+  const failed = new URLSearchParams(location.search).get("sso") === "failed";
+  if (sso && sso.auto && !failed && !noAuto()) { location.href = "/api/oidc/start"; return; }
+  const err = el("div", { class: "err" }, failed ? "Single sign-on failed. The server log says why." : "");
   const f = el("form", {},
     field("User name", inp("username", "", { autocomplete: "username" })),
     field("Password", el("input", { type: "password", name: "password", autocomplete: "current-password" })), err,
-    el("button", { class: "primary", type: "submit" }, "Log in"));
+    el("button", { class: sso ? "" : "primary", type: "submit" }, "Log in"));
   f.addEventListener("submit", async e => {
     e.preventDefault(); err.textContent = "";
     try { await api("POST", "/api/login", formData(f)); boot(); } catch (x) { err.textContent = x.message; }
   });
-  authCard("telerouter", f);
+  const top = sso ? el("div", { class: "sso" },
+    el("a", { class: "button primary wide", href: "/api/oidc/start", onclick: () => noAuto(false) }, `Sign in with ${sso.label}`),
+    el("div", { class: "or" }, "or with the admin password")) : null;
+  authCard("telerouter", el("div", {}, top, f));
 }
 
 function totpPage() {
@@ -163,6 +178,35 @@ function totpPage() {
   authCard("Two-factor check", f);
 }
 
+function ssoForm(d) {
+  const o = d.sso;
+  const list = v => v.split(",").map(x => x.trim()).filter(Boolean);
+  const f = el("form", {},
+    el("p", { class: "hint" }, "Lets the people you list here log in as the admin through your identity provider, e.g. Authentik: create an OAuth2/OpenID provider (confidential client) with the redirect URI below, and an application for it. Its own login (and 2FA, if you set one up there) replaces telerouter's password and 2FA for that sign-in. The password login keeps working."),
+    chk("enabled", o.enabled, "Allow single sign-on"),
+    el("div", { class: "form2" },
+      field("Issuer URL", inp("issuer", o.issuer, { placeholder: "https://auth.example.com/application/o/telerouter/" }), "Authentik: the provider's “OpenID Configuration Issuer”."),
+      field("Button name", inp("label", o.label)),
+      field("Client ID", inp("client_id", o.client_id, { autocomplete: "off" })),
+      field("Client secret", pwd("client_secret", o.client_secret_set ? "stored (leave empty to keep)" : "")),
+      field("Allowed users", inp("allowed_users", o.allowed_users.join(", "), { placeholder: "user name or e-mail, comma separated" })),
+      field("Allowed groups", inp("allowed_groups", o.allowed_groups.join(", "), { placeholder: "e.g. telerouter admins" })),
+      field("Scopes", inp("scopes", o.scopes))),
+    chk("auto_redirect", o.auto_redirect, "The login page goes straight to the provider"),
+    el("h3", {}, "Redirect URI (add it in the provider, for every address you open telerouter with)"), copyBox(d.redirect_uri),
+    el("div", { class: "form2" }, field("Your password (to save)", el("input", { type: "password", name: "password", autocomplete: "current-password", required: true }))),
+    el("button", { class: "primary", type: "submit" }, "Save single sign-on"));
+  f.addEventListener("submit", async e => {
+    e.preventDefault();
+    const v = formData(f);
+    const body = { password: v.password, sso: { enabled: v.enabled, issuer: v.issuer.trim(), label: v.label, client_id: v.client_id.trim(), client_secret: v.client_secret,
+      scopes: v.scopes, allowed_users: list(v.allowed_users), allowed_groups: list(v.allowed_groups), auto_redirect: v.auto_redirect } };
+    await act(() => api("PUT", "/api/account/sso", body), "Single sign-on saved");
+    route();
+  });
+  return f;
+}
+
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
   ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
@@ -174,17 +218,29 @@ function shell() {
   const nav = el("nav", { class: "side" },
     el("div", { class: "brand" }, el("img", { src: "/static/icon.svg", alt: "" }), "telerouter"),
     PAGES.map(([id, t]) => el("a", { href: "#/" + id, "data-p": id }, t)),
+    APP ? el("div", { class: "phone" }, el("a", { href: "telerouter-app://talk" }, "Talk to Jarvis"),
+      el("a", { href: "telerouter-app://assistant" }, "This phone")) : null,
     el("div", { class: "foot" }, `v${S.version} · ${S.user}`));
-  $("#app").replaceChildren(el("div", { class: "layout" }, nav, el("main", { id: "main" })));
+  const scrim = el("div", { class: "scrim", onclick: () => menu(false) });
+  // phones: a top bar with the page name and a menu button; the navigation slides in
+  const top = el("header", { class: "top" },
+    el("button", { class: "menu", "aria-label": "Menu", onclick: () => menu(true) }, el("span"), el("span"), el("span")),
+    el("div", { class: "title", id: "page-title" }, "telerouter"),
+    APP ? el("a", { class: "button primary talk", href: "telerouter-app://talk" }, "Talk") : null);
+  $("#app").replaceChildren(el("div", { class: "layout" }, top, nav, scrim, el("main", { id: "main" })));
   window.onhashchange = route;
   route();
 }
+function menu(open) { document.querySelector(".layout")?.classList.toggle("menu-open", open); }
 
 function route() {
   clearInterval(S.timer);
   const id = (location.hash.replace(/^#\//, "") || "dashboard").split("?")[0];
   S.page = id;
+  menu(false);
   document.querySelectorAll("nav.side a").forEach(a => a.classList.toggle("active", a.dataset.p === id));
+  const t = $("#page-title"), p = PAGES.find(x => x[0] === id);
+  if (t) t.textContent = p ? p[1] : "telerouter";
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
   const fn = { dashboard, speakers, agents, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
@@ -332,10 +388,8 @@ async function speakers(main) {
       el("p", { class: "hint" }, "Python 3.9+ with venv, curl; on Linux also PortAudio (Debian/Ubuntu: sudo apt install python3-venv libportaudio2). The command pins this server's certificate, so it is safe on an untrusted network."),
       el("h3", {}, "Manual install"),
       el("p", { class: "hint" }, `Code ${r.code} · server ${r.server} · CA sha256 ${r.ca_sha256}`),
-      el("h3", {}, "Android phone (telerouter app)"),
-      el("p", { class: "hint" }, "Open this page on the phone and tap the button, or copy the link into the app (Set up → Paste link). It carries this server's address, its certificate's fingerprint and the one-time code" + (r.public_url ? `, and the internet address ${r.public_url}.` : ". Set TELEROUTER_PUBLIC_URL for use outside home.")),
-      el("div", { class: "row" }, el("a", { class: "button primary", href: r.app_link }, "Open in the telerouter app")),
-      copyBox(r.app_link)));
+      el("h3", {}, "Android phone"),
+      el("p", { class: "hint" }, "Phones don't need this code: install the telerouter app and sign in with the address you open this page with. The phone adds itself as a device.")));
   });
 
   // Google Cast speakers
@@ -377,7 +431,7 @@ async function speakers(main) {
       el("p", { class: "hint" }, "A speaker is what you and the agents talk to. Each one takes its microphone from a device and its output from the same or another device, e.g. a laptop's microphone with a Cast speaker's loudspeaker. A microphone feeds one speaker.")),
     ...cards,
     el("div", { class: "card" }, el("h2", {}, "Devices"),
-      el("p", { class: "hint" }, "A device is a small client on a Linux or macOS machine: it streams its microphone here and plays what telerouter sends. Wake words, speech recognition and the agent all run on this server."),
+      el("p", { class: "hint" }, "A device is a small client on a Linux or macOS machine, or a phone with the telerouter app (it adds itself when you sign in there): it streams its microphone here and plays what telerouter sends. Wake words, speech recognition and the agent all run on this server (phones hear “Hey Jarvis” themselves)."),
       devTable, el("h3", {}, "Add a device"), addForm),
     el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, "Google Cast speakers"), el("span", { class: "spacer" }),
         el("button", { onclick: findCasts }, "Find on the network")),
@@ -993,7 +1047,7 @@ async function logs(main) {
 }
 
 async function account(main) {
-  const acc = await api("GET", "/api/account");
+  const [acc, ssoD] = await Promise.all([api("GET", "/api/account"), api("GET", "/api/account/sso")]);
   const pf = el("form", {}, el("div", { class: "form2" },
     field("Current password", el("input", { type: "password", name: "current", autocomplete: "current-password" })),
     field("New password (12+ characters)", pwd("new"))), el("button", { class: "primary", type: "submit" }, "Change password"));
@@ -1015,7 +1069,8 @@ async function account(main) {
   main.replaceChildren(el("h1", {}, "Account"),
     el("div", { class: "card" }, el("h2", {}, `Admin: ${acc.username}`), pf),
     el("div", { class: "card" }, el("h2", {}, "Two-factor login"), tf),
-    el("div", { class: "card" }, el("button", { onclick: async () => { await api("POST", "/api/logout"); boot(); } }, "Log out")));
+    el("div", { class: "card" }, el("h2", {}, "Single sign-on (Authentik or another OpenID Connect provider)"), ssoForm(ssoD)),
+    el("div", { class: "card" }, el("button", { onclick: async () => { await api("POST", "/api/logout"); noAuto(true); boot(); } }, "Log out")));
 }
 
 boot();

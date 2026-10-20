@@ -141,3 +141,51 @@ async def test_one_hey_jarvis_two_devices_the_phone_answers():
     assert spk2.state == "listening"
     for t in (phone_vs.busy_task, phone2.busy_task, spk2.busy_task):
         t.cancel()
+
+
+async def test_a_phone_that_wants_text_only_gets_no_speech():
+    async def synthesize(text, voice):
+        yield b"\x01\x00" * 1600
+
+    for speech, expect_audio in ((False, False), (True, True)):
+        vs, dev, texts, played = phone()
+        dev.speech = speech
+        dev.start()
+        va, _ = assistant()
+        va.engine.speech.synthesize = synthesize
+        await va.speak(vs, "The lights are on.")
+        await asyncio.sleep(0.05)
+        await dev.close()
+        assert {"type": "transcript", "role": "assistant", "text": "The lights are on."} in texts
+        assert bool(played) is expect_audio
+        assert vs.state == "idle"
+
+
+def test_phone_connects_with_the_token_header_behind_a_proxy(settings):
+    from fastapi.testclient import TestClient
+
+    from telerouter import tls
+    from telerouter.web.app import create_app
+
+    from .test_web import setup_admin
+    public, _ = create_app(settings, tls.ensure(settings.data_dir, []))
+    with TestClient(public, base_url="https://testserver") as c:
+        h = {"X-CSRF-Token": setup_admin(c)}
+        code = c.post("/api/clients/enroll", json={"name": "Zfold"}, headers=h).json()["code"]
+        got = c.post("/api/client/enroll", json={"code": code, "platform": "android"}).json()
+        # Authorization belongs to the proxy (e.g. Authentik); the device token travels in its own header
+        with c.websocket_connect("/ws/client", headers={"X-Telerouter-Token": got["token"],
+                                                        "Authorization": "Bearer proxy-session"}) as ws:
+            cfg = json.loads(ws.receive_text())
+            assert cfg["type"] == "config" and cfg["client_id"] == got["client_id"] and cfg["name"] == "Zfold"
+            ws.send_text(json.dumps({"type": "hello", "version": "0.2.0", "platform": "android", "aec": False,
+                                     "transcript": True, "speech": False}))
+            ws.send_text(json.dumps({"type": "pong"}))
+            conn = None
+            for _ in range(50):
+                conn = c.app.state.engine.clients.get(got["client_id"])
+                if conn is not None and conn.wants_text:
+                    break
+                import time
+                time.sleep(0.02)
+            assert conn is not None and conn.wants_text and conn.speech is False

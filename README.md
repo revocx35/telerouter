@@ -96,31 +96,39 @@ With a Cast speaker as output:
   HTTP** (`TELEROUTER_CAST_PORT`, default 8480): each sentence gets a random single-use link that only that
   speaker's address may fetch, for at most 60 s. Keep it on your LAN.
 
-## Android app (instead of Google Assistant)
+## Android app (dashboard and assistant)
 
-The [telerouter Android app](https://github.com/revocx35/telerouter-android) makes your phone a speaker:
-*"Hey Jarvis"* or the assistant button/gesture opens a sheet over whatever is on screen, and Jarvis
-answers as on any speaker, with the conversation shown as text. You can also make calls through it ("call
-my dad"). Set it as the phone's *digital assistant app* and the power-button or corner-swipe gesture opens
-Jarvis, also on the lock screen. The wake word is recognised on the phone (microWakeWord, as in Home
-Assistant's companion app), so nothing is sent until you say it, and the phone connects only for the
+The [telerouter Android app](https://github.com/revocx35/telerouter-android) is telerouter on your phone:
+the whole web UI as its dashboard (every page and setting, laid out for a phone), and Jarvis as the phone's
+assistant instead of Google Assistant. *"Hey Jarvis"* or the assistant button/gesture opens a sheet over
+whatever is on screen, and Jarvis answers as on any speaker: spoken and as text, or as text only (a setting in
+the app). "Hey Jarvis" can also turn the screen on and show the conversation over the lock screen. Calls you ask
+for ("call my dad") run through the phone too. The wake word is recognised on the phone (microWakeWord, as in
+Home Assistant's companion app), so nothing is sent until you say it, and the phone connects only for the
 conversation.
 
-Set up: on the phone's browser, open telerouter → *Speakers → Add device* → *Open in the telerouter app*
-(or copy the link into the app). The link carries the internet address, telerouter's own LAN address with its
-certificate's fingerprint, and the one-time code.
+Set up: install the app, enter the address you open telerouter with (it must have a publicly trusted
+certificate, e.g. telerouter behind a reverse proxy), and sign in as in the browser: your proxy's login if it
+has one (e.g. Authentik forward auth), then telerouter's login page or *Sign in with Authentik*. The phone then
+adds itself as a speaker device; there is no code to copy. The voice connection goes to the same address, with
+the same sign-in: the device token travels in `X-Telerouter-Token` (the proxy may use `Authorization` itself),
+the proxy's cookie with it, and an expired proxy sign-in is renewed in the background while the identity
+provider's session lasts.
 
-The app connects through `TELEROUTER_PUBLIC_URL` (for example `https://jarvis.example.org`) first, at home too.
-That's a reverse proxy with a public certificate in front of telerouter. The LAN address, with telerouter's CA
-pinned, is only the backup. Forward **only** `/ws/client` (WebSocket) and
-`/api/client/enroll` to `https://<telerouter>:8443`. The admin UI then stays on your LAN. Set
-`TELEROUTER_TRUSTED_PROXIES` to the proxy's address, so the per-address throttling sees the real clients.
-With Nginx Proxy Manager: a proxy host (scheme https, port 8443) with *Websockets support*, *Force SSL* and a
-Let's Encrypt certificate, and this under *Advanced*:
+Behind a reverse proxy, turn on its WebSocket support (`/ws/client`) and set `TELEROUTER_TRUSTED_PROXIES` to its
+address, so throttling sees the real clients and the single sign-on redirect URI uses the name the browser
+used (`X-Forwarded-Host`).
 
-```nginx
-if ($uri !~ "^/(ws/client|api/client/enroll)$|^/\.well-known/acme-challenge/") { return 404; }
-```
+## Single sign-on (Authentik or another OpenID Connect provider)
+
+*Account → Single sign-on* lets the people you list log in as the admin through your identity provider, with
+the password login still working. In Authentik: *Applications → Providers → Create → OAuth2/OpenID Provider*
+(confidential client; redirect URI as shown on the Account page, `https://<address>/api/oidc/callback`, one per
+address you use), then an application for it. Copy the provider's *OpenID Configuration Issuer*
+(`https://auth.example.com/application/o/<slug>/`), client ID and secret into telerouter, list the allowed
+user names, e-mail addresses or groups, and save with your password. *The login page goes straight to the
+provider* skips telerouter's login page (after *Log out* it shows it again). The provider's login and 2FA
+replace telerouter's password and 2FA for that sign-in.
 
 ## Quiet hours (do not disturb)
 
@@ -213,8 +221,8 @@ rejected by default; set a DTMF PIN in *Voice & calls* if your PBX takes outside
 | `TELEROUTER_RTP_PORT_MIN/MAX` | 18000/18199 | |
 | `TELEROUTER_ADVERTISE_IP` | auto | address put into SIP/SDP |
 | `TELEROUTER_INTERNAL_PORT` | 47700 | loopback MCP port for agent tunnels |
-| `TELEROUTER_TRUSTED_PROXIES` | none | `private` or CIDRs whose X-Forwarded-For is trusted |
-| `TELEROUTER_PUBLIC_URL` | | `https://host[:port]` where the Android app reaches telerouter from the internet (put in its setup link) |
+| `TELEROUTER_TRUSTED_PROXIES` | none | `private` or CIDRs whose X-Forwarded-For / X-Forwarded-Host are trusted |
+| `TELEROUTER_PUBLIC_URL` | | only for Android app 0.1.x setup links (0.2+ signs in at your address instead) |
 | `TELEROUTER_SETUP_CODE` | random | fixed first-setup code |
 | `WHISPER_MODEL` | small-int8 | tiny/base/small/medium-int8 |
 | `WHISPER_PROMPT` | "Hey Jarvis. Call dad…" | names Whisper should expect, e.g. your tmux session names ("Connect me to the wa_logger tmux.") |

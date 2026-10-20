@@ -60,6 +60,23 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   ARCHITECTURE.md and this file.
 - Commits end with the Co-Authored-By trailer; commit as the GitHub noreply identity.
 
+## Where things live
+
+`telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
+mcp.py, sso.py, scheduler.py, quiet.py), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
+helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
+(telerouter-android) that shows this web UI.
+
+## Never
+
+- Commit credentials, tokens, phone numbers, LAN addresses or hostnames of the owner's setup (they belong in the
+  git-ignored CLAUDE.local.md / AGENTS.local.md).
+- Store a secret in plain text in an API answer (use `SECRET_FIELDS` + `redact()`), log tokens, or put tokens in URLs.
+- Add inline script/style to the UI or build DOM with `innerHTML` from data (CSP, XSS).
+- Add a state-changing endpoint outside `/api/` or to `PUBLIC` without its own protection (throttle, one-time code).
+- Trust a proxy's user header for login, or disable certificate verification on outbound calls.
+- Poll the production API with a stored password, or test-call real WhatsApp contacts or cameras.
+
 ## Hard-won facts
 
 - **openWakeWord keeps the wake word in its window.** When feeding resumes after a pause (after a turn,
@@ -157,6 +174,18 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - **A phone and a speaker both woke on one "Hey Jarvis"** (0.9.2): the owner chose that the phone answers.
   `VoiceAssistant._phone_wins` cancels speaker turns their wake word started within `SAME_WAKE_S`, and `_on_wake`
   ignores speaker wake words within it after a phone's.
+- **The phone app is the web UI** (0.10, app 0.2): it shows `/` in a WebView, so every web UI change reaches the
+  phone. Keep pages usable at 360 px wide (the ≤760 px layout: top bar + drawer, `main > h1` hidden because the top
+  bar shows the page name). In the app (`APP`, user agent `telerouter-android/`) the UI adds `telerouter-app://talk`
+  and `telerouter-app://assistant` links; don't rename them without the app.
+- **Behind a sign-in proxy (Authentik forward auth) `Authorization` may belong to the proxy**: phones send the device
+  token in `X-Telerouter-Token`. The proxy's cookie expires (Authentik: the provider's token validity); the app
+  renews it by following the proxy's redirects for `/api/health`.
+- **Caddy sends the upstream's address as Host towards an https upstream**: the SSO redirect URI came out as
+  `https://127.0.0.1:8443/...` behind Caddy. `callback_url` uses `X-Forwarded-Host` from trusted proxies (NPM keeps
+  Host anyway).
+- SSO login CSRF: the start sets a `SameSite=Lax` binding cookie (Strict would not come back with the provider's
+  cross-site redirect). Verified in the Android WebView against a fake provider behind Caddy.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
@@ -175,7 +204,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.9.2, 2026-10-19)
+## Status (v0.10.0, 2026-10-20)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
@@ -195,6 +224,11 @@ Not yet heard on the real speaker: audible quality/latency of answers through Ca
 session side by hand against a real Claude Code 2.1.303 (scheduled-task header, transcript reply,
 context size from the transcript, the reminder answered with TELEROUTER_CLEAR, /clear, the next run in the
 new conversation). Not yet run end to end in prod through the scheduler.
+0.10 (phone dashboard + SSO): tests for the OIDC flow (fake provider: happy path, login CSRF, replay, foreign
+tokens, not allowed, password-protected settings), text-only phones and the token header. End to end on an
+emulator with the app: Caddy + a fake Authentik outpost (forward auth) + a fake OpenID provider in front of a local
+telerouter: proxy login and telerouter login in the WebView, the phone adding itself, voice through the proxy,
+silent renewal of an expired proxy cookie, SSO in the WebView, sign-out. Not yet against the real Authentik.
 Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
 Hermes install; echo cancellation on real hardware; quiet hours with real desk sensors (off in prod until the
 user enables them under Voice & calls -> Quiet hours).

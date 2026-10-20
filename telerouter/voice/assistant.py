@@ -374,7 +374,7 @@ class VoiceAssistant:
         conn.transcript("assistant", shown)
         conn.set_state("speaking")
         try:
-            for part in sentences(text):
+            for part in (sentences(text) if conn.speaks_answers else []):
                 async for chunk in e.speech.synthesize(part, e.store.config.voice.tts_voice):
                     conn.play(chunk)
             await conn.drained(0.1)

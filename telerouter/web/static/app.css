@@ -94,12 +94,38 @@ pre.screen { white-space: pre; word-break: normal; max-height: 420px; font-size:
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 12px; z-index: 5; overflow: auto; }
 .modal { background: var(--panel); border-radius: 12px; padding: 20px; width: min(720px, 100%); border: 1px solid var(--line); }
 
+header.top, .scrim { display: none; }
+nav.side .phone { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+a.button.wide { display: block; text-align: center; padding: 9px 12px; }
+.sso .or { color: var(--muted); font-size: 12.5px; text-align: center; margin: 14px 0 4px; }
+
+/* phones: a top bar with a menu button; the navigation is a drawer */
 @media (max-width: 760px) {
   .layout { grid-template-columns: 1fr; }
-  nav.side { position: static; height: auto; display: flex; flex-wrap: wrap; gap: 2px; border-right: 0; border-bottom: 1px solid var(--line); }
-  nav.side .brand { width: 100%; padding-bottom: 6px; }
-  nav.side .foot { display: none; }
-  main { padding: 16px; }
+  header.top { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 4; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 8px 12px; min-height: 52px; }
+  header.top .title { flex: 1; font-weight: 650; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header.top .menu { display: flex; flex-direction: column; justify-content: center; gap: 4px; width: 40px; height: 40px; padding: 0 10px;
+    background: transparent; border: 0; }
+  header.top .menu span { display: block; height: 2px; background: var(--text); border-radius: 1px; }
+  header.top .talk { border-radius: 99px; padding: 7px 16px; }
+  nav.side { position: fixed; top: 0; left: 0; bottom: 0; width: min(280px, 82vw); height: 100%; z-index: 6; transform: translateX(-105%);
+    transition: transform .18s ease-out; box-shadow: 4px 0 24px rgba(0,0,0,.25); }
+  nav.side a { padding: 11px 12px; font-size: 15px; }
+  .menu-open nav.side { transform: none; }
+  .menu-open .scrim { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 5; }
+  main { padding: 14px 12px 60px; }
+  main > h1 { display: none; }                  /* the top bar shows the page name */
+  .auth { margin: 6vh 12px; }
+  .card { padding: 14px 12px; border-radius: 12px; }
+  .grid { grid-template-columns: 1fr; }
+  input[type=text], input[type=password], input[type=number], input[type=url], select, textarea { font-size: 16px; padding: 9px 10px; }
+  button { padding: 8px 14px; }
+  button.small { padding: 6px 10px; }
+  .modal-bg { padding: 0; align-items: flex-end; }
+  .modal { border-radius: 16px 16px 0 0; max-height: 92vh; overflow: auto; }
+  #toast { left: 12px; right: 12px; bottom: 12px; }
+  #toast div { max-width: none; }
   .hide-sm { display: none; }
 }
 

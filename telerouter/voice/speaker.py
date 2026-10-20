@@ -119,6 +119,12 @@ class VirtualSpeaker:
             if isinstance(d, ClientConn):
                 d.set_state(state)
 
+    @property
+    def speaks_answers(self) -> bool:
+        """False when the output is a phone that wants answers as text only (hello "speech": false)."""
+        o = self.out
+        return not (isinstance(o, ClientConn) and o.wants_text and not o.speech)
+
     def transcript(self, role: str, text: str) -> None:
         """What was heard ("user") or answered ("assistant"), for devices with a screen (the phone app)."""
         seen = []
