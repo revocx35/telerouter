@@ -223,18 +223,21 @@ def claude_dialog_keys(screen: str) -> list[str] | None:
 
 
 def menu_keys(screen: str, target: str) -> list[str]:
-    """Keys that move a TUI menu's cursor (the line with ❯) to the option containing `target`, then Enter.
+    """Keys that move a TUI menu's cursor (the line with ❯) to the option containing `target`; Enter only
+    once the screen shows the cursor on it.
 
     Claude Code's menus put one option per line; which option is preselected differs between versions
-    (the workspace-trust dialog preselects "No, exit"), so never just press Enter.
+    (the workspace-trust dialog preselects "No, exit"), so never just press Enter. The moves and the Enter
+    go out on separate looks at the screen: Claude Code 2.1.30x draws the trust dialog a moment before it
+    reads keys, drops an arrow sent then but not the Enter after it, and "No, exit" quits the session.
     """
     lines = screen.splitlines()
     sel = next((i for i, ln in enumerate(lines) if "\u276f" in ln or ln.lstrip().startswith(">")), None)
     tgt = next((i for i, ln in enumerate(lines) if target in ln.lower()), None)
     if sel is None or tgt is None:
-        return ["Enter"] if tgt is not None else []
+        return []
     d = tgt - sel
-    return (["Down"] * d if d > 0 else ["Up"] * -d) + ["Enter"]
+    return ["Enter"] if d == 0 else ["Down"] * d if d > 0 else ["Up"] * -d
 
 
 class HermesDriver(Driver):

@@ -137,8 +137,10 @@ def test_trust_dialog_selects_yes_even_when_no_is_preselected():
    Yes, I trust this folder
  Enter to confirm · Esc to cancel"""
     d = ClaudeDriver(agent(), "/d", "/w", "http://x")
-    assert d.dialog_keys(screen) == ["Down", "Enter"]
+    # only the move: Enter waits until the screen shows the cursor on "Yes" (a dropped arrow + Enter = "No, exit")
+    assert d.dialog_keys(screen) == ["Down"]
     assert d.dialog_keys(screen.replace("❯ No, exit", "  No, exit").replace("   Yes, I trust", " ❯ Yes, I trust")) == ["Enter"]
+    assert d.dialog_keys(screen.replace("❯", " ")) == []      # no cursor drawn yet: never a blind Enter
     old_style = "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No, exit"
     assert d.dialog_keys(old_style) == ["Enter"]    # older wording: "Yes, proceed" is already selected
 

@@ -305,7 +305,8 @@ the phone call. Their following requests go to the session instead of the agent;
 `mkdir -p <folder> && tmux new-session -d -s <name> -c <folder> '<agent>; exec $SHELL -l'` over the machine's
 SSH connection (`claude -n <name> [--model] [--permission-mode]`, from the machine's new-session settings;
 `hermes` on Hermes machines), answers Claude Code's start-up dialogs (workspace trust, auto mode) on the
-pane, waits until the UI is still and `~/.claude/sessions/<pid>.json` exists (so the first routed request
+pane (arrow keys first, Enter only once the screen shows the right option selected: the dialog is drawn
+before it reads keys, and a lost arrow + Enter would pick the preselected "No, exit"), waits until the UI is still and `~/.claude/sessions/<pid>.json` exists (so the first routed request
 finds the transcript), lists the sessions (the new one becomes a tmux contact) and routes the requester to
 it. Names: `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, not `telerouter-*`, not an existing session; folders: plain
 paths without `..` (quoted; `~` = the SSH user's home).
@@ -324,7 +325,7 @@ skipped.
 |---|---|
 | `agent` | `AgentRuntime.ask(prompt, Source("schedule", 'scheduled task "X"'), timeout)`: the agent's ongoing conversation. Other requests to that agent fail fast with "busy with the scheduled task" while it runs, instead of waiting up to an hour behind its lock |
 | `new_session` | `MachineRuntime.new_session("<slug>-MMDD-HHMM", folder, by_admin=True)`, then `ask(..., header=...)`. The sessions beyond `keep_sessions` (the oldest ones this task started) are closed |
-| `task_session` | the task's own session `task-<slug>` (or its `session_name`), created when missing, then `ask`. Afterwards: the context check |
+| `task_session` | the task's own session `task-<slug>` (or its `session_name`), created when missing (or killed and created again when the task started it but its claude has exited), then `ask`. Afterwards: the context check |
 
 Prompts are headed `[telerouter #nonce · scheduled task "X" (date time): an automatic run nobody is
 watching. Do the task, then end with a short summary of the result (telerouter keeps it)]`, not as spoken

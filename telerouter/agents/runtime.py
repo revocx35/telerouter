@@ -290,14 +290,16 @@ class AgentRuntime:
     async def _handle_startup(self) -> None:
         """Click through first-run dialogs (workspace trust, ...) and wait until the UI settles."""
         assert self.driver
-        stable, last, answered = 0, "", ""
+        stable, last, answered, waited = 0, "", "", 0
         for _ in range(45):
             await asyncio.sleep(1)
             screen = await self.screen()
             tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
-            keys = self.driver.dialog_keys(tail) if screen != answered else None
+            # the same screen again: the keys did nothing yet; send them again after a few seconds
+            waited = waited + 1 if screen == answered else 0
+            keys = self.driver.dialog_keys(tail) if screen != answered or waited >= 3 else None
             if keys:
-                answered = screen
+                answered, waited = screen, 0
                 log.info("[%s] answering a start-up dialog", self.agent.name)
                 for k in keys:
                     await self._sh(self._tmux("send-keys", "-t", self._pane, k))

@@ -125,6 +125,10 @@ class _Machine:
         self.resets: list[tuple] = []
         self.tokens = 1000
         self.answer = "keeping it"
+        self.exited: set[str] = set()                              # sessions whose claude has quit
+
+    async def claude_transcript(self, session):
+        return "" if session in self.exited else f"/root/.claude/projects/-root/{session}.jsonl"
 
     async def has_session(self, name):
         return name in self.sessions
@@ -137,6 +141,7 @@ class _Machine:
     async def kill_session(self, name):
         self.killed.append(name)
         self.sessions.remove(name)
+        self.exited.discard(name)
 
     async def ask(self, session, text, label, on_wait=None, header="", timeout=None):
         self.asked.append((session, text, header))
@@ -242,6 +247,24 @@ async def test_own_session_gets_a_gentle_context_reminder(tmp_path):
     assert mrt.resets == [("task-mail-summary", "compact", "the open invoice list")]
     assert r["context_note"] == "reminded; the agent compacted its context"
     assert mrt.sessions == ["task-mail-summary"]                   # the same session every run
+
+
+async def test_own_session_is_started_again_when_its_claude_exited(tmp_path):
+    e = _Eng(tmp_path)
+    m = e.store.config.machines[0]
+    t = task(target="task_session", machine_id=m.id)
+    e.store.config.tasks.append(t)
+    sch = Scheduler(e)
+    mrt = e.machine_rts[m.id]
+    sch.run_now(t)
+    await _settle(sch)
+    mrt.exited.add("task-mail-summary")                            # e.g. it quit at the trust dialog: a bare shell
+    mrt.sessions.append("someone-elses")
+    mrt.exited.add("someone-elses")
+    sch.run_now(t)
+    await _settle(sch)
+    assert mrt.killed == ["task-mail-summary"] and mrt.sessions == ["someone-elses", "task-mail-summary"]
+    assert sch.st(t.id)["runs"][-1]["status"] == "ok" and len(mrt.asked) == 2
 
 
 async def test_calls_about_a_run_only_when_the_task_asks(tmp_path):

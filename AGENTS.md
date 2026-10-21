@@ -102,6 +102,13 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - MCP SDK 2.x moved FastMCP; telerouter implements the small MCP surface itself (`mcp.py`).
 - **Claude Code's workspace-trust dialog preselects "No, exit"** (v2.1.302): pressing Enter quits the agent.
   `drivers.menu_keys()` moves the `❯` cursor to the wanted option first.
+- **Claude Code 2.1.306 draws that dialog before it reads keys** (fixed in 0.10.1): an arrow sent the moment
+  it appears is dropped, the Enter right after it isn't, so "No, exit" was chosen and the HomeLab task failed
+  with "no Claude Code is running". `menu_keys()` now returns only the moves until the screen shows the cursor
+  on the target, then Enter; the start-up loops resend keys when the screen didn't change for 3 s, and
+  `_settle` stops at "the agent exited". Reproduce: start `claude` in `~` (home-folder trust is never saved)
+  in tmux and send Down+Enter as soon as "Yes, I trust" is on screen. tmux `pane_current_command` shows
+  `bash` for a running claude after an update; use `claude_transcript()` to tell if claude is alive.
 - PBX numbers are dialed exactly as entered: feature codes keep `*`/`#` (`*43` is FreePBX's echo test, a safe
   live target). Stripping non-digits dialed "43".
 - Home Assistant's MCP server (`/api/mcp`) answers 404 until the "Model Context Protocol Server"
@@ -151,7 +158,9 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   the Raqqa laptop's mic heard it and started a turn. While any call that is not on that speaker is going on,
   the wake word no longer starts a turn there (`VoiceAssistant._other_call`; Voice setting `wake_during_calls`
   turns it back on). The wake word still answers/hangs up a call on the speaker itself.
-- **Scheduled tasks** (0.8, `scheduler.py`): run state is in `/data/tasks.json`, not config.json. Prompts
+- **Scheduled tasks** (0.8, `scheduler.py`): run state is in `/data/tasks.json`, not config.json. A
+  `task_session` whose claude has exited (bare shell left in the tmux session) is killed and started again,
+  but only if the task started it (0.10.1). Prompts
   carry a `scheduled task "X"` header (not "spoken request"), and a Jarvis run uses `Source("schedule", ...)`.
   MCP `_source()` returns None for it, so it counts as the agent acting on its own, and other voice requests
   to Jarvis fail fast with "busy with the scheduled task" instead of queueing behind the lock.
@@ -204,7 +213,7 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.10.0, 2026-10-20)
+## Status (v0.10.1, 2026-10-21)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the

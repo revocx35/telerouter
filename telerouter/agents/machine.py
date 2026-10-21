@@ -170,14 +170,19 @@ class MachineRuntime:
     async def _settle(self, session: str, timeout: int = 45) -> None:
         """Answer Claude Code's start-up dialogs (workspace trust, auto mode) and wait until the UI is still."""
         pane = f"={session}:"
-        stable, last, answered = 0, "", ""
+        stable, last, answered, waited = 0, "", "", 0
         for _ in range(timeout):
             await asyncio.sleep(1)
             screen = await self._sh(self._tmux("capture-pane", "-p", "-t", pane), timeout=10)
             tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
-            keys = claude_dialog_keys(tail) if screen != answered else None
+            if "the agent exited" in tail:          # launch line in new_session; don't type into the shell
+                log.warning("[%s] %s: claude exited during start-up", self.machine.name, session)
+                return
+            # the same screen again: the keys did nothing yet; send them again after a few seconds
+            waited = waited + 1 if screen == answered else 0
+            keys = claude_dialog_keys(tail) if screen != answered or waited >= 3 else None
             if keys:
-                answered = screen
+                answered, waited = screen, 0
                 log.info("[%s] %s: answering a start-up dialog", self.machine.name, session)
                 for k in keys:
                     await self._sh(self._tmux("send-keys", "-t", pane, k))

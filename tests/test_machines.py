@@ -120,8 +120,10 @@ async def test_new_session_starts_claude_in_tmux_and_answers_the_trust_dialog():
     rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", allow_new_sessions=True,
                                         new_session_model="claude-sonnet-5-5"))
     rt.state = "ready"
-    sent, screens = [], ["Do you trust the files in this folder?\n❯ 1. No, exit\n  2. Yes, I trust this folder\n",
-                         "│ > │", "│ > │", "│ > │", "│ > │"]
+    no = "Do you trust the files in this folder?\n❯ 1. No, exit\n  2. Yes, I trust this folder\n"
+    yes = "Do you trust the files in this folder?\n  1. No, exit\n❯ 2. Yes, I trust this folder\n"
+    # the first Down is dropped (Claude Code draws the dialog before it reads keys): same screen 3 more times
+    sent, screens = [], [no, no, no, no, yes, "│ > │", "│ > │", "│ > │", "│ > │"]
     made = {}
 
     async def fake_sh(cmd, input=None, timeout=30):
@@ -152,7 +154,32 @@ async def test_new_session_starts_claude_in_tmux_and_answers_the_trust_dialog():
     cmd = made["cmd"]
     assert "D=\"$HOME\"/projects/pokerbot" in cmd and "tmux new-session -d -s pokerbot -c \"$D\"" in cmd
     assert "claude -n pokerbot --model claude-sonnet-5-5 --permission-mode auto" in cmd
-    assert sent == ["Down", "Enter"]                  # moved off the preselected "No, exit"
+    assert sent == ["Down", "Down", "Enter"]          # moved off "No, exit"; Enter only once "Yes" is selected
+
+
+async def test_new_session_stops_answering_once_claude_exited():
+    import asyncio
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", allow_new_sessions=True))
+    rt.state = "ready"
+    sent = []
+    dialog = "Do you trust the files in this folder?\n❯ 1. No, exit\n  2. Yes, I trust this folder\n"
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if "new-session" in cmd:
+            return "ok /root"
+        if "capture-pane" in cmd:                     # the dialog text stays above the shell prompt
+            return dialog + "the agent exited\nroot@lxc:~#\n" + "root@lxc:~#\n" * len(sent)
+        if "send-keys" in cmd:
+            sent.append(cmd.rsplit(" ", 1)[1])
+        return ""
+    rt._sh = fake_sh
+    orig, fast = _fast_sleep()
+    asyncio.sleep = fast
+    try:
+        await rt.new_session("homelab", "~")
+    finally:
+        asyncio.sleep = orig
+    assert sent == []                                 # no keys typed into the shell
 
 
 async def test_new_session_refusals():

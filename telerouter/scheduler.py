@@ -243,6 +243,11 @@ class Scheduler:
             await self._prune(t, mrt)
         else:
             name = t.tmux_name
+            if (name in s["sessions"] and mrt.machine.agent_kind == "claude" and await mrt.has_session(name)
+                    and not await mrt.claude_transcript(name)):
+                # our session, but claude in it has exited (left at its shell): start it again
+                log.info("task %s: no Claude Code is running in %s - starting it again", t.name, name)
+                await mrt.kill_session(name)
             if not await mrt.has_session(name):
                 await mrt.new_session(name, t.folder, by_admin=True)
                 s["reminded"] = 0
