@@ -30,6 +30,11 @@ log = logging.getLogger("telerouter.agent")
 MAX_EVENT_LINE = 1 << 20
 EVENTS_MAX_BYTES = 4 << 20
 
+# How long start_session watches a fresh tmux session before believing the agent is up: a bad flag or a
+# missing binary kills the agent in milliseconds and takes the session with it.
+START_CHECK_TRIES = 6
+START_CHECK_SECONDS = 0.5
+
 
 class AgentError(Exception):
     pass
@@ -279,13 +284,34 @@ class AgentRuntime:
         if setup:
             out = await self._sh(setup, check=True, timeout=60)
             log.info("[%s] agent host prepared: %s", a.name, out.strip()[:200])
+        await self._sh(f"rm -f {ssh.q(self.dir + '/last-exit')}; true")
         await self._sh(self._tmux("new-session", "-d", "-s", a.session_name, "-x", "160", "-y", "48",
                                   "sh " + ssh.q(f"{self.dir}/start.sh")), check=True)
         self.session_alive = True
+        died = await self._verify_started()
+        if died:
+            raise AgentError(f"the agent exited right after launch ({died}); "
+                             f"run sh {self.dir}/start.sh by hand on the host to see the error")
         log.info("[%s] started %s in tmux session %s", a.name, a.kind, a.session_name)
         await self._handle_startup()
         self.state = "ready"
         self._ready.set()
+
+    async def _verify_started(self) -> str:
+        """Empty when the agent survived its first moments, else the reason it died.
+
+        start.sh writes the agent's exit status to `last-exit`; together with the session check that turns
+        a launch that never worked (wrong CLI flag, missing binary) into a visible failure instead of a
+        "started" line followed by a session that silently vanishes.
+        """
+        for _ in range(START_CHECK_TRIES):
+            await asyncio.sleep(START_CHECK_SECONDS)
+            status = (await self._sh(f"cat {ssh.q(self.dir + '/last-exit')} 2>/dev/null")).strip()
+            if status:
+                return f"exit status {status}"
+            if not await self._has_session():
+                return "its tmux session is gone"
+        return ""
 
     async def _handle_startup(self) -> None:
         """Click through first-run dialogs (workspace trust, ...) and wait until the UI settles."""

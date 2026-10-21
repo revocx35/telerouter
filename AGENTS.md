@@ -238,8 +238,10 @@ tokens, not allowed, password-protected settings), text-only phones and the toke
 emulator with the app: Caddy + a fake Authentik outpost (forward auth) + a fake OpenID provider in front of a local
 telerouter: proxy login and telerouter login in the WebView, the phone adding itself, voice through the proxy,
 silent renewal of an expired proxy cookie, SSO in the WebView, sign-out. Not yet against the real Authentik.
-Not verified: macOS client (code paths are cross-platform, untested on a Mac); Hermes against a real
-Hermes install; echo cancellation on real hardware; quiet hours with real desk sensors (off in prod until the
-user enables them under Voice & calls -> Quiet hours).
+Not verified: macOS client (code paths are cross-platform, untested on a Mac); echo cancellation on real
+hardware; quiet hours with real desk sensors (off in prod until the user enables them under Voice & calls ->
+Quiet hours). Hermes WAS run against a real install on 2026-10-21 (Hermes 0.22.4, our own CT 123): the CLI
+moved `--create-if-missing` under the `chat` subcommand, which the old driver did not handle, so
+`start.sh` now probes which form the installed CLI takes (and reports a launch that dies at once).
 Open idea (not confirmed by the user, don't build unasked): a distinct listening blip / announcement while a
 speaker is routed to a tmux session.

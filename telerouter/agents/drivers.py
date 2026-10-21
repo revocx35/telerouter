@@ -272,21 +272,38 @@ done
 
     def launch_script(self) -> str:
         a = self.agent
-        args = ["-c", f"telerouter-{a.id}", "--create-if-missing", "--accept-hooks"]
+        args = [f"telerouter-{a.id}", "--create-if-missing", "--accept-hooks"]
         if a.model:
             args += ["--model", a.model]
         if a.hermes_provider:
             args += ["--provider", a.hermes_provider]
         if a.permission_mode == "bypassPermissions":
             args += ["--yolo"]
+        tail = " ".join(shlex.quote(x) for x in args)
+        exit_file = shlex.quote(self.dir + "/last-exit")
         return f"""#!/bin/sh
 # started by telerouter in tmux session {a.session_name}; attach with: tmux attach -t {a.session_name}
 {PATHS}
 export HERMES_ACCEPT_HOOKS=1
 cd {shlex.quote(self.workdir)} 2>/dev/null || cd "$HOME"
-hermes {" ".join(shlex.quote(x) for x in args)}
-echo "agent exited with status $?"
-sleep 3
+rm -f {exit_file}
+# Hermes 0.22 moved --create-if-missing under the `chat` subcommand; earlier CLIs take it at the top
+# level, and one of them is all we need: probe instead of pinning a version. A launch that fails writes
+# its exit status to last-exit so telerouter can report it instead of claiming the agent started.
+if hermes chat --help 2>/dev/null | grep -q -- '--create-if-missing'; then
+  hermes chat -c {tail}
+elif hermes --help 2>/dev/null | grep -q -- '--create-if-missing'; then
+  hermes -c {tail}
+else
+  echo "telerouter: this hermes CLI accepts --create-if-missing neither after 'chat' nor at the top level" >&2
+  printf '%s\\n' 3 > {exit_file}
+  sleep "${{TELEROUTER_EXIT_SLEEP:-3}}"
+  exit 3
+fi
+status=$?
+echo "agent exited with status $status"
+printf '%s\\n' "$status" > {exit_file}
+sleep "${{TELEROUTER_EXIT_SLEEP:-3}}"
 """
 
     def prompt_text(self, text: str, header: str) -> str:

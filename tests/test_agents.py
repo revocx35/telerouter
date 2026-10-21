@@ -51,9 +51,72 @@ def test_hermes_launch_and_prompt():
                     "/h/.telerouter/x", "/h", "http://127.0.0.1:47801/mcp")
     assert isinstance(d, HermesDriver)
     s = d.launch_script()
+    assert "hermes chat -c telerouter-" in s          # Hermes 0.22+: the flag lives under `chat`
+    assert "hermes -c telerouter-" in s               # older CLIs: top level
+    assert "hermes chat --help" in s and "hermes --help" in s
     assert "--create-if-missing" in s and "--accept-hooks" in s and "--yolo" in s
-    assert "telerouter-" in s and "anthropic/claude-sonnet-5-5" in s
+    assert "anthropic/claude-sonnet-5-5" in s
+    assert "/h/.telerouter/x/last-exit" in s
     assert d.prompt_text("hi", "telerouter #abc · Kitchen").startswith("[telerouter #abc · Kitchen] hi")
+    subprocess.run(["sh", "-n"], input=s.encode(), check=True)   # syntactically valid POSIX sh
+
+
+def test_hermes_launch_script_sees_a_cli_that_dies(tmp_path):
+    """A CLI whose flags are rejected must leave its exit status behind (that is how telerouter notices)."""
+    d = make_driver(agent(kind="hermes", name="Hermes"), str(tmp_path), str(tmp_path), "http://127.0.0.1:47801/mcp")
+    script = tmp_path / "start.sh"
+    script.write_text(d.launch_script())
+    fake = tmp_path / ".local" / "bin"                 # first entry of the driver's PATH
+    fake.mkdir(parents=True)
+    # a modern CLI: `chat --help` advertises the flag, the real launch fails and exits 2
+    (fake / "hermes").write_text('#!/bin/sh\nif [ "$1" = chat ] && [ "$2" = --help ]; then\n'
+                                 '  echo "  --create-if-missing   With -c/--continue <name>"\n  exit 0\nfi\nexit 2\n')
+    (fake / "hermes").chmod(0o755)
+    subprocess.run(["sh", str(script)], check=False, timeout=30, cwd=str(tmp_path),
+                   env={**os.environ, "HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                        "TELEROUTER_EXIT_SLEEP": "0"})
+    assert (tmp_path / "last-exit").read_text().strip() == "2"
+
+
+def test_hermes_launch_script_reports_a_cli_with_neither_form(tmp_path):
+    """No `chat` flag and no top-level flag: exit 3 with a message, instead of launching something that fails."""
+    d = make_driver(agent(kind="hermes"), str(tmp_path), str(tmp_path), "http://127.0.0.1:47801/mcp")
+    script = tmp_path / "start.sh"
+    script.write_text(d.launch_script())
+    fake = tmp_path / ".local" / "bin"
+    fake.mkdir(parents=True)
+    (fake / "hermes").write_text("#!/bin/sh\nexit 0\n")   # --help succeeds but never lists the flag
+    (fake / "hermes").chmod(0o755)
+    subprocess.run(["sh", str(script)], check=False, timeout=30, cwd=str(tmp_path),
+                   env={**os.environ, "HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                        "TELEROUTER_EXIT_SLEEP": "0"})
+    assert (tmp_path / "last-exit").read_text().strip() == "3"
+
+
+async def test_agent_that_dies_at_launch_is_reported(monkeypatch):
+    import telerouter.agents.runtime as rtmod
+    monkeypatch.setattr(rtmod, "START_CHECK_SECONDS", 0.001)
+    rt = runtime("hermes")
+
+    async def dead(self, cmd, check=False, timeout=30, input=None):
+        return "2" if "last-exit" in cmd else ""
+
+    monkeypatch.setattr(type(rt), "_sh", dead)
+    assert await rt._verify_started() == "exit status 2"
+
+
+async def test_agent_still_up_after_launch_is_accepted(monkeypatch):
+    import telerouter.agents.runtime as rtmod
+    monkeypatch.setattr(rtmod, "START_CHECK_SECONDS", 0.001)
+    rt = runtime("hermes")
+
+    async def alive(self, cmd, check=False, timeout=30, input=None):
+        if "last-exit" in cmd:
+            return ""
+        return "yes" if "has-session" in cmd else ""
+
+    monkeypatch.setattr(type(rt), "_sh", alive)
+    assert await rt._verify_started() == ""
 
 
 def test_hermes_configure_merges_config(tmp_path):
