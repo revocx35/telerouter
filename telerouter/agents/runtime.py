@@ -18,7 +18,7 @@ import asyncssh
 
 from .. import __version__
 from ..models import Agent, McpToken
-from ..security import new_token, token_hash
+from ..security import new_token, token_hash, token_matches
 from . import ssh
 from .drivers import Driver, make_driver
 
@@ -273,7 +273,7 @@ class AgentRuntime:
             a.session_uuid = str(uuid.uuid4())
             self.engine.store.save()
         self.driver = make_driver(a, self.dir, self.driver.workdir, self.driver.mcp_url)
-        token = self._issue_mcp_token()
+        token = await self._issue_mcp_token()
         for path, (content, mode) in self.driver.files(token).items():
             await self._write_file(path, content, mode)
         await self._write_file(f"{self.dir}/version", __version__, 0o600)
@@ -338,14 +338,24 @@ class AgentRuntime:
                 return
         log.warning("[%s] agent UI did not settle within 45 s", self.agent.name)
 
-    def _issue_mcp_token(self) -> str:
-        """A fresh MCP token for this agent (only its hash is kept)."""
+    async def _issue_mcp_token(self) -> str:
+        """The agent's MCP token, reused when the agent host still has the matching one.
+
+        Only the hash is kept here, so the plain token is read back from the host copy
+        (`<dir>/mcp-token`, written on the first start). Rotating it on every start broke running
+        sessions: a Hermes gateway on the agent host keeps the token it read from config.yaml until
+        its next config check, so every request in between got 401 and voice answers said the MCP
+        server was down. The UI can still regenerate a token explicitly.
+        """
         cfg = self.engine.store.config
         tok = self.engine.store.mcp_token(self.agent.mcp_token_id)
         if not tok:
             tok = McpToken(name=f"agent {self.agent.name}", agent_id=self.agent.id)
             cfg.mcp_tokens.append(tok)
             self.agent.mcp_token_id = tok.id
+        kept = (await self._sh(f"cat {ssh.q(self.dir + '/mcp-token')} 2>/dev/null")).strip()
+        if kept and token_matches(kept, tok.token_hash):
+            return kept
         token = new_token("trm_")
         tok.token_hash = token_hash(token)
         self.engine.store.save()

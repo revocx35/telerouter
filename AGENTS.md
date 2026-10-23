@@ -79,6 +79,13 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 
 ## Hard-won facts
 
+- **An agent's `trm_` token is issued once, not per start.** Only its hash is stored, so a (re)start reads the
+  plain token back from `<dir>/mcp-token` on the agent host and reuses it while the hash still matches
+  (`AgentRuntime._issue_mcp_token`). Rotating it on every start looks harmless but leaves a *running* gateway
+  (a Hermes gateway keeps the token it read from config.yaml until its next config check) holding a dead
+  token: its MCP calls get 401 for a minute or two and the voice answer says "the MCP server is down" while
+  the server is actually fine. Regenerating a token is an explicit UI action (`POST /api/mcp-tokens`).
+
 - **openWakeWord keeps the wake word in its window.** When feeding resumes after a pause (after a turn,
   or when a call starts) send a new AudioStart (`WakeStream.reset()`), or the old "hey jarvis" fires again
   and, e.g., hangs up the call that just started.
@@ -232,13 +239,15 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.10.1, 2026-10-21)
+## Status (v0.11.2, 2026-10-23)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
-Verified: speaker turn end to end with real Whisper/Piper/openWakeWord (WAV-driven client); agent
+Verified: 0.11.2 — an agent session restarted while its host's Hermes gateway keeps running no longer gets
+401 on every MCP call (the token is reused from `<dir>/mcp-token`; the unit test covers the reuse and the
+re-issue when the host copy is gone). Verified: speaker turn end to end with real Whisper/Piper/openWakeWord (WAV-driven client); agent
 plumbing over SSH/tmux/hooks/reverse-tunnel MCP with the fake agent; outbound and inbound calls through
 Asterisk; wa2sip (simulated WhatsApp) both directions. In production (FreePBX 17, real Claude Code with
 Sonnet 5.5): "Hey Jarvis, call the echo test" -> connect_call -> *43 bridged to a speaker; an inbound call

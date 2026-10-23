@@ -409,3 +409,48 @@ def test_hook_script_drops_the_conversation_history(tmp_path):
     assert json.loads(line)["extra"]["assistant_response"] == "Done."
     subprocess.run([str(hook)], input=b'{"broken": ', check=True)
     assert (tmp_path / "events.jsonl").read_text().splitlines()[-1].strip() == '{"broken":'
+
+
+class _TokenStore:
+    def __init__(self, cfg):
+        self.config = cfg
+        self.saves = 0
+
+    def save(self):
+        self.saves += 1
+
+    def mcp_token(self, tid):
+        return next((t for t in self.config.mcp_tokens if t.id == tid), None)
+
+
+def test_start_reuses_the_agents_mcp_token(tmp_path):
+    """A (re)start must hand out the token the agent host already has.
+
+    Rotating it on every start left a running agent's gateway holding a dead token: its calls got
+    401 until the next config check and the voice answer said the MCP server was down.
+    """
+    from types import SimpleNamespace
+
+    from telerouter.models import McpToken
+    from telerouter.security import token_hash
+
+    cfg = SimpleNamespace(mcp_tokens=[McpToken(id="t1", name="agent Jarvis", agent_id="a1",
+                                               token_hash=token_hash("trm_kept"))])
+    store = _TokenStore(cfg)
+    rt = AgentRuntime(SimpleNamespace(store=store), agent(id="a1", mcp_token_id="t1"))
+    rt.home = "/home/me"
+
+    async def host_has(cmd, check=False, input=None, timeout=30):
+        return "trm_kept\n" if "/mcp-token" in cmd else ""
+
+    rt._sh = host_has
+    assert asyncio.run(rt._issue_mcp_token()) == "trm_kept"
+    assert store.saves == 0                      # nothing rotated, nothing written back
+
+    async def host_lost_it(cmd, check=False, input=None, timeout=30):
+        return ""
+
+    rt._sh = host_lost_it
+    fresh = asyncio.run(rt._issue_mcp_token())
+    assert fresh.startswith("trm_") and fresh != "trm_kept"
+    assert store.saves == 1 and token_hash(fresh) == cfg.mcp_tokens[0].token_hash

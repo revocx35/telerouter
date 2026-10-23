@@ -243,7 +243,7 @@ returns `app_link`, and `Authorization: Bearer` still works on `/ws/client`.
 | launch | `claude --session-id/--resume <uuid> --model claude-sonnet-5-5 --effort medium --permission-mode auto --settings settings.json --mcp-config mcp.json --append-system-prompt "$(cat instructions.md)"` | `hermes chat -c telerouter-<id> --create-if-missing --accept-hooks [--model --provider --yolo]`, or `hermes -c ...` on CLIs older than 0.22 — start.sh probes `hermes chat --help` for the flag and picks, and records a failed launch's exit status in `last-exit` so `start_session` can report it instead of claiming success |
 | hooks | from `--settings` (nothing in `~/.claude` changes): UserPromptSubmit, Stop, Notification | `post_llm_call`, `on_session_end` in `~/.hermes/config.yaml` (edited once, with a backup; allow-listed) |
 | reply | Stop `last_assistant_message` (fallback: transcript tail) | `post_llm_call` `extra.assistant_response` |
-| MCP | `mcp.json` (0600) with a per-start `trm_` token; `permissions.allow: mcp__telerouter` | `mcp_servers.telerouter` in config.yaml |
+| MCP | `mcp.json` (0600) with the agent's `trm_` token; `permissions.allow: mcp__telerouter` | `mcp_servers.telerouter` in config.yaml |
 | voice rules | `--append-system-prompt` | appended to each request |
 
 **Context management**: after every turn telerouter reads the context size from the transcript's last
