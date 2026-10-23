@@ -1,6 +1,7 @@
 """SIP calls through the real engine with an in-process phone/registrar; speech and agent are stubbed."""
 
 import asyncio
+import re
 import wave
 
 import pytest
@@ -234,3 +235,123 @@ async def test_incoming_calls_rejected_in_quiet_hours(settings, tmp_path):
         await call.hangup()
     finally:
         await rig.stop()
+
+
+# -- ringing bridge: "hey Jarvis, call my mom" from the phone rings my extension first --------------------
+
+async def test_ringing_bridge_rings_the_person_then_connects_them(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        cfg = rig.store.config
+        cfg.contacts = [Contact(id="me", kind="pbx", name="Salih", number="2001"),
+                        Contact(id="mom", kind="pbx", name="Mom", number="2002")]
+        cfg.calls.ring_first_contact = "me"
+        rig.phone("2001")
+        rig.phone("2002")
+        sides, dialed = [], []
+
+        async def on_incoming(call):
+            dialed.append(uri_user(call))
+            sides.append(call)
+            await asyncio.sleep(0.1)
+            await call.answer()
+        rig.ua.on_incoming = on_incoming
+
+        s = await rig.engine.calls.ring_bridge(cfg.contacts[1], cfg.contacts[0])
+        for _ in range(200):
+            if sides and s.state == "active" and s.call and s.call.state == "active":
+                break
+            await asyncio.sleep(0.05)
+        assert dialed == ["2001", "2002"]                 # the person first, then mom
+        assert s.mode == "ringbridge" and s.me_contact and s.me_contact.label == "Salih"
+        assert s.connected_at and s.result == "connected"
+        assert s.me_audio and s.audio
+        assert s.me_audio.on_raw == s.audio.send_g711 and s.audio.on_raw == s.me_audio.send_g711
+
+        heard = bytearray()                               # mom's side hears what the person says
+        mom_audio = SipAudio(sides[1], on_audio=heard.extend)
+        mom_audio.start()
+        speech = speech_16k()
+        for i in range(0, 16000, 320):                    # 0.5 s of speech in real time
+            s.me_audio.send(speech[i:i + 320])
+            await asyncio.sleep(0.02)
+        for _ in range(100):
+            if len(heard) > 4000:
+                break
+            await asyncio.sleep(0.05)
+        assert len(heard) > 4000                          # the legs are joined, not two separate calls
+
+        await sides[1].hangup()                           # mom hangs up: the person's leg goes too
+        for _ in range(100):
+            if not rig.engine.calls.sessions:
+                break
+            await asyncio.sleep(0.05)
+        assert not rig.engine.calls.sessions
+        assert sides[0].state == "ended"
+        assert rig.store.history[-1]["mode"] == "ringbridge"
+    finally:
+        await rig.stop()
+
+
+async def test_ringing_bridge_gives_up_when_the_person_does_not_answer(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        cfg = rig.store.config
+        cfg.contacts = [Contact(id="me", kind="pbx", name="Salih", number="2001"),
+                        Contact(id="mom", kind="pbx", name="Mom", number="2002")]
+        rig.phone("2001")
+        rig.phone("2002")
+        dialed = []
+
+        async def on_incoming(call):
+            dialed.append(uri_user(call))
+            call.reject(480, "Temporarily Unavailable")
+        rig.ua.on_incoming = on_incoming
+
+        await rig.engine.calls.ring_bridge(cfg.contacts[1], cfg.contacts[0])
+        for _ in range(100):
+            if not rig.engine.calls.sessions:
+                break
+            await asyncio.sleep(0.05)
+        assert dialed == ["2001"]                         # mom was never dialled
+        assert not rig.engine.calls.sessions
+        assert "nobody answered" in rig.store.history[-1]["result"]
+    finally:
+        await rig.stop()
+
+
+async def test_ringing_bridge_says_why_when_the_contact_does_not_answer(settings, tmp_path):
+    rig = await Rig().start(settings, tmp_path)
+    try:
+        cfg = rig.store.config
+        cfg.calls.ring_timeout = 5                        # the smallest accepted timeout
+        cfg.contacts = [Contact(id="me", kind="pbx", name="Salih", number="2001"),
+                        Contact(id="mom", kind="pbx", name="Mom", number="2002")]
+        rig.phone("2001")
+        rig.phone("2002")
+        sides, heard = [], bytearray()
+
+        async def on_incoming(call):
+            sides.append(call)
+            audio = SipAudio(call, on_audio=heard.extend)   # from the first packet on
+            audio.start()
+            await call.answer()
+            if uri_user(call) == "2002":                   # mom picks up, then hangs up at once
+                await asyncio.sleep(0.3)
+                await call.hangup("mom hung up")
+        rig.ua.on_incoming = on_incoming
+
+        s = await rig.engine.calls.ring_bridge(cfg.contacts[1], cfg.contacts[0])
+        for _ in range(200):
+            if not rig.engine.calls.sessions:
+                break
+            await asyncio.sleep(0.05)
+        assert len(heard) > 12000                         # the person heard "Connecting you to Mom"
+        assert not rig.engine.calls.sessions
+    finally:
+        await rig.stop()
+
+
+def uri_user(call) -> str:
+    """The number dialled by telerouter (the To header keeps telerouter's own extension)."""
+    return re.sub(r"^sips?:", "", call.invite.uri or "").split("@")[0]

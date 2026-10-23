@@ -1,6 +1,7 @@
 """MCP server: JSON-RPC handling, token scopes, contact/speaker allow-lists, origin check."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from starlette.requests import Request
@@ -20,6 +21,47 @@ class FakeStore:
     def agent(self, aid):
         return None
 
+    def contact(self, cid):
+        return next((c for c in self.config.contacts if c.id == cid), None)
+
+
+class FakeCalls:
+    """Records what connect_call did instead of dialling."""
+
+    def __init__(self):
+        self.ring, self.to_speaker, self.bridged = [], [], []
+
+    async def ring_bridge(self, contact, me, token_id="", agent_id=""):
+        self.ring.append((contact.id, me.id))
+        return SimpleNamespace(id="rb")
+
+    def call_to_speaker(self, contact, conn):
+        self.to_speaker.append((contact.id, conn.id))
+        return SimpleNamespace(id="sp")
+
+    def get(self, sid):
+        return None
+
+    def bridge_to(self, inbound, contact):
+        self.bridged.append(contact.id)
+        return SimpleNamespace(id="br")
+
+
+class FakeMic:                                  # a device (ClientConn) as far as platform goes
+    def __init__(self, platform):
+        self.cfg = SimpleNamespace(platform=platform)
+
+
+class FakeSpeaker:
+    def __init__(self, sid, name, platform):
+        self.id, self.name = sid, name
+        self.mic_dev = FakeMic(platform)
+
+
+class FakeRt:
+    def __init__(self, source):
+        self.current_source = source
+
 
 class FakeEngine:
     def __init__(self):
@@ -27,13 +69,15 @@ class FakeEngine:
         self.speakers = {}
         self.agent_rts = {}
         self.machine_rts = {}
+        self.calls = FakeCalls()
+        self.rts = {}
 
     @property
     def agents(self):
         return self
 
     def get(self, aid):
-        return None
+        return self.rts.get(aid)
 
     def same_origin(self, origin, request):
         return origin == "https://telerouter.lan"
@@ -212,3 +256,67 @@ async def test_new_session_is_only_for_telerouters_agents(mcp):
     from telerouter.mcp import ToolError
     with pytest.raises(ToolError, match="allows new sessions"):
         mcp._session_machine("laptop")
+
+
+
+async def test_connect_call_rings_you_first_when_asked_from_the_phone(mcp):
+    """"Hey Jarvis, call my mom" on the phone: ring my extension, connect mom when I answer."""
+    from telerouter.agents.runtime import Source
+    cfg = mcp.engine.store.config
+    cfg.contacts += [Contact(id="me", kind="pbx", name="Salih", number="1005"),
+                     Contact(id="mom", kind="pbx", name="Anne", alias="mom", number="1006")]
+    cfg.calls.ring_first_contact = "me"
+    cfg.speakers += [Speaker(id="0badc0de", name="Zfold7", mic="0badc0de", output="client:0badc0de")]
+    mcp.engine.speakers["0badc0de"] = FakeSpeaker("0badc0de", "Zfold7", "android")
+    mcp.engine.speakers["k1"] = FakeSpeaker("k1", "Kitchen", "Linux x86_64")
+    tok = new_token("trm_")
+    cfg.mcp_tokens.append(McpToken(name="jarvis", token_hash=token_hash(tok), agent_id="a1"))
+
+    async def ask_from(platform, contact="mom", **args):
+        src = Source("speaker", f"{platform} speaker", speaker_id="0badc0de")
+        mcp.engine.rts["a1"] = FakeRt(src)
+        mcp.engine.speakers["0badc0de"].mic_dev = FakeMic(platform)
+        _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": "connect_call",
+                                           "arguments": {"contact": contact, **args}}}, token=tok)
+        return r["result"]
+
+    r = await ask_from("android")
+    assert r["isError"] is False and r["structuredContent"]["status"] == "ringing Salih first"
+    assert mcp.engine.calls.ring == [("mom", "me")]           # my extension first, then mom
+    assert not mcp.engine.calls.to_speaker
+
+    # the same request from a home speaker stays on the speaker
+    await ask_from("Linux x86_64")
+    assert mcp.engine.calls.to_speaker == [("mom", "0badc0de")]
+    assert len(mcp.engine.calls.ring) == 1
+
+    # a named speaker wins over the phone rule, and ring_first: false keeps it on the speaker
+    await ask_from("android", speaker="Kitchen")
+    assert mcp.engine.calls.to_speaker[-1] == ("mom", "k1")
+    assert len(mcp.engine.calls.ring) == 1
+    await ask_from("android", ring_first=False)
+    assert mcp.engine.calls.to_speaker[-1] == ("mom", "0badc0de")
+    assert len(mcp.engine.calls.ring) == 1
+
+    # ring_first: true works from any speaker; turning the setting off needs the flag
+    await ask_from("Linux x86_64", ring_first=True)
+    assert mcp.engine.calls.ring[-1] == ("mom", "me")
+    cfg.calls.ring_first_on_phone = False
+    await ask_from("android")
+    assert mcp.engine.calls.to_speaker[-1] == ("mom", "0badc0de")
+
+
+async def test_connect_call_ring_first_needs_a_configured_extension(mcp):
+    from telerouter.agents.runtime import Source
+    cfg = mcp.engine.store.config
+    cfg.contacts.append(Contact(id="mom", kind="pbx", name="Anne", alias="mom", number="1006"))
+    mcp.engine.speakers["0badc0de"] = FakeSpeaker("0badc0de", "Zfold7", "android")
+    tok = new_token("trm_")
+    cfg.mcp_tokens.append(McpToken(name="jarvis", token_hash=token_hash(tok), agent_id="a1"))
+    mcp.engine.rts["a1"] = FakeRt(Source("speaker", "Zfold7 speaker", speaker_id="0badc0de"))
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "connect_call",
+                                       "arguments": {"contact": "mom", "ring_first": True}}}, token=tok)
+    assert r["result"]["isError"] and "ring me first" in r["result"]["content"][0]["text"]
+    assert not mcp.engine.calls.ring

@@ -501,12 +501,24 @@ class CallSettings(BaseModel):
     agent_call_pin: str = ""          # DTMF PIN asked before an inbound caller talks to an agent
     max_call_minutes: int = Field(default=60, ge=1, le=600)
     announce_calls: bool = True       # say "Calling Dad" on the speaker before ringing
+    # "ring me first": asking for a call rings this contact (your own extension), and the person you asked
+    # for is dialled and bridged in when you answer, so a request from the phone app is a normal phone call.
+    ring_first_contact: str = ""      # contact id ("" = off)
+    ring_first_on_phone: bool = True  # do it by itself when the request came from the phone app
 
     @field_validator("agent_call_pin")
     @classmethod
     def _pin(cls, v: str) -> str:
         if v and not re.match(r"^[0-9]{4,12}$", v):
             raise ValueError("4-12 digits")
+        return v
+
+    @field_validator("ring_first_contact")
+    @classmethod
+    def _rf(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) > 32 or any(c in v for c in "<>\"'"):
+            raise ValueError("invalid contact id")
         return v
 
 

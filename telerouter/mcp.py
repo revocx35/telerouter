@@ -36,7 +36,9 @@ MAX_BODY = 256 * 1024
 INSTRUCTIONS = (
     "telerouter routes voice: speakers in the home, phone extensions on a PBX, WhatsApp contacts (wa2sip) and "
     "cameras (cam2sip). Contacts have a referred name (e.g. 'dad'); use list_contacts to find them. "
-    "connect_call links a contact to a speaker (or to the phone caller who asked you). phone_message and "
+    "connect_call links a contact to a speaker (or to the phone caller who asked you); when the person asked "
+    "from their phone app it rings their own extension first and bridges the call to them when they answer. "
+    "phone_message and "
     "start_voice_call/say/listen/hang_up let you talk on the phone yourself. announce/ask_speaker use a speaker. "
     "Only call people the user asked you to call.")
 
@@ -164,13 +166,19 @@ class McpServer:
         @tool("connect_call", "calls",
               "Call a contact and connect them for a live conversation with a person: by default the speaker the "
               "current voice request came from (or the phone caller who asked). Returns when the call is dialing. "
+              "With ring_first the person's own extension rings first and the contact is dialled and bridged in "
+              "when they answer (a normal phone call); that is the default when they asked from the phone app. "
               "For a tmux contact (an agent session on a machine) the person is switched to talk to that session "
               "until they say 'back to <your name>'.",
               _obj({"contact": {**S, "description": "referred name or id"},
                     "speaker": {**S, "description": "speaker name, room or id ('the speaker in my room'); omit to use the "
-                                                  "requesting speaker. Ring a speaker even when the request came by phone."}},
+                                                  "requesting speaker. Ring a speaker even when the request came by phone."},
+                    "ring_first": {"type": "boolean",
+                                   "description": "ring 'me first' (the person's own extension) and bridge them to the "
+                                                  "contact when they answer; omit to let telerouter decide from the "
+                                                  "Calls setting and where the request came from"}},
                    ["contact"]))
-        async def connect_call(tok, contact: str, speaker: str = ""):
+        async def connect_call(tok, contact: str, speaker: str = "", ring_first: bool | None = None):
             e = self.engine
             c = self._find_contact(tok, contact)
             src = self._source(tok)
@@ -178,6 +186,7 @@ class McpServer:
                 return self._connect_tmux(tok, c, src, speaker)
             if not src:                                   # placed by an agent on its own, not asked by voice now
                 await self._quiet_gate("calls")
+            conn = None
             if speaker:
                 conn = self._find_speaker(tok, speaker)
             elif src and src.kind == "speaker" and src.speaker_id:
@@ -186,16 +195,30 @@ class McpServer:
                     raise ToolError("the requesting speaker went offline")
                 if not tok.allows_client(conn.id):
                     raise ToolError("this token may not use that speaker")
-            elif src and src.kind == "phone" and src.call_id:
+            cfg = e.store.config.calls
+            me = e.store.contact(cfg.ring_first_contact) if cfg.ring_first_contact else None
+            ring = ring_first
+            if ring is None:
+                ring = bool(me and me.enabled and not speaker and cfg.ring_first_on_phone
+                            and asked_on_a_phone(src, conn))
+            if ring:
+                if not me or not me.enabled:
+                    raise ToolError("no 'ring me first' extension is set (telerouter → Voice & calls → Calls)")
+                if c.id == me.id or (c.number and c.number == me.number and c.kind == me.kind):
+                    raise ToolError(f"that is the extension it rings first ({me.label})")
+                s = await e.calls.ring_bridge(c, me, tok.id, tok.agent_id)
+                return {"call_id": s.id, "status": f"ringing {me.label} first", "to": c.label,
+                        "note": f"{me.label} is ringing; {c.label} is dialled and connected when they answer."}
+            if conn is not None:
+                s = e.calls.call_to_speaker(c, conn)
+                return {"call_id": s.id, "status": "dialing", "to": c.label, "speaker": conn.name}
+            if src and src.kind == "phone" and src.call_id:
                 inbound = e.calls.get(src.call_id)
                 if not inbound:
                     raise ToolError("the phone call has ended")
                 s = e.calls.bridge_to(inbound, c)
                 return {"call_id": s.id, "status": "connecting the phone caller", "to": c.label}
-            else:
-                raise ToolError("which speaker? (no voice request in progress; pass speaker)")
-            s = e.calls.call_to_speaker(c, conn)
-            return {"call_id": s.id, "status": "dialing", "to": c.label, "speaker": conn.name}
+            raise ToolError("which speaker? (no voice request in progress; pass speaker)")
 
         @tool("phone_message", "calls",
               "Phone a contact and speak a message to them (text-to-speech), optionally wait for a spoken reply, "
@@ -498,6 +521,15 @@ _FILLER = {"the", "my", "a", "tmux", "t", "max", "session", "sessions", "termina
 def _squash(text: str) -> str:
     words = re.findall(r"[a-z0-9]+", text.lower().replace("_", " "))
     return "".join(w for w in words if w not in _FILLER)
+
+
+def asked_on_a_phone(src, conn) -> bool:
+    """A voice request from the phone app: its device reports platform 'android' (or 'ios')."""
+    if not src or src.kind != "speaker" or conn is None:
+        return False
+    dev = getattr(conn, "mic_dev", None)
+    platform = (getattr(getattr(dev, "cfg", None), "platform", "") or "").lower()
+    return "android" in platform or "ios" in platform
 
 
 def fuzzy_pick(ref: str, contacts: list[Contact]) -> Contact | None:

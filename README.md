@@ -105,7 +105,8 @@ whatever is on screen, and Jarvis answers as on any speaker: spoken and as text,
 the app). "Hey Jarvis" can also turn the screen on and show the conversation over the lock screen. Calls you ask
 for ("call my dad") run through the phone too. The wake word is recognised on the phone (microWakeWord, as in
 Home Assistant's companion app), so nothing is sent until you say it, and the phone connects only for the
-conversation.
+conversation. Calls you ask for from the phone ring your own extension first (*Ring me first* in *Voice &
+calls*), so "Hey Jarvis, call my mom" gives you an ordinary phone call with her.
 
 Set up: install the app, enter the address you open telerouter with (it must have a publicly trusted
 certificate, e.g. telerouter behind a reverse proxy), and sign in as in the browser: your proxy's login if it
@@ -202,6 +203,15 @@ what you answered. Agents telerouter runs (Jarvis) also get `new_session`: *"sta
 called pokerbot in projects/pokerbot"* starts a fresh Claude Code (or Hermes) in a new tmux session on a
 machine and connects you to it. Allow it per machine (*Agents & machines → edit → New sessions*; off by
 default), with the model and permission mode new sessions get.
+
+## Calls you ask for
+
+*"Hey Jarvis, call my mom"* on a speaker plays the call on that speaker. *Voice & calls → Calls → Ring me
+first* picks **your own extension**: a call you ask for then rings your phone first, and when you answer,
+telerouter dials the contact and says "Connecting you to …" while it rings — a normal phone call, not audio
+inside an app. Asking from the phone app always works this way (even with your phone in your pocket, it
+rings); tick *only when I ask from the phone app* to keep home-speaker calls on the speaker, or name a
+speaker ("call dad on the kitchen speaker") to keep a single call there.
 
 ## Calls into telerouter
 

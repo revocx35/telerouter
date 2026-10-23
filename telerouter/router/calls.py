@@ -5,6 +5,7 @@ Modes of a CallSession:
   agent     an inbound caller talks to an agent (listen/answer loop)   "call Jarvis from my phone"
   mcp       an agent leads the call itself via MCP (say/listen)        phone_message, start_voice_call
   bridge    two calls joined (the caller on the phone asked the agent to connect them)
+  ringbridge  the person's own extension rings first; when they answer, the contact is dialled and bridged
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def end_reason_text(reason: str, label: str) -> str:
         return f"{label} is not reachable right now."
     if "603" in r or "decline" in r or "403" in r:
         return f"{label} declined the call."
-    if "487" in r or "cancel" in r:
+    if "487" in r or "cancel" in r or "no answer" in r:
         return f"{label} didn't answer."
     return f"The call to {label} didn't go through."
 
@@ -79,6 +80,9 @@ class CallSession:
         self.ep_done = asyncio.Event()
         self.digits: asyncio.Queue[str] = asyncio.Queue()
         self.peer: CallSession | None = None    # bridge partner
+        self.me_call: Call | None = None        # ringing bridge: the leg that rings the person asking
+        self.me_audio: SipAudio | None = None
+        self.me_contact: Contact | None = None
         self.transcript: list[dict] = []
 
     def on_far_audio(self, pcm16: bytes) -> None:
@@ -95,6 +99,7 @@ class CallSession:
                 "contact_id": self.contact.id if self.contact else "", "state": self.state,
                 "result": self.result, "client_id": self.client_id, "agent_id": self.agent_id,
                 "started": self.started, "connected_at": self.connected_at,
+                "me": self.me_contact.label if self.me_contact else "",
                 "codec": self.call.codec if self.call else None}
 
 
@@ -132,9 +137,12 @@ class CallManager:
     async def _cleanup(self, s: CallSession) -> None:
         if s.audio:
             s.audio.stop()
-        if s.call and s.call.state != "ended":
-            with contextlib.suppress(Exception):
-                await s.call.hangup("telerouter hung up")
+        if s.me_audio:
+            s.me_audio.stop()
+        for call in (s.call, s.me_call):
+            if call and call.state != "ended":
+                with contextlib.suppress(Exception):
+                    await call.hangup("telerouter hung up")
         s.state = "ended"
         s.ended.set()
         self.sessions.pop(s.id, None)
@@ -154,12 +162,15 @@ class CallManager:
     async def _tts(self, text: str) -> bytes:
         return await self.engine.speech.synthesize_all(text, self.engine.store.config.voice.tts_voice)
 
-    async def _say(self, s: CallSession, text: str) -> None:
-        if not s.audio or not s.call or s.call.state != "active" or not text.strip():
+    async def _say(self, s: CallSession, text: str, audio: SipAudio | None = None,
+                   call: Call | None = None) -> None:
+        audio = audio or s.audio
+        call = call or s.call
+        if not audio or not call or call.state != "active" or not text.strip():
             return
         s.transcript.append({"who": "telerouter", "text": text})
-        s.audio.play(await self._tts(text))
-        await s.audio.drained()
+        audio.play(await self._tts(text))
+        await audio.drained()
 
     async def _listen(self, s: CallSession, timeout: float, cue: bool = True) -> str:
         """Beep, record one utterance from the far end, transcribe it ("" if nothing)."""
@@ -237,22 +248,27 @@ class CallManager:
             display_name=display, contact_user="tr-" + secrets.token_hex(6)))
         return await acc.dial(uri)
 
-    async def _wait_answer(self, s: CallSession, timeout: float) -> bool:
-        call = s.call
+    async def _wait_answer(self, s: CallSession, timeout: float, *extra: asyncio.Event,
+                           call: Call | None = None) -> bool:
+        """Wait for `call` (default: the session's own leg) to be answered. Extra events abort the wait
+        (e.g. the person's phone hung up while the other leg was ringing)."""
+        call = call or s.call
         assert call
         ans = asyncio.create_task(call.answered.wait())
         end = asyncio.create_task(call.ended.wait())
         hup = asyncio.create_task(s.hangup_requested.wait())
+        more = [asyncio.create_task(ev.wait()) for ev in extra]
         try:
-            await asyncio.wait({ans, end, hup}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({ans, end, hup, *more}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for t in (ans, end, hup):
+            for t in (ans, end, hup, *more):
                 t.cancel()
-        if call.state == "active" and not s.hangup_requested.is_set():
+        gone = s.hangup_requested.is_set() or any(t.done() for t in more)
+        if call.state == "active" and not gone:
             return True
         if call.state != "ended":
-            await call.hangup("no answer" if not s.hangup_requested.is_set() else "cancelled")
-            s.result = "no answer" if not s.hangup_requested.is_set() else "cancelled"
+            await call.hangup("cancelled" if gone else "no answer")
+            s.result = "cancelled" if gone else "no answer"
         else:
             s.result = call.end_reason
         return False
@@ -637,6 +653,76 @@ class CallManager:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(s.ended.wait(), 10)
         return {"answered": True, "reply": reply}
+
+    # -- ringing bridge (ring the person's own extension first, then connect them) --------------------------
+    async def ring_bridge(self, target: Contact, me: Contact, token_id: str = "",
+                          agent_id: str = "") -> CallSession:
+        """Ring `me` (the person's own extension); when they answer, call `target` and bridge the two legs.
+        Asking for a call from the phone app this way is a normal phone call instead of audio in the app."""
+        if me.id and me.id == target.id:
+            raise CallError(f"{me.label} is the extension it would ring first")
+        s = CallSession(self, "out", target, target.label, "ringbridge")
+        s.me_contact = me
+        s.token_id, s.agent_id = token_id, agent_id
+        try:
+            s.me_call = await self._dial(me)
+        except Exception as ex:
+            raise CallError(f"couldn't ring {me.label}: {ex}") from ex
+        s.state = "ringing"
+        s.result = "ringing you"
+        self._spawn(s, self._run_ring_bridge(s))
+        return s
+
+    async def _run_ring_bridge(self, s: CallSession) -> None:
+        me = s.me_contact
+        me_call = s.me_call
+        assert me is not None and me_call is not None
+        # 1. the person's own phone rings (the PBX plays its ring-back to them)
+        if not await self._wait_answer(s, self.cfg.ring_timeout, call=me_call):
+            s.result = f"nobody answered {me.label} ({s.result or 'no answer'})"
+            log.info("[call %s] ringing bridge: nobody answered %s", s.id, me.label)
+            return
+        s.me_audio = SipAudio(me_call, on_dtmf=s.on_dtmf)
+        s.me_audio.start()
+        s.connected_at = time.time()
+        s.state = "dialing"
+        # 2. dial the person they asked for; they hear ring-back until it is answered
+        try:
+            s.call = await self._dial(s.contact)         # type: ignore[arg-type]
+        except Exception as ex:
+            s.result = f"failed: {ex}"
+            log.warning("[call %s] ringing bridge: call to %s failed: %s", s.id, s.label, ex)
+            await self._say(s, f"I couldn't call {s.label}.", s.me_audio, me_call)
+            return
+        s.state = "ringing"
+        if self.cfg.announce_calls:
+            await self._say(s, f"Connecting you to {s.label}.", s.me_audio, me_call)
+        s.me_audio.tone(pcmmod.cue("ringback", 60))
+        try:
+            answered = await self._wait_answer(s, self.cfg.ring_timeout, me_call.ended)
+        finally:
+            s.me_audio.tone(None)
+        if not answered:
+            if me_call.state == "ended":                 # they hung up while it rang: nothing to tell them
+                s.result = "you hung up"
+            else:
+                await self._say(s, end_reason_text(s.result, s.label) + " Goodbye.", s.me_audio, me_call)
+            return
+        # 3. both legs up: join them (G.711 each way, prompts/tones off)
+        s.state = "active"
+        s.audio = SipAudio(s.call)
+        s.audio.start()
+        s.me_audio.on_raw = s.audio.send_g711
+        s.audio.on_raw = s.me_audio.send_g711
+        s.result = "connected"
+        log.info("[call %s] ringing bridge: %s <-> %s (%s)", s.id, me.label, s.label, s.call.codec)
+        await self._wait_end(s, me_call.ended)
+        if s.hangup_requested.is_set():
+            s.result = "hung up"
+        elif s.call.state == "ended":
+            s.result = "far end hung up"
+        else:
+            s.result = "you hung up"
 
     # -- call-to-call bridge (a phone caller asked the agent to connect them) --------------------------------------
     def bridge_to(self, inbound: CallSession, contact: Contact) -> CallSession:

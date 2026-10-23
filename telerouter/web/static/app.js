@@ -893,10 +893,12 @@ function integrationForm(i) {
 
 // ---------------------------------------------------------------------------------------------- voice & calls
 async function voice(main) {
-  const [settings, spCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/speakers")]);
+  const [settings, spCfg, ctCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/speakers"),
+    api("GET", "/api/contacts").catch(() => ({ contacts: [] }))]);
   let sp = { health: {}, wake_models: [], voices: [] };
   try { sp = await api("GET", "/api/speech"); } catch { }
   const v = settings.voice, c = settings.calls;
+  const pbxContacts = (ctCfg.contacts || []).filter(x => x.kind === "pbx" && x.number);
   const wake = el("div", {}, (sp.wake_models.length ? sp.wake_models : v.wake_words.map(n => ({ name: n, phrase: n }))).map(m =>
     chk("ww_" + m.name, v.wake_words.includes(m.name), m.phrase)));
   const voices = sp.voices.length ? sel("tts_voice", v.tts_voice, sp.voices.map(x => [x.name, `${x.name}${x.installed ? "" : " (downloads on first use)"}`])) : inp("tts_voice", v.tts_voice);
@@ -933,6 +935,11 @@ async function voice(main) {
       field("PIN before talking to the agent (DTMF)", inp("agent_call_pin", c.agent_call_pin, { placeholder: "none", inputmode: "numeric" })),
       field("Longest call (min)", num("max_call_minutes", c.max_call_minutes))),
     chk("announce_calls", c.announce_calls, "Say \"Calling …\" on the speaker before ringing"),
+    el("div", { class: "form2" },
+      field("Ring me first", sel("ring_first_contact", c.ring_first_contact,
+        [["", "— off —"], ...pbxContacts.map(x => [x.id, `${x.alias || x.name} (${x.number})`])]),
+        "A call you ask for rings this extension first, and the person you asked for is dialled and connected when you answer — so \"call mom\" from the phone app is a normal phone call.")),
+    chk("ring_first_on_phone", c.ring_first_on_phone, "Ring me first only when I ask from the phone app (home speakers keep the whole call on the speaker)"),
     el("div", {}, el("button", { class: "primary", onclick: async () => { await act(() => api("PUT", "/api/settings", { calls: formData(cf) }), "Saved"); } }, "Save")));
   const q = settings.quiet;
   const qStatus = el("div", { class: "hint" }, "…");

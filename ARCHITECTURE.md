@@ -352,6 +352,7 @@ updates `~/.claude/sessions/<pid>.json`, so the next run finds the new transcrip
 | agent | inbound caller talks to the agent: greeting, blip, listen, STT, agent, TTS, loop | inbound policy "talk to agent" |
 | mcp | the agent talks itself: `start_voice_call` + `say`/`listen`/`hang_up`, `phone_message` | MCP |
 | bridge | phone caller <-> another contact (the caller asked the agent to connect them) | MCP `connect_call` from a phone request |
+| ringbridge | your own extension rings, then the contact is dialled and the two legs are joined ("call mom" from the phone app) | MCP `connect_call` with `ring_first` (the default for phone-app requests when *Ring me first* is set) |
 
 ### 5.1 Where calls go
 
@@ -371,6 +372,21 @@ updates `~/.claude/sessions/<pid>.json`, so the next run finds the new transcrip
   DTMF PIN), ring a speaker (announce + ring; the wake word answers), or reject (603). Unknown callers
   are rejected by default.
 
+### 5.3 Ringing bridge
+
+`CallSettings.ring_first_contact` names your own extension (a contact id, "" = off). `ring_bridge()` dials
+it first: the PBX rings your phone; when you answer, telerouter says "Connecting you to X." on that leg
+(unless *Say "Calling …"* is off), dials the contact with a local ring-back tone until it is answered, and
+then joins the two legs as raw G.711 in both directions (`SipAudio.send_g711`, no resampling, no prompts).
+If the contact does not answer you hear why and the call ends; if you hang up, both legs go. The session's
+own `call` is the target leg and `me_call` is yours, so `_cleanup` hangs up both.
+
+`connect_call` uses it when the request came from the phone app (the device's `platform` says android/ios)
+and `ring_first_on_phone` is on — that is how "Hey Jarvis, call my mom" on the phone becomes an ordinary
+phone call instead of audio inside the app. An explicit `speaker` or `ring_first: false` keeps the old
+speaker behaviour; `ring_first: true` forces the ringing bridge (also from a home speaker, or when an agent
+calls on its own).
+
 ## 6. MCP server
 
 Streamable HTTP, JSON responses, stateless, tools only (`mcp.py`). Endpoints: `POST https://…:8443/mcp`
@@ -381,7 +397,7 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 |---|---|---|
 | list_contacts | contacts | referred names, kind, notes, number |
 | list_speakers | clients | online state; tells the agent which speaker the current request came from |
-| connect_call | calls | contact <-> requesting speaker / named speaker / bridge the phone caller |
+| connect_call | calls | contact <-> requesting speaker / named speaker / bridge the phone caller / ring me first (`ring_first`) |
 | phone_message | calls | ring, speak a message (repeat), optionally record a spoken reply, hang up |
 | start_voice_call, say, listen, hang_up, list_calls | calls | agent-led conversation |
 | announce, ask_speaker | speak | talk/ask through a speaker |
