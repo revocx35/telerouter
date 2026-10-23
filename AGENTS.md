@@ -158,6 +158,25 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   the Raqqa laptop's mic heard it and started a turn. While any call that is not on that speaker is going on,
   the wake word no longer starts a turn there (`VoiceAssistant._other_call`; Voice setting `wake_during_calls`
   turns it back on). The wake word still answers/hangs up a call on the speaker itself.
+- **Ringing bridge** (0.11): asking for a call from the phone app rings *your* extension first
+  (`CallSettings.ring_first_contact`, a contact id) and dials the contact when you answer — a normal phone
+  call instead of audio inside the app. "From the phone" is the requesting speaker's *device* platform
+  (`Client.platform`, "android" for the app); an explicit `speaker` or `ring_first: false` keeps the old
+  behaviour and `ring_first: true` forces it. The session's own `call` is the target leg, `me_call` is
+  yours (both joined with `send_g711`, both hung up by `_cleanup`); `_say`/`_wait_answer` take an optional
+  audio/call/extra-events because the person's leg answers before the target leg exists. The phone app
+  itself is a plain speaker: nothing tells it a call is going on, so don't route the same call twice.
+- **A Hermes turn's answer is its `post_llm_call` event, never the pane** (0.11.1): task sessions and tmux
+  sessions telerouter did not start were answered by watching the pane, and a TUI pane contains the
+  reasoning, the tool calls ("ran 1 command"), the status bar and - on a fresh session - the skills banner.
+  That junk became the run's result ("task completed") and was read out to speakers. Hermes hooks are global
+  to the host's install, so `MachineRuntime._hermes_events()` uses any `~/.telerouter/*/events.jsonl` on the
+  machine: `_ask_hermes()` records the file size, types the prompt, and takes the `post_llm_call` whose
+  `user_message` carries our nonce (`HERMES_EVENT_READER` runs on the machine and prints just the reply).
+  The pane path stays for hosts without the hooks. `_settle_hermes()` waits for a new Hermes session's TUI
+  to stop changing before typing. Also: `post_llm_call` carries the whole `conversation_history` (~1 MB, and
+  `MAX_EVENT_LINE` used to drop those lines silently once the conversation grew), so `hook.sh` now trims that
+  field with python and appends the line raw if it cannot.
 - **Scheduled tasks** (0.8, `scheduler.py`): run state is in `/data/tasks.json`, not config.json. A
   `task_session` whose claude has exited (bare shell left in the tmux session) is killed and started again,
   but only if the task started it (0.10.1). Prompts

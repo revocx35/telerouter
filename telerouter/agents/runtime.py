@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("telerouter.agent")
 
-MAX_EVENT_LINE = 1 << 20
+MAX_EVENT_LINE = 8 << 20                 # a turn's event can carry the conversation history (trimmed by hook.sh)
 EVENTS_MAX_BYTES = 4 << 20
 
 # How long start_session watches a fresh tmux session before believing the agent is up: a bad flag or a

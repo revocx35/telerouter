@@ -391,3 +391,21 @@ async def test_fetch_ca_takes_the_top_of_the_presented_chain(tmp_path):
     finally:
         server.close()
     assert ssl.PEM_cert_to_DER_cert(pem) == ssl.PEM_cert_to_DER_cert(ca) and len(fp) == 64
+
+
+def test_hook_script_drops_the_conversation_history(tmp_path):
+    """The turn's event carries the whole conversation (~1 MB): trimming it keeps every event small, and a
+    line that cannot be trimmed is still appended (the hook must never cost the agent its turn)."""
+    d = ClaudeDriver(agent(), str(tmp_path), str(tmp_path), "http://x")
+    hook = tmp_path / "hook.sh"
+    hook.write_text(d.hook_script())
+    hook.chmod(0o700)
+    ev = {"hook_event_name": "post_llm_call", "session_id": "s",
+          "extra": {"user_message": "[telerouter #abc123 · task] go", "assistant_response": "Done.",
+                    "conversation_history": [{"role": "user", "content": "x" * 400000}]}}
+    subprocess.run([str(hook)], input=json.dumps(ev).encode(), check=True)
+    line = (tmp_path / "events.jsonl").read_text().strip()
+    assert len(line) < 2000 and "conversation_history" not in line
+    assert json.loads(line)["extra"]["assistant_response"] == "Done."
+    subprocess.run([str(hook)], input=b'{"broken": ', check=True)
+    assert (tmp_path / "events.jsonl").read_text().splitlines()[-1].strip() == '{"broken":'

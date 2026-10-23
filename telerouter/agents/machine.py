@@ -1,11 +1,17 @@
 """A machine reached over SSH: lists its tmux sessions and lets a speaker or caller talk to the agent in one.
 
-Sessions telerouter did not start have none of its hooks, so replies come from the agent's own records:
+Sessions telerouter did not start have none of its own hooks, so replies come from the agent's own records:
 
 * Claude Code: `~/.claude/sessions/<pid>.json` (pid of the claude process in the pane) names the live
   session id; its transcript `~/.claude/projects/*/<id>.jsonl` gets our prompt (with a nonce) and, when the
   turn is over, a `system`/`turn_duration` entry. The last assistant text of that turn is the answer.
-* Hermes (and anything else): the pane itself: wait until it stops changing, take the new lines.
+* Hermes: its hooks (`post_llm_call`, installed by telerouter for the agent on that machine) append events
+  to `~/.telerouter/<agent>/events.jsonl` for every session on the host, ours or not. `post_llm_call`
+  carries the turn's final answer and the prompt that started it (our nonce); its reasoning, tool calls and
+  TUI belong to the intermediate steps and must never be read as the answer.
+* Anything else, and Hermes hosts without telerouter's hooks: the pane itself - wait until it stops
+  changing, take the new lines. That cuts reasoning, tool calls and the TUI chrome into the answer, so it
+  is the last resort.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -36,6 +43,26 @@ SESSION_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,64}$")
 INTERNAL_PREFIX = "telerouter-"           # sessions of telerouter's own agents are not listed
 NEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
 WORKDIR_RE = re.compile(r"^~?[A-Za-z0-9_./ -]{0,200}$")
+
+# Runs on the machine with Hermes' hook events on stdin: prints the answer of the turn that carried our nonce.
+# Kept on the machine so a turn's event (its conversation_history makes it ~1 MB) is filtered there.
+HERMES_EVENT_READER = r'''import json, sys
+nonce = "#" + sys.argv[1]
+for line in sys.stdin:
+    if nonce not in line:
+        continue
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    extra = ev.get("extra") or {}
+    if ev.get("hook_event_name") != "post_llm_call":
+        continue
+    if nonce not in str(extra.get("user_message") or ""):
+        continue
+    print(json.dumps({"reply": str(extra.get("assistant_response") or "")}))
+    break
+'''
 
 
 class MachineRuntime:
@@ -164,8 +191,27 @@ class MachineRuntime:
         log.info("[%s] started a new %s session %s in %s", m.name, m.agent_kind, name, path)
         if m.agent_kind == "claude":
             await self._settle(name)
+        else:
+            await self._settle_hermes(name)
         found = await self.list_sessions()
         return next((x for x in found if x["name"] == name), {"name": name, "command": m.agent_kind, "path": path})
+
+    async def _settle_hermes(self, session: str, timeout: int = 45) -> None:
+        """Wait until Hermes' TUI has drawn and stopped changing: a prompt typed into a booting screen is lost
+        (and its banner is what a screen reader would call the answer)."""
+        pane = f"={session}:"
+        stable, last = 0, ""
+        for _ in range(timeout):
+            await asyncio.sleep(1)
+            screen = await self._sh(self._tmux("capture-pane", "-p", "-t", pane), timeout=10)
+            if "the agent exited" in screen:
+                log.warning("[%s] %s: hermes exited during start-up", self.machine.name, session)
+                return
+            stable = stable + 1 if screen.strip() and screen == last else 0
+            last = screen
+            if stable >= 3:
+                return
+        log.warning("[%s] %s: the Hermes UI did not settle within %d s", self.machine.name, session, timeout)
 
     async def _settle(self, session: str, timeout: int = 45) -> None:
         """Answer Claude Code's start-up dialogs (workspace trust, auto mode) and wait until the UI is still."""
@@ -249,6 +295,11 @@ class MachineRuntime:
             timeout = timeout or self.machine.reply_timeout
             if self.machine.agent_kind == "claude":
                 return await self._ask_claude(session, prompt, nonce, timeout)
+            events = await self._hermes_events()
+            if events:
+                return await self._ask_hermes(session, prompt, nonce, timeout, events)
+            log.warning("[%s] %s: no Hermes hook events on this machine - reading the screen instead",
+                        self.machine.name, session)
             return await self._ask_screen(session, prompt, timeout)
 
     async def _type(self, session: str, text: str) -> None:
@@ -297,6 +348,51 @@ class MachineRuntime:
                 if newer and newer != path:
                     path, start = newer, 0
         raise AgentError(f"the {session} session is still working; I stopped waiting")
+
+    async def _ask_hermes(self, session: str, prompt: str, nonce: str, timeout: float, path: str) -> str:
+        """Type the prompt and wait for Hermes' own turn-end event carrying that nonce (never the screen)."""
+        home = self.home or (await self._sh('printf %s "$HOME"')).strip()
+        reader = f"{home}/.telerouter/hermes-event-reader.py"
+        if not re.match(r"^/[A-Za-z0-9_./-]+\.py$", reader):
+            raise AgentError(f"could not place the event reader on {self.machine.name} (home {home!r})")
+        if not await self._write_remote(reader, HERMES_EVENT_READER):
+            raise AgentError(f"could not write {reader} on {self.machine.name}")
+        start = int((await self._sh(f"wc -c < {ssh.q(path)} 2>/dev/null || echo 0")).strip() or 0)
+        await self._type(session, prompt)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(2)
+            out = await self._sh(
+                f"F={start}; S=$(wc -c < {ssh.q(path)} 2>/dev/null || echo 0); "
+                f"[ \"${{S:-0}}\" -lt \"$F\" ] && F=0; "
+                f"tail -c +$((F + 1)) {ssh.q(path)} 2>/dev/null | python3 {ssh.q(reader)} {ssh.q(nonce)}",
+                timeout=30)
+            line = out.strip().splitlines()[-1].strip() if out.strip() else ""
+            if not line:
+                continue
+            try:
+                reply = json.loads(line).get("reply")
+            except ValueError:
+                continue
+            return (str(reply or "").strip() or "Done.")
+        raise AgentError(f"the {session} session is still working; I stopped waiting")
+
+    async def _write_remote(self, path: str, content: str) -> bool:
+        tmp = f"{path}.tmp{secrets.token_hex(3)}"
+        out = await self._sh(f"umask 077; mkdir -p {ssh.q(os.path.dirname(path))} && cat > {ssh.q(tmp)} && "
+                             f"chmod 600 {ssh.q(tmp)} && mv -f {ssh.q(tmp)} {ssh.q(path)} && echo ok",
+                             input=content)
+        return "ok" in out
+
+    async def _hermes_events(self) -> str:
+        """The Hermes hook-event file on this machine ("" when telerouter's hooks are not installed there).
+
+        Hermes hooks are global to the host's install, so any of telerouter's Hermes agents there records the
+        events of every session - including task sessions and sessions other people started.
+        """
+        out = await self._sh(f"{_paths()}; ls -t \"$HOME\"/.telerouter/*/events.jsonl 2>/dev/null | head -1")
+        path = out.strip().splitlines()[0].strip() if out.strip() else ""
+        return path if re.match(r"^[A-Za-z0-9_./ -]+\.jsonl$", path) else ""
 
     async def _ask_screen(self, session: str, prompt: str, timeout: float) -> str:
         pane = f"={session}:"

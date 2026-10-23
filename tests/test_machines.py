@@ -206,3 +206,81 @@ async def test_new_session_refusals():
             raise AssertionError(f"expected a refusal for {name} {folder}")
         except AgentError as e:
             assert why in str(e), (name, folder, str(e))
+
+
+async def test_hermes_event_reader_takes_the_turn_with_our_nonce():
+    import subprocess
+    import sys
+    from telerouter.agents.machine import HERMES_EVENT_READER
+    other = {"hook_event_name": "post_llm_call",
+             "extra": {"user_message": "[telerouter #aaaaaa · other] x", "assistant_response": "WRONG"}}
+    mine = {"hook_event_name": "post_llm_call",
+            "extra": {"user_message": "[telerouter #bbbbbb · scheduled task] do it",
+                      "assistant_response": "All four apps are fine."}}
+    end = {"hook_event_name": "on_session_end", "extra": {"completed": "true"}}
+    out = subprocess.run([sys.executable, "-c", HERMES_EVENT_READER, "bbbbbb"],
+                         input="\n".join(json.dumps(e) for e in (other, mine, end)),
+                         text=True, capture_output=True, check=True)
+    assert json.loads(out.stdout)["reply"] == "All four apps are fine."
+
+
+async def test_hermes_reply_comes_from_its_hook_events_not_the_screen():
+    """A Hermes turn's answer is its post_llm_call event: the pane holds reasoning, tool calls and TUI chrome."""
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", agent_kind="hermes"))
+    rt.state, rt.home = "ready", "/root"
+    box = {"nonce": "", "polls": 0}
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if cmd.startswith("export") and "ls -t" in cmd:
+            return "/root/.telerouter/e9a5e65a/events.jsonl\n"
+        if "cat >" in cmd and "hermes-event-reader.py" in cmd:
+            return "ok\n"
+        if cmd.startswith("wc -c"):
+            return "120\n"
+        if "set-buffer" in cmd:
+            box["nonce"] = cmd.split("#", 1)[1][:6]
+            return ""
+        if cmd.startswith("F=120"):
+            box["polls"] += 1
+            return "" if box["polls"] < 2 else json.dumps({"reply": "Nothing new broke today."}) + "\n"
+        assert "capture-pane" not in cmd, cmd          # the screen must not be read at all
+        return ""
+
+    rt._sh = fake_sh
+    reply = await rt.ask("compatibility", "check the apps", "", header='scheduled task "compatibility"',
+                         timeout=20)
+    assert reply == "Nothing new broke today."
+
+
+async def test_hermes_without_hook_events_still_answers_from_the_screen():
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", agent_kind="hermes"))
+    rt.state = "ready"
+    seen = {"pane": 0}
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if cmd.startswith("export") and "ls -t" in cmd:
+            return ""                                   # no telerouter hooks on that host
+        if "set-buffer" in cmd:
+            return ""
+        if "capture-pane" in cmd:
+            seen["pane"] += 1
+            return "old prompt\n" if seen["pane"] == 1 else "old prompt\nHere is the answer.\n"
+        return ""
+
+    rt._sh = fake_sh
+    reply = await rt.ask("pokerbalance", "how is it going", "", timeout=20)
+    assert "Here is the answer." in reply
+
+
+async def test_a_new_hermes_session_is_settled_before_typing():
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", agent_kind="hermes"))
+    rt.state = "ready"
+    screens = ["booting", "booting", "menu", "menu", "menu", "menu", "menu"]
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if "capture-pane" in cmd:
+            return screens.pop(0) if screens else "menu"
+        return ""
+    rt._sh = fake_sh
+    await rt._settle_hermes("newtask")
+    assert screens == ["menu"]                          # three identical screens in a row = settled

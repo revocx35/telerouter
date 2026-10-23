@@ -20,8 +20,24 @@ from ..models import Agent
 
 HOOK_SH = """#!/bin/sh
 # telerouter agent hook: append the event (one JSON line) for telerouter to read over SSH.
-EV={events}
-{{ tr -d '\\n\\r' ; printf '\\n'; }} >> "$EV" 2>/dev/null
+# The turn's conversation_history is dropped: telerouter never reads it and it makes every event ~1 MB,
+# big enough to hit the reader's line limit once a conversation has some history. A line that cannot be
+# trimmed is appended as it came: the hook must never break the agent.
+EV=$EVENTS$
+LINE=$(printf '%s' "$(cat)" | tr -d '\n\r')
+SMALL=""
+if command -v python3 >/dev/null 2>&1; then
+  SMALL=$(printf '%s' "$LINE" | python3 -c 'import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except ValueError:
+    raise SystemExit(1)
+extra = d.get("extra")
+if isinstance(extra, dict):
+    extra.pop("conversation_history", None)
+sys.stdout.write(json.dumps(d))' 2>/dev/null) || SMALL=""
+fi
+printf '%s\n' "${SMALL:-$LINE}" >> "$EV" 2>/dev/null
 exit 0
 """
 
@@ -112,7 +128,7 @@ class Driver:
         return f"{self.dir}/hook.sh"
 
     def hook_script(self) -> str:
-        return HOOK_SH.format(events=shlex.quote(self.events_path))
+        return HOOK_SH.replace("$EVENTS$", shlex.quote(self.events_path))
 
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         """Remote files (path -> (content, mode)) written when the agent session is (re)started."""

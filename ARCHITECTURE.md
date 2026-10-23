@@ -291,11 +291,16 @@ backup of config.json). `agents/machine.py` keeps one SSH connection per machine
 every 60 s (except telerouter's own `telerouter-*`), and the engine merges them into connections of kind
 `tmux` (missing ones are marked gone).
 
-Talking to a session telerouter did not start (no hooks there): Claude Code writes
+Talking to a session telerouter did not start (no hooks of its own there): Claude Code writes
 `~/.claude/sessions/<pid>.json` for the claude process in the pane, naming the live session id and so its
 transcript. telerouter notes the transcript's length, pastes the request (with a nonce) into the pane and
 waits for the `system`/`turn_duration` entry after it; the last assistant text of that turn is the answer.
-Hermes sessions fall back to watching the pane until it is quiet.
+Hermes: its hooks are global to the host's install, so the `events.jsonl` of any telerouter Hermes agent
+there records every session's turns, including task sessions and sessions other people started.
+`post_llm_call` carries the turn's final answer next to the prompt that started it (our nonce), and the
+answer is read from there by a small reader script kept on the machine (the event's `conversation_history`
+would otherwise be ~1 MB over SSH). Only when no such file exists does telerouter watch the pane, and that
+path cuts reasoning, tool calls and TUI chrome into the answer.
 
 **Routing**: MCP `connect_call` with a tmux contact (or the UI's *Connect*) puts a `Route` on the speaker or
 the phone call. Their following requests go to the session instead of the agent; a short "back to <agent>",
@@ -307,7 +312,9 @@ SSH connection (`claude -n <name> [--model] [--permission-mode]`, from the machi
 `hermes` on Hermes machines), answers Claude Code's start-up dialogs (workspace trust, auto mode) on the
 pane (arrow keys first, Enter only once the screen shows the right option selected: the dialog is drawn
 before it reads keys, and a lost arrow + Enter would pick the preselected "No, exit"), waits until the UI is still and `~/.claude/sessions/<pid>.json` exists (so the first routed request
-finds the transcript), lists the sessions (the new one becomes a tmux contact) and routes the requester to
+finds the transcript; on Hermes it waits for the TUI to draw and stop changing - a prompt typed into a
+booting screen is lost, and the banner it shows is what a pane reader would call the answer), lists the
+sessions (the new one becomes a tmux contact) and routes the requester to
 it. Names: `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, not `telerouter-*`, not an existing session; folders: plain
 paths without `..` (quoted; `~` = the SSH user's home).
 
