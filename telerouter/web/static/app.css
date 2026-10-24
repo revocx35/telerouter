@@ -18,14 +18,14 @@ html, body { margin: 0; background: var(--bg); color: var(--text);
 a { color: var(--accent); }
 .boot { padding: 40px; color: var(--muted); }
 
-.layout { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+.layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100vh; }
 nav.side { background: var(--panel); border-right: 1px solid var(--line); padding: 14px 10px; position: sticky; top: 0; height: 100vh; overflow: auto; }
 nav.side .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 16px; padding: 4px 8px 14px; }
 nav.side .brand img { width: 24px; height: 24px; }
 nav.side a { display: block; padding: 7px 10px; border-radius: 7px; color: var(--text); text-decoration: none; margin: 1px 0; }
 nav.side a.active, nav.side a:hover { background: var(--chip); }
 nav.side .foot { color: var(--muted); font-size: 12px; padding: 14px 10px; }
-main { padding: 22px 28px 60px; max-width: 1180px; width: 100%; }
+main { padding: 22px 28px 60px; max-width: 1180px; width: 100%; min-width: 0; }
 h1 { font-size: 21px; margin: 0 0 16px; font-weight: 650; }
 h2 { font-size: 15px; margin: 0 0 10px; font-weight: 650; }
 h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -59,6 +59,7 @@ button:hover { filter: brightness(.97); }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
 a.button { display: inline-block; text-decoration: none; background: var(--chip); border: 1px solid var(--line); border-radius: 7px; padding: 6px 12px; color: inherit; }
 a.button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
+a.button.small { padding: 3px 8px; font-size: 12.5px; }
 button.danger { color: var(--bad); }
 button.small { padding: 3px 8px; font-size: 12.5px; }
 button:disabled { opacity: .55; cursor: default; }
@@ -101,7 +102,7 @@ a.button.wide { display: block; text-align: center; padding: 9px 12px; }
 
 /* phones: a top bar with a menu button; the navigation is a drawer */
 @media (max-width: 760px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout { grid-template-columns: minmax(0, 1fr); }
   header.top { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 4; background: var(--panel);
     border-bottom: 1px solid var(--line); padding: 8px 12px; min-height: 52px; }
   header.top .title { flex: 1; font-weight: 650; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -133,3 +134,17 @@ a.button.wide { display: block; text-align: center; padding: 9px 12px; }
   border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; box-shadow: 0 -4px 16px rgba(0,0,0,.12); margin-top: 8px; }
 .group-head h2 { margin: 0; }
 tr.gone td { opacity: .55; }
+
+/* tmux: the pane's text, drawn by the browser (never a video stream) */
+.term-title { margin: 0; font-size: 19px; }
+.term-status { font-size: 12.5px; color: var(--muted); }
+pre.term { background: #0d1117; color: #c9d1d9; border: 1px solid var(--line); border-radius: 9px;
+  padding: 10px 12px; margin: 10px 0 0; height: 64vh; min-height: 260px; max-width: 100%; overflow: auto; white-space: pre;
+  word-break: normal; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.32; tab-size: 4; resize: vertical; }
+pre.term:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.term-line { min-height: 1.32em; }
+.term-keys { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+.term-input textarea { min-height: 52px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@media (max-width: 760px) { pre.term { height: 48vh; font-size: 11px; } }
+

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 import asyncssh
 
 from ..models import Machine
+from .. import tmux as tmuxmod
 from . import ssh
 from .drivers import claude_dialog_keys, claude_reset_keys
 from .runtime import AgentError, _paths, _short, context_size, turn_end_without_stop
@@ -39,10 +40,10 @@ if TYPE_CHECKING:
 log = logging.getLogger("telerouter.machine")
 
 LIST_INTERVAL = 60
-SESSION_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,64}$")
-INTERNAL_PREFIX = "telerouter-"           # sessions of telerouter's own agents are not listed
-NEW_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$")
-WORKDIR_RE = re.compile(r"^~?[A-Za-z0-9_./ -]{0,200}$")
+SESSION_RE = tmuxmod.SESSION_RE
+INTERNAL_PREFIX = tmuxmod.INTERNAL_PREFIX      # sessions of telerouter's own agents
+NEW_NAME_RE = tmuxmod.NEW_NAME_RE
+WORKDIR_RE = tmuxmod.WORKDIR_RE
 
 # Runs on the machine with Hermes' hook events on stdin: prints the answer of the turn that carried our nonce.
 # Kept on the machine so a turn's event (its conversation_history makes it ~1 MB) is filtered there.
@@ -77,6 +78,9 @@ class MachineRuntime:
         self._task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._refresh = asyncio.Event()
+        self._procs: dict[int, tuple[int, str]] = {}
+        self._procs_at = 0.0
+        self._bg: set[asyncio.Task] = set()
 
     def start(self) -> None:
         if not self._task:
@@ -151,6 +155,141 @@ class MachineRuntime:
         self.sessions = found
         self.engine.merge_tmux_sessions(self.machine, found)
         return found
+
+    # -- the tmux page: every session on the machine, as text -------------------------------------------
+    def agent_sessions(self) -> dict[str, dict]:
+        """tmux session name -> the agent telerouter runs in it (its own agents on this machine)."""
+        cfg = getattr(getattr(self.engine, "store", None), "config", None)
+        out: dict[str, dict] = {}
+        for a in getattr(cfg, "agents", None) or []:
+            if a.machine_id != self.machine.id:
+                continue
+            out[a.tmux_session or f"{INTERNAL_PREFIX}{a.id}"] = {"id": a.id, "name": a.name, "kind": a.kind}
+        return out
+
+    async def processes(self) -> dict[int, tuple[int, str]]:
+        """The machine's process table, cached for a few seconds (a tmux listing is polled)."""
+        now = time.monotonic()
+        if self._procs and now - self._procs_at < 3:
+            return self._procs
+        self._procs = tmuxmod.parse_processes(await self._sh(tmuxmod.processes_cmd(), timeout=20))
+        self._procs_at = now
+        return self._procs
+
+    async def tmux_list(self) -> list[dict]:
+        """Every session on the machine (telerouter's own agent sessions too) with the agent inside it.
+
+        Read-only: one `list-sessions` plus a cached `ps`, so the page can poll it.
+        """
+        out = await self._sh(f"{_paths()}; {tmuxmod.list_cmd()}", timeout=20)
+        sessions = tmuxmod.parse_sessions(out)
+        if not sessions:
+            return []
+        procs = await self.processes()
+        mine = self.agent_sessions()
+        for s in sessions:
+            found = tmuxmod.agents_in_tree(s["pid"], procs)
+            agent = mine.get(s["name"])
+            s["kind"] = agent["kind"] if agent else tmuxmod.classify(s, found)
+            s["agent"] = agent
+            s["agents"] = [tmuxmod.AGENT_LABELS.get(a, a) for a in found] or (
+                [tmuxmod.AGENT_LABELS.get(s["kind"], "")] if s["kind"] in tmuxmod.AGENT_BINS else [])
+        sessions.sort(key=lambda x: (not x["agent"], x["name"].lower()))
+        return sessions
+
+    async def tmux_screen(self, session: str, history: int = 0) -> str:
+        """The pane as text with its colour escapes; `history` scrollback lines above the visible screen."""
+        if not tmuxmod.session_ok(session):
+            raise AgentError("invalid session name")
+        if self.state != "ready":
+            raise AgentError(f"{self.machine.name} is not reachable ({self.state})")
+        cmd = (f"{_paths()}; if tmux has-session -t {ssh.q('=' + session)} 2>/dev/null; then printf 'ok\\n'; "
+               f"{tmuxmod.capture_cmd(session, history)}; else printf 'gone\\n'; fi")
+        out = await self._sh(cmd, timeout=25)
+        head, _, rest = out.partition("\n")
+        if head.strip() != "ok":
+            raise AgentError(f"the session {session} is not running any more")
+        return rest
+
+    async def tmux_send(self, session: str, text: str = "", key: str = "", enter: bool = False) -> None:
+        """Type into a pane: `text` (pasted, so multi-line input arrives whole) and/or one keysym."""
+        if not tmuxmod.session_ok(session):
+            raise AgentError("invalid session name")
+        if self.state != "ready":
+            raise AgentError(f"{self.machine.name} is not reachable ({self.state})")
+        if key:
+            if not tmuxmod.KEYS_RE.match(key):
+                raise AgentError("that key can't be sent")
+            await self._sh(f"{_paths()}; {tmuxmod.send_key_cmd(session, key)}", timeout=15)
+            return
+        text = (text or "").replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+        if not text and not enter:
+            raise AgentError("nothing to send")
+        if not text:
+            await self._sh(f"{_paths()}; {tmuxmod.send_key_cmd(session, 'Enter')}", timeout=15)
+            return
+        buf = f"tr{secrets.token_hex(3)}"
+        await self._sh(f"{_paths()}; {tmuxmod.send_text_cmd(session, text, buf, enter)}", timeout=25)
+
+    async def tmux_new(self, name: str, folder: str = "~", run: str = "agent") -> dict:
+        """Start a session from the tmux page: `run` = agent (the machine's type), claude, hermes or shell."""
+        m = self.machine
+        name = (name or "").strip()
+        if not tmuxmod.new_name_ok(name):
+            raise AgentError("session names: letters, digits, - _ . (up to 40), not starting with telerouter-")
+        folder = " ".join((folder or "~").split()) or "~"
+        if not tmuxmod.folder_ok(folder):
+            raise AgentError("the folder must be a plain path (letters, digits, _ . / - and spaces)")
+        if self.state != "ready":
+            raise AgentError(f"{m.name} is not reachable ({self.state}{': ' + self.error if self.error else ''})")
+        if any(x["name"] == name for x in await self.tmux_list()):
+            raise AgentError(f"a session called {name} already exists on {m.name}")
+        kind = m.agent_kind if run == "agent" else run
+        if kind == "shell":
+            inner = ""
+        else:
+            launch = (self.launch_command(name) if kind == m.agent_kind
+                      else ("hermes" if kind == "hermes" else "claude -n " + ssh.q(name)))
+            inner = f'{_paths()}; {launch}; echo; echo "the agent exited"; exec "${{SHELL:-sh}}" -l'
+        out = await self._sh(f"{tmuxmod.mkdir_cmd(folder)} && {tmuxmod.new_session_cmd(name, folder, inner)} "
+                             f"&& printf ok 2>&1", timeout=30)
+        if "ok" not in out:
+            raise AgentError(f"could not start the session: {out.strip()[:200] or 'tmux failed'}")
+        log.info("[%s] started the tmux session %s (%s) in %s", m.name, name, kind, folder)
+        self._procs_at = 0.0                       # a new pane: the process table is stale now
+        if kind in ("claude", "hermes"):
+            # the start-up dialog (workspace trust, auto mode) is answered in the background while the
+            # page shows the pane; it is the same routine telerouter's own agent sessions go through
+            task = asyncio.create_task(self._settle_new(name, kind))
+            self._bg.add(task)
+            task.add_done_callback(self._bg.discard)
+        found = await self.tmux_list()
+        return next((x for x in found if x["name"] == name), {"name": name, "kind": kind, "path": folder})
+
+    async def _settle_new(self, session: str, kind: str) -> None:
+        try:
+            if kind == "claude":
+                await self._settle(session)
+            else:
+                await self._settle_hermes(session)
+        except Exception as e:                      # the user is watching the pane anyway
+            log.warning("[%s] %s: start-up handling stopped: %s", self.machine.name, session, _short(e))
+
+    async def tmux_kill(self, session: str) -> None:
+        """Close a session. An agent's own session is left to the Agents page (it would just come back)."""
+        if not tmuxmod.session_ok(session):
+            raise AgentError("invalid session name")
+        if session in self.agent_sessions():
+            raise AgentError(f"{session} is the session of an agent: stop or restart the agent under "
+                             f"Agents & machines")
+        cmd = (f"{_paths()}; if tmux has-session -t {ssh.q('=' + session)} 2>/dev/null; then "
+               f"{tmuxmod.kill_cmd(session)} && printf ok; else printf gone; fi")
+        out = await self._sh(cmd, timeout=20)
+        if "ok" not in out and "gone" not in out:
+            raise AgentError("could not close the session")
+        log.info("[%s] closed the tmux session %s", self.machine.name, session)
+        self._procs_at = 0.0
+        self.refresh()
 
     # -- starting a session ---------------------------------------------------------------------------
     def launch_command(self, name: str) -> str:

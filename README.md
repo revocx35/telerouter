@@ -17,6 +17,10 @@ telerouter, through MCP, to call him on WhatsApp, and the call is connected to t
   [wa2sip](https://github.com/revocx35/wa2sip) (WhatsApp calls) and
   [cam2sip](https://github.com/revocx35/cam-to-sip) (cameras). Calls can go to a speaker, to the agent
   (call telerouter from your phone and talk to your agent), or to another call.
+- **tmux sessions in the browser**: *tmux sessions* lists every session on your machines (the agents' own
+  included) with the agent running in each, and opens one as a terminal you can read and type into — drawn
+  from the pane's text, not a VNC/video stream. Start sessions there (`claude`, `hermes` or a plain shell)
+  and close them.
 - **MCP server**: your agent, or any other MCP client, gets tools to list contacts, call people, leave
   phone messages, talk on calls and announce things on speakers.
 - **Connections**: your PBX extensions, WhatsApp contacts, cameras and **tmux sessions** (your own Claude
@@ -163,6 +167,31 @@ during a run, so use `auto` or another mode that doesn't ask. *Calls about a run
 the agent phones you afterwards: its own rules (an agent told in its CLAUDE.md to call when a scheduled check is
 done will call after every run), or only the task. Tasks run during quiet hours too, but quiet hours
 still block their calls.
+
+## tmux sessions from the browser
+
+*tmux sessions* shows every tmux session on every machine telerouter can reach — the sessions of its own
+agents as well as yours — with what runs in each (Claude Code, Hermes, Codex, a plain shell), how many
+windows, the folder and when it was last active.
+
+*Open* gives you the session as a terminal right in the page:
+
+- The screen is **read as text** (`tmux capture-pane`) and drawn by the browser, and what you type is
+  **pasted into the pane** (`tmux paste-buffer`, `send-keys` for single keys). There is no VNC, no screen
+  streaming and no extra port: it stays sharp at any zoom and on a phone, and you can select and copy the
+  text. A pane that isn't changing costs nothing to watch.
+- *Enter* sends what you typed, *Shift+Enter* starts a new line first (so a multi-line message arrives as
+  one), and the key row sends Esc, Tab, arrows and Ctrl-C/D/U/Z/L — enough to answer prompts, pick menu
+  entries and stop a command.
+- *Scrollback* shows the last 300 lines above the visible screen.
+
+*New session* starts a session on a machine in a folder you name: the machine's agent (with its configured
+model and permission mode), Claude Code, Hermes or a plain shell. Claude Code's start-up dialog is answered
+for you while you watch. *Kill* closes a session — except the session of one of telerouter's agents, which
+the *Agents & machines* page owns (it would be restarted straight away).
+
+Everything goes over the SSH connection telerouter already has to the machine, so nothing is installed
+there and no extra port is opened.
 
 ## Home Assistant (lights, switches, …)
 

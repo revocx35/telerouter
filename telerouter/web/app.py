@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import hmac
 import io
 import ipaddress
@@ -17,7 +18,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -27,7 +28,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .. import security
 from .. import sso as ssomod
+from .. import tmux as tmuxmod
 from ..agents import ssh as sshmod
+from ..agents.runtime import AgentError
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
@@ -105,6 +108,19 @@ class HostKeyBody(BaseModel):
 
 class UrlBody(BaseModel):
     url: str = Field(max_length=300)
+
+
+class TmuxSend(BaseModel):
+    """What the tmux page types into a pane: some text (pasted) and/or one key, then optionally Enter."""
+    text: str = Field(default="", max_length=4000)
+    key: str = Field(default="", max_length=16)
+    enter: bool = False
+
+
+class TmuxNew(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    folder: str = Field(default="~", max_length=200)
+    run: Literal["agent", "claude", "hermes", "shell"] = "agent"
 
 
 # -- helpers --------------------------------------------------------------------------------------------------
@@ -938,6 +954,81 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         except Exception as e:
             raise HTTPException(502, str(e)) from e
         return {"sessions": sessions}
+
+    # -- tmux sessions: every session on every machine, as text (the tmux page) --------------------------
+    def tmux_rt(mid: str):
+        m = find(cfg.machines, mid)
+        rt = engine.machine_rts.get(mid)
+        if not rt:
+            raise HTTPException(409, f"{m.name} is disabled or its host key is not confirmed")
+        if rt.state != "ready":
+            raise HTTPException(502, f"{m.name} is not reachable ({rt.state}{': ' + rt.error if rt.error else ''})")
+        return rt
+
+    @app.get("/api/tmux")
+    async def tmux_overview():
+        """Sessions on every machine, including telerouter's own agent sessions, with the agent in each."""
+        async def one(m: Machine) -> dict:
+            rt = engine.machine_rts.get(m.id)
+            row = {"id": m.id, "name": m.name, "host": m.host, "username": m.username, "agent_kind": m.agent_kind,
+                   "state": rt.state if rt else "stopped", "error": rt.error if rt else "", "sessions": []}
+            if not rt:
+                row["error"] = "disabled, or its host key is not confirmed"
+                return row
+            if rt.state != "ready":
+                return row
+            try:
+                row["sessions"] = await rt.tmux_list()
+            except Exception as e:                       # one unreachable machine must not hide the others
+                row["error"] = str(e)[:200]
+            return row
+
+        rows = await asyncio.gather(*(one(m) for m in cfg.machines), return_exceptions=True)
+        return {"machines": [r if isinstance(r, dict) else {"id": "?", "name": "?", "sessions": [],
+                                                            "state": "error", "error": str(r)[:200],
+                                                            "host": "", "username": "", "agent_kind": ""}
+                             for r in rows]}
+
+    @app.get("/api/tmux/{mid}/{session}")
+    async def tmux_screen(mid: str, session: str, history: int = 0, hash: str = ""):
+        """The pane as text; `hash` is what the browser drew last time, so a still pane costs no payload."""
+        rt = tmux_rt(mid)
+        lines = tmuxmod.clamp_history(history)
+        try:
+            text = await rt.tmux_screen(session, lines)
+        except AgentError as e:
+            raise HTTPException(502, str(e)) from e
+        digest = hashlib.sha1(f"{lines}:{text}".encode()).hexdigest()[:16]
+        if hash and hmac.compare_digest(hash, digest):
+            return {"same": True, "hash": digest}
+        return {"same": False, "hash": digest, "session": session, "history": lines, "screen": text[:400_000]}
+
+    @app.post("/api/tmux/{mid}/{session}/send")
+    async def tmux_send(mid: str, session: str, body: TmuxSend):
+        rt = tmux_rt(mid)
+        try:
+            await rt.tmux_send(session, text=body.text, key=body.key, enter=body.enter)
+        except AgentError as e:
+            raise HTTPException(502, str(e)) from e
+        return {"ok": True}
+
+    @app.post("/api/tmux/{mid}")
+    async def tmux_new(mid: str, body: TmuxNew):
+        rt = tmux_rt(mid)
+        try:
+            info = await rt.tmux_new(body.name, body.folder, body.run)
+        except AgentError as e:
+            raise HTTPException(502, str(e)) from e
+        return {"session": info}
+
+    @app.delete("/api/tmux/{mid}/{session}")
+    async def tmux_kill(mid: str, session: str):
+        rt = tmux_rt(mid)
+        try:
+            await rt.tmux_kill(session)
+        except AgentError as e:
+            raise HTTPException(502, str(e)) from e
+        return {"ok": True}
 
     # -- scheduled tasks ----------------------------------------------------------------------------------
     def check_task(t: ScheduledTask) -> None:

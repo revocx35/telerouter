@@ -348,6 +348,42 @@ it sends a gentle note: the size, the advised size, that this is only a suggesti
 after the context grew by another 10% of the limit. `/clear` gives the session a new id; Claude Code
 updates `~/.claude/sessions/<pid>.json`, so the next run finds the new transcript (verified on 2.1.303).
 
+### 4.3 The tmux page (`tmux.py`, `machine.py`)
+
+The *tmux sessions* page lists every tmux session on every machine — including the sessions of telerouter's
+own agents, which the connections list leaves out — with the agent running in each, opens one as a terminal
+in the browser, starts sessions and closes them. `telerouter/tmux.py` holds the command lines and the
+parsers (pure functions, no I/O) so the standalone `tmux_manager` app ships the same file.
+
+**Text, never a video stream.** The pane is read with `tmux capture-pane -p -e` (visible screen; `-S -N` adds
+scrollback when the page asks for history) and drawn by the browser itself: `app.js` parses the SGR escapes
+into coloured spans (`termLines`/`termSpan`). Typing goes in with `set-buffer` + `paste-buffer` (bracketed
+paste, so a multi-line message arrives as one inserted text) and `send-keys` for a single keysym — only
+keysyms in `KEYS_RE` are accepted, so the API can never be talked into an arbitrary `send-keys` argument
+list. There is no VNC/noVNC/ScreenCast, no websocket and no frames: a refresh is a few KB, it stays sharp at
+any zoom and on a phone, and the text can be selected and copied. A still pane costs no payload at all: the
+screen response carries a hash of what was drawn and answers `{"same": true}` while nothing changed.
+
+**Which agent is in a session.** One `list-sessions -F` per machine plus one `ps -eo pid=,ppid=,args=` (cached
+3 s, the page polls): the agent is found by walking the pane's descendants, because the pane's own command is
+often only `bash`/`sh`/`node` — Claude Code is a `claude` binary, Hermes runs as `python3 -I -c <launcher>`
+with `hermes-agent`/`hermes_cli` in its argv (`AGENT_HINTS`). A session that matches one of telerouter's
+agents by its configured `tmux_session` is labelled with that agent's name, config first and pane second.
+
+**API** (all admin + CSRF like every `/api/` route): `GET /api/tmux` (machines queried concurrently; a broken
+machine reports its error instead of hiding the others), `GET /api/tmux/{machine}/{session}?history&hash`,
+`POST …/send {text, key, enter}`, `POST /api/tmux/{machine} {name, folder, run}`, `DELETE …/{session}`.
+
+**Creating**: `mkdir -p <folder> && tmux new-session -d -s <name> -c <folder> '<launch>; echo; echo "the agent
+exited"; exec $SHELL -l'` with `run` = the machine's agent kind, `claude`, `hermes` or `shell` (a bare session).
+An agent session's start-up dialog (workspace trust, auto mode) is answered in the background by the same
+`_settle` routine the agents' own sessions use, so the page shows it being answered rather than waiting.
+
+**Closing** is refused for a session that belongs to one of telerouter's agents — it would be restarted at
+once; the Agents page owns those. Everything goes over the machine's existing asyncssh connection, so there
+is no extra port and nothing to install on the host. The pane keeps its own size (the browser scrolls
+horizontally); the page never resizes an agent's TUI, which would corrupt a running Claude Code/Hermes layout.
+
 ## 5. Calls
 
 `router/calls.py`. Every call is a `CallSession` with one SIP leg (`router/sipaudio.py`: G.711 <-> 16 kHz,

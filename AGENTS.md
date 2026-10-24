@@ -63,7 +63,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 ## Where things live
 
 `telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
-mcp.py, sso.py, scheduler.py, quiet.py), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
+mcp.py, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
 helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
 (telerouter-android) that shows this web UI.
 
@@ -94,6 +94,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   sounds like "Coleco" to Whisper: use distinct names in tests.
 - **tmux targets**: `-t =name` matches a *session* exactly, but pane commands (`send-keys`, `capture-pane`,
   `paste-buffer`) need `=name:` (session:window), otherwise "can't find pane".
+- **The tmux page is text, never a stream** (0.12): `capture-pane -p -e` in, the browser parses the SGR
+  escapes itself (`termLines`/`termSpan` in app.js); typing out as `set-buffer` + `paste-buffer` (multi-line
+  arrives whole) or `send-keys` for a key from `KEYS_RE` only. Which agent runs in a pane is read from `ps`
+  descendants: `pane_current_command` is usually `bash`/`sh`/`node`, Claude Code is a `claude` binary and
+  Hermes is `python3 -I -c <launcher>` with `hermes-agent` in argv, so match `AGENT_HINTS` rather than a
+  binary name. A telerouter agent's session is labelled from its configured `tmux_session` even when its pane
+  looks like `sh`. Never resize the pane from the browser (it scrolls): a resize while Claude Code or Hermes
+  is drawing corrupts its layout. Closing an agent's own session is refused — the Agents page owns it.
+  `telerouter/tmux.py` has no telerouter imports on purpose (the standalone `tmux_manager` ships the same
+  file: change both or neither).
 - A tmux pane keeps old dialog text in its history: detect dialogs only in the last lines and never answer
   the same screen twice (`_handle_startup`).
 - `asyncssh.get_server_host_key()` has no timeout argument: wrap it in `asyncio.wait_for`.
@@ -239,11 +249,18 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.11.2, 2026-10-23)
+## Status (v0.12.0, 2026-10-24)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
+
+0.12 tmux page: 31 unit tests (parsers, command builders, key/name validation, the machine runtime with a
+fake SSH layer, and the API with its CSRF/auth paths) plus a local instance against this host's real tmux,
+driven in a browser: the session list with agent detection, opening a pane, typing a command through the
+page and reading its output back with its colours, Ctrl-C, scrollback, creating a session and closing it (the
+agent session offered no Kill). Not yet exercised in production against a real Claude Code session on CT 105;
+the panes it was checked on were Hermes sessions (209 to 426 columns wide, with colours and status bars).
 
 Verified: 0.11.2 — an agent session restarted while its host's Hermes gateway keeps running no longer gets
 401 on every MCP call (the token is reused from `<dir>/mcp-token`; the unit test covers the reuse and the

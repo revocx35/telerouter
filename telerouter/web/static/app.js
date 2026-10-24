@@ -209,7 +209,8 @@ function ssoForm(d) {
 
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
-  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
+  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tmux", "tmux sessions"],
+  ["tasks", "Scheduled tasks"], ["connections", "Connections"],
   ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
 ];
@@ -235,7 +236,10 @@ function menu(open) { document.querySelector(".layout")?.classList.toggle("menu-
 
 function route() {
   clearInterval(S.timer);
-  const id = (location.hash.replace(/^#\//, "") || "dashboard").split("?")[0];
+  const raw = location.hash.replace(/^#\//, "") || "dashboard";
+  const parts = raw.split("?")[0].split("/");
+  const id = parts[0] || "dashboard";
+  const rest = parts.slice(1).filter(x => x !== "");
   S.page = id;
   menu(false);
   document.querySelectorAll("nav.side a").forEach(a => a.classList.toggle("active", a.dataset.p === id));
@@ -243,11 +247,11 @@ function route() {
   if (t) t.textContent = p ? p[1] : "telerouter";
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
-  const fn = { dashboard, speakers, agents, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+  const fn = { dashboard, speakers, agents, tmux: tmuxPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
     history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
-  fn(main).catch(e => main.replaceChildren(el("div", { class: "err" }, e.message)));
+  fn(main, rest).catch(e => main.replaceChildren(el("div", { class: "err" }, e.message)));
 }
 function poll(fn, ms) { S.timer = setInterval(() => fn().catch(() => {}), ms); }
 
@@ -491,6 +495,7 @@ async function agents(main) {
         el("button", { disabled: !rt, onclick: () => act(() => api("POST", `/api/agents/${a.id}/stop`), "Stopped") }, "Stop session"),
         a.kind === "claude" ? el("button", { disabled: !rt, onclick: () => { if (confirm("Start a fresh conversation? The old one stays in Claude Code's history.")) act(() => api("POST", `/api/agents/${a.id}/new-conversation`), "New conversation"); } }, "New conversation") : "",
         el("button", { disabled: !rt, onclick: async () => { screen.hidden = false; screen.textContent = (await act(() => api("GET", `/api/agents/${a.id}/screen`))).screen || "(empty)"; } }, "Show terminal"),
+        el("a", { class: "button small", href: `#/tmux/${encodeURIComponent(a.machine_id)}/${encodeURIComponent(a.tmux_session || "telerouter-" + a.id)}` }, "Open in tmux"),
         el("span", { class: "spacer" }),
         el("button", { class: "danger", onclick: async () => { if (confirm(`Remove ${a.name}? Its tmux session is closed.`)) { await act(() => api("DELETE", `/api/agents/${a.id}`), "Removed"); route(); } } }, "Remove")),
       screen,
@@ -1023,6 +1028,259 @@ async function mcp(main) {
           el("td", {}, ago(t.last_used)),
           el("td", {}, t.agent_id ? "" : el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))),
     el("div", { class: "card" }, el("h2", {}, "New token"), f));
+}
+
+// ---------------------------------------------------------------------------------------------- tmux
+// Every tmux session on the connected machines. The pane is read as text (`capture-pane`) and typed
+// into with send-keys / a pasted buffer, so the browser draws the terminal itself: no VNC, no stream.
+// Sharp at any zoom, a few KB per refresh, and you can select and copy the text.
+const KIND_LABEL = { claude: "Claude Code", hermes: "Hermes", codex: "Codex", opencode: "OpenCode",
+  aider: "Aider", gemini: "Gemini CLI", "cursor-agent": "Cursor agent", shell: "shell", other: "", "agent-session": "agent session" };
+const TERM16 = ["#484f58", "#ff7b72", "#3fb950", "#d29922", "#79c0ff", "#d2a8ff", "#39c5cf", "#b1bac4",
+  "#6e7681", "#ffa198", "#56d364", "#e3b341", "#a5d6ff", "#e2c5ff", "#76e3ea", "#f0f6fc"];
+
+function xterm256(n) {
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n < 16) return TERM16[n];
+  if (n < 232) {
+    const steps = [0, 95, 135, 175, 215, 255], i = n - 16;
+    return `rgb(${steps[Math.floor(i / 36)]},${steps[Math.floor(i / 6) % 6]},${steps[i % 6]})`;
+  }
+  const v = 8 + (n - 232) * 10;
+  return `rgb(${v},${v},${v})`;
+}
+
+function sgr(st, params) {
+  const p = (params === "" ? "0" : params).split(";").map(x => (x === "" ? 0 : Number(x)));
+  for (let i = 0; i < p.length; i++) {
+    const n = p[i];
+    if (!Number.isFinite(n)) continue;
+    if (n === 0) Object.assign(st, { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, reverse: false });
+    else if (n === 1) st.bold = true;
+    else if (n === 2) st.dim = true;
+    else if (n === 3) st.italic = true;
+    else if (n === 4) st.underline = true;
+    else if (n === 7) st.reverse = true;
+    else if (n === 22) { st.bold = false; st.dim = false; }
+    else if (n === 23) st.italic = false;
+    else if (n === 24) st.underline = false;
+    else if (n === 27) st.reverse = false;
+    else if (n >= 30 && n <= 37) st.fg = TERM16[n - 30];
+    else if (n === 39) st.fg = null;
+    else if (n >= 40 && n <= 47) st.bg = TERM16[n - 40];
+    else if (n === 49) st.bg = null;
+    else if (n >= 90 && n <= 97) st.fg = TERM16[n - 90 + 8];
+    else if (n >= 100 && n <= 107) st.bg = TERM16[n - 100 + 8];
+    else if (n === 38 || n === 48) {
+      const key = n === 38 ? "fg" : "bg";
+      if (p[i + 1] === 5) { const c = xterm256(p[i + 2]); if (c) st[key] = c; i += 2; }
+      else if (p[i + 1] === 2) { st[key] = `rgb(${p[i + 2] || 0},${p[i + 3] || 0},${p[i + 4] || 0})`; i += 4; }
+      else i += 1;
+    }
+  }
+}
+
+// a captured pane -> [[{t, fg, bg, bold, ...}]] (one array per line)
+function termLines(text) {
+  const lines = [];
+  let line = [], buf = "", st = { fg: null, bg: null, bold: false, dim: false, italic: false, underline: false, reverse: false };
+  const flush = () => { if (buf) { line.push({ t: buf, ...st }); buf = ""; } };
+  const push = () => { flush(); lines.push(line); line = []; };
+  const s = String(text || "").replace(/\r\n?/g, "\n");
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "\x1b") {
+      const m = /^\x1b\[([0-9;?]*)([@-~])/.exec(s.slice(i, i + 64));
+      if (m) { flush(); if (m[2] === "m") sgr(st, m[1]); i += m[0].length; continue; }
+      if (s[i + 1] === "]" || s[i + 1] === "P") {              // OSC / DCS: drop up to BEL or ST
+        const end = /^[\s\S]*?(?:\x07|\x1b\\)/.exec(s.slice(i));
+        flush(); i += end ? end[0].length : 1; continue;
+      }
+      flush(); i += 1; continue;
+    }
+    if (ch === "\n") { push(); i++; continue; }
+    buf += ch; i++;
+  }
+  push();
+  for (const ln of lines) {                                   // drop padding, keep coloured bars
+    while (ln.length && !/\S/.test(ln[ln.length - 1].t) && !ln[ln.length - 1].bg) {
+      const last = ln[ln.length - 1];
+      last.t = last.t.replace(/\s+$/, "");
+      if (last.t) break;
+      ln.pop();
+    }
+    const tail = ln[ln.length - 1];
+    if (tail && !tail.bg) tail.t = tail.t.replace(/\s+$/, "");
+  }
+  return lines;
+}
+
+function termSpan(run) {
+  const s = el("span", {}, run.t);
+  if (run.fg) s.style.color = run.fg;
+  if (run.bg) s.style.backgroundColor = run.bg;
+  if (run.bold) s.style.fontWeight = "650";
+  if (run.dim) s.style.opacity = "0.72";
+  if (run.italic) s.style.fontStyle = "italic";
+  if (run.underline) s.style.textDecoration = "underline";
+  if (run.reverse) { s.style.color = run.bg || "#0d1117"; s.style.backgroundColor = run.fg || "#c9d1d9"; }
+  return s;
+}
+
+function termNodes(text) {
+  return termLines(text).map(ln => {
+    const row = el("div", { class: "term-line" });
+    if (!ln.length) { row.append("\u00a0"); return row; }
+    for (const run of ln) row.append(termSpan(run));
+    return row;
+  });
+}
+
+async function tmuxPage(main, rest) {
+  if (rest && rest.length >= 2) return tmuxTerminal(main, rest[0], decodeURIComponent(rest.slice(1).join("/")));
+  const box = el("div");
+  const head = el("div", { class: "row" },
+    el("h1", { class: "term-title hide-sm" }, "tmux sessions"), el("span", { class: "spacer" }),
+    el("button", { onclick: () => load() }, "Refresh"),
+    el("button", { class: "primary", onclick: () => newSession() }, "New session"));
+  main.replaceChildren(head,
+    el("p", { class: "hint" }, "Every tmux session on the machines telerouter can reach, including the agents' own. " +
+      "Open one to see its screen as text and type into it from the browser (no VNC, no video: the pane's text is read and sent). " +
+      "Sessions you start here are ordinary tmux sessions, so you can also attach to them over SSH."),
+    box);
+  let data = { machines: [] };
+  async function load() {
+    data = await api("GET", "/api/tmux");
+    draw();
+  }
+  function newSession() {
+    if (!data.machines.length) { toast("Add a machine under Agents & machines first", true); return; }
+    const f = el("div", {},
+      el("div", { class: "form2" },
+        field("Machine", sel("mid", data.machines[0].id, data.machines.map(m => [m.id, `${m.name} (${m.username}@${m.host})`]))),
+        field("Name", inp("name", "", { placeholder: "e.g. pokerbot", required: true })),
+        field("Folder", inp("folder", "~"), "Created if missing. ~ is the SSH user's home."),
+        field("What runs in it", sel("run", "agent", [["agent", "The machine's agent (as configured)"], ["claude", "Claude Code"],
+          ["hermes", "Hermes"], ["shell", "Just a shell"]]))),
+      el("p", { class: "hint" }, "An agent session is started with the machine's new-session settings (model and permission mode, " +
+        "under Agents & machines) and its start-up dialog is answered for you. You land in the terminal right away."));
+    modal("New tmux session", f, close => [el("button", { class: "primary", onclick: async () => {
+      const d = formData(f);
+      const r = await act(() => api("POST", `/api/tmux/${encodeURIComponent(d.mid)}`,
+        { name: d.name, folder: d.folder, run: d.run }), "Session started");
+      close();
+      location.hash = `#/tmux/${d.mid}/${encodeURIComponent(r.session.name)}`;
+    } }, "Start")]);
+  }
+  function row(m, s) {
+    const what = s.agent ? `${s.agent.name} · ${KIND_LABEL[s.agent.kind] || s.agent.kind}`
+      : (s.agents.length ? s.agents.join(", ") : KIND_LABEL[s.kind] || "");
+    return el("tr", {},
+      el("td", {}, el("b", { class: "mono" }, s.name),
+        s.attached ? el("span", { class: "chip" }, "attached") : "",
+        s.agent ? el("span", { class: "chip ok" }, "agent") : ""),
+      el("td", {}, what ? el("span", {}, what) : el("span", { class: "muted" }, "—"),
+        el("div", { class: "muted" }, `${s.windows} window${s.windows === 1 ? "" : "s"} · ${s.width}×${s.height}` +
+          (s.command ? ` · ${s.command}` : ""))),
+      el("td", { class: "muted mono hide-sm" }, s.path),
+      el("td", { class: "muted hide-sm" }, ago(s.activity)),
+      el("td", {}, el("div", { class: "row" },
+        el("a", { class: "button small", href: `#/tmux/${encodeURIComponent(m.id)}/${encodeURIComponent(s.name)}` }, "Open"),
+        s.kind === "agent-session" || s.agent ? "" : el("button", { class: "small danger", onclick: async () => {
+          if (!confirm(`Close the tmux session ${s.name} on ${m.name}? Whatever runs in it stops.`)) return;
+          await act(() => api("DELETE", `/api/tmux/${encodeURIComponent(m.id)}/${encodeURIComponent(s.name)}`), "Session closed");
+          load();
+        } }, "Kill"))));
+  }
+  function draw() {
+    box.replaceChildren(...(data.machines.length ? data.machines.map(m => el("div", { class: "card" },
+      el("div", { class: "row" }, stateDot(m.state), el("h2", {}, m.name),
+        el("span", { class: "chip" }, m.state), el("span", { class: "muted mono" }, `${m.username}@${m.host}`),
+        el("span", { class: "muted" }, `${m.sessions.length} session${m.sessions.length === 1 ? "" : "s"}`)),
+      m.error ? el("p", { class: "err" }, m.error) : "",
+      m.sessions.length ? el("div", { class: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["Session", "What runs in it", "Folder", "Last activity", ""].map((t, i) =>
+          el("th", { class: i >= 2 && i <= 3 ? "hide-sm" : "" }, t)))),
+        el("tbody", {}, m.sessions.map(s => row(m, s)))))
+        : el("p", { class: "hint" }, m.state === "ready" ? "No tmux session on this machine." : "Waiting for the machine…")))
+      : el("div", { class: "card" }, el("p", { class: "hint" }, "No machine yet. ",
+        el("a", { href: "#/agents" }, "Add the host telerouter reaches over SSH")))));
+  }
+  await load();
+  poll(load, 5000);
+}
+
+async function tmuxTerminal(main, mid, name) {
+  const apiBase = `/api/tmux/${encodeURIComponent(mid)}/${encodeURIComponent(name)}`;
+  const machine = el("span", { class: "muted mono" }, "");
+  const status = el("span", { class: "term-status" }, "connecting…");
+  const pre = el("pre", { class: "term", tabindex: "0" }, "…");
+  const input = el("textarea", { rows: 2, placeholder: "Type to the session. Enter sends, Shift+Enter is a new line." });
+  let hash = "", hist = 0, dead = false;
+
+  async function tick(force) {
+    if (dead || (document.hidden && !force)) return;
+    try {
+      const d = await api("GET", `${apiBase}?history=${hist}&hash=${force ? "" : hash}`);
+      if (d.same) { status.textContent = "live"; return; }
+      hash = d.hash;
+      const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+      pre.replaceChildren(...termNodes(d.screen || ""));
+      if (atEnd) pre.scrollTop = pre.scrollHeight;
+      status.textContent = hist ? `scrollback (last ${hist} lines)` : "live";
+    } catch (e) {
+      dead = true;
+      status.textContent = e.message;
+      pre.replaceChildren(el("div", { class: "err" }, e.message));
+    }
+  }
+  async function send(body, ok) {
+    try {
+      await api("POST", `${apiBase}/send`, body);
+      await tick(true);
+      status.textContent = ok || "sent";
+    } catch (e) { status.textContent = e.message; }
+  }
+  function key(label, keysym) {
+    return el("button", { class: "small", onclick: () => send({ key: keysym }, `sent ${label}`) }, label);
+  }
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+  });
+  async function submit() {
+    const text = input.value;
+    if (!text.trim() && !text.includes("\n")) { await send({ key: "Enter" }, "sent Enter"); return; }
+    input.value = "";
+    input.style.height = "";
+    await send({ text, enter: true }, "sent");
+    input.focus();
+  }
+  const back = el("a", { class: "button small", href: "#/tmux" }, "← All sessions");
+  const histBtn = el("button", { class: "small", onclick: async () => {
+    hist = hist ? 0 : 300; hash = ""; await tick(true);
+    histBtn.textContent = hist ? "Live view" : "Scrollback";
+  } }, "Scrollback");
+  main.replaceChildren(
+    el("div", { class: "row" }, back, el("h1", { class: "term-title mono" }, name), machine, status, el("span", { class: "spacer" }),
+      histBtn, el("button", { class: "small", onclick: () => tick(true) }, "Refresh")),
+    pre,
+    el("div", { class: "term-keys" },
+      el("button", { class: "small primary", onclick: submit }, "Send ↵"),
+      key("Esc", "Escape"), key("Tab", "Tab"), key("↑", "Up"), key("↓", "Down"), key("←", "Left"), key("→", "Right"),
+      key("Ctrl-C", "C-c"), key("Ctrl-D", "C-d"), key("Ctrl-U", "C-u"), key("Ctrl-Z", "C-z"), key("Ctrl-L", "C-l"), key("Space", "Space")),
+    el("div", { class: "term-input" }, input),
+    el("p", { class: "hint" }, "The pane is read as text every second and what you type is pasted into it: agents, menus and " +
+      "shells all work, and nothing is streamed as video. Shift+Enter keeps a line from being sent, so you can answer a " +
+      "multi-line prompt in one go."));
+  machine.textContent = mid;
+  api("GET", "/api/tmux").then(d => {
+    const m = (d.machines || []).find(x => x.id === mid);
+    if (m) machine.textContent = `${m.name} · ${m.username}@${m.host}`;
+  }).catch(() => {});
+  await tick(true);
+  input.focus();
+  poll(() => tick(false), 1000);
 }
 
 // ---------------------------------------------------------------------------------------------- history / logs / account
