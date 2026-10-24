@@ -103,7 +103,10 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   looks like `sh`. Never resize the pane from the browser (it scrolls): a resize while Claude Code or Hermes
   is drawing corrupts its layout. Closing an agent's own session is refused — the Agents page owns it.
   `telerouter/tmux.py` has no telerouter imports on purpose (the standalone `tmux_manager` ships the same
-  file: change both or neither).
+  file: change both or neither). Scheduled-task sessions are marked from `Engine.task_sessions`: a
+  `task_session`'s `tmux_name` and the per-run sessions a `new_session` task keeps in
+  `/data/tasks.json` -> `scheduler.info(t)["sessions"]` (a task that never ran has no session, which only
+  means nothing matches its name).
 - A tmux pane keeps old dialog text in its history: detect dialogs only in the last lines and never answer
   the same screen twice (`_handle_startup`).
 - `asyncssh.get_server_host_key()` has no timeout argument: wrap it in `asyncio.wait_for`.

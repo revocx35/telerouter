@@ -91,9 +91,13 @@ class _Eng:
     def __init__(self):
         self.store = _Store()
         self.merged = None
+        self.tasks = {}
 
     def merge_tmux_sessions(self, m, found):
         self.merged = found
+
+    def task_sessions(self, machine_id):
+        return self.tasks
 
 
 def _machine():
@@ -124,6 +128,44 @@ async def test_tmux_listing_includes_the_agents_own_sessions():
     assert own["kind"] == "hermes" and own["agents"] == ["Hermes"]  # from the config, not guessed from the pane
     assert other["kind"] == "claude" and other["agents"] == ["Claude Code"] and other["agent"] is None
     assert any("ps -eo" in c for c in calls)
+
+
+async def test_a_sessions_used_by_a_scheduled_task_is_marked():
+    eng = _Eng()
+    eng.tasks = {"task-nightly": {"id": "t1", "name": "nightly", "target": "task_session"}}
+    rt = MachineRuntime(eng, _machine())
+    rt.state = "ready"
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        if "list-sessions" in cmd:
+            return ("task-nightly|~|1|~|0|~|1|~|1|~|bash|~|/root|~|10|~|80x24\n"
+                    "pokerbot|~|1|~|0|~|1|~|1|~|bash|~|/root|~|11|~|80x24\n")
+        return "10 1 -bash\n11 1 -bash\n"
+    rt._sh = fake_sh
+    sessions = await rt.tmux_list()
+    marked = {s["name"]: s["task"] for s in sessions}
+    assert marked["task-nightly"] == {"id": "t1", "name": "nightly", "target": "task_session"}
+    assert marked["pokerbot"] is None
+
+
+def test_the_scheduled_tasks_sessions_are_found_from_the_tasks(settings):
+    from telerouter.engine import Engine
+    from telerouter.models import Config, ScheduledTask
+    from telerouter.store import Store
+    store = Store(settings.data_dir)
+    store.config = Config(tasks=[
+        ScheduledTask(name="nightly", prompt="x", target="task_session", machine_id="m1", session_name="task-night"),
+        ScheduledTask(name="mail", prompt="x", target="new_session", machine_id="m1"),
+        ScheduledTask(name="elsewhere", prompt="x", target="new_session", machine_id="m2"),
+        ScheduledTask(name="jarvis", prompt="x", target="agent"),
+    ])
+    eng = Engine(settings, store)
+    eng.scheduler.info = lambda t: {"sessions": ["mail-1024-0900"] if t.name == "mail" else []}
+    got = eng.task_sessions("m1")
+    assert set(got) == {"task-night", "mail-1024-0900"}
+    assert got["task-night"] == {"id": store.config.tasks[0].id, "name": "nightly", "target": "task_session"}
+    assert got["mail-1024-0900"]["target"] == "new_session"
+    assert eng.task_sessions("m3") == {}
 
 
 async def test_the_process_table_is_cached_between_listings():

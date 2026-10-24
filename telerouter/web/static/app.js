@@ -1179,8 +1179,11 @@ async function tmuxPage(main, rest) {
     return el("tr", {},
       el("td", {}, el("b", { class: "mono" }, s.name),
         s.attached ? el("span", { class: "chip" }, "attached") : "",
-        s.agent ? el("span", { class: "chip ok" }, "agent") : ""),
+        s.agent ? el("span", { class: "chip ok" }, "agent") : "",
+        s.task ? el("span", { class: "chip warn", title: `used by the scheduled task "${s.task.name}"` }, "scheduled") : ""),
       el("td", {}, what ? el("span", {}, what) : el("span", { class: "muted" }, "—"),
+        s.task ? el("div", { class: "muted" }, `scheduled task “${s.task.name}”` +
+          (s.task.target === "new_session" ? " (one session per run)" : " (its own session)")) : "",
         el("div", { class: "muted" }, `${s.windows} window${s.windows === 1 ? "" : "s"} · ${s.width}×${s.height}` +
           (s.command ? ` · ${s.command}` : ""))),
       el("td", { class: "muted mono hide-sm" }, s.path),

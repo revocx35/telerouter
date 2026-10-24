@@ -187,11 +187,14 @@ class MachineRuntime:
             return []
         procs = await self.processes()
         mine = self.agent_sessions()
+        tasks = (self.engine.task_sessions(self.machine.id)
+                 if hasattr(self.engine, "task_sessions") else {})
         for s in sessions:
             found = tmuxmod.agents_in_tree(s["pid"], procs)
             agent = mine.get(s["name"])
             s["kind"] = agent["kind"] if agent else tmuxmod.classify(s, found)
             s["agent"] = agent
+            s["task"] = tasks.get(s["name"])
             s["agents"] = [tmuxmod.AGENT_LABELS.get(a, a) for a in found] or (
                 [tmuxmod.AGENT_LABELS.get(s["kind"], "")] if s["kind"] in tmuxmod.AGENT_BINS else [])
         sessions.sort(key=lambda x: (not x["agent"], x["name"].lower()))

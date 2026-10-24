@@ -369,6 +369,9 @@ screen response carries a hash of what was drawn and answers `{"same": true}` wh
 often only `bash`/`sh`/`node` — Claude Code is a `claude` binary, Hermes runs as `python3 -I -c <launcher>`
 with `hermes-agent`/`hermes_cli` in its argv (`AGENT_HINTS`). A session that matches one of telerouter's
 agents by its configured `tmux_session` is labelled with that agent's name, config first and pane second.
+Sessions a **scheduled task** uses are marked too (`Engine.task_sessions`): a `task_session`'s own session
+(`<name>`/`task-<name>`) and every per-run session a `new_session` task still keeps, so the page says which
+runs belong to which task instead of leaving a session nobody recognises.
 
 **API** (all admin + CSRF like every `/api/` route): `GET /api/tmux` (machines queried concurrently; a broken
 machine reports its error instead of hiding the others), `GET /api/tmux/{machine}/{session}?history&hash`,

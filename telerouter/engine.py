@@ -196,6 +196,26 @@ class Engine:
         route.last = time.time()
         return reply
 
+    def task_sessions(self, machine_id: str) -> dict[str, dict]:
+        """tmux session -> the scheduled task that uses it (a task's own session, or a per-run one).
+
+        Used by the tmux page to mark a session as a scheduled task's; a `task_session` that never ran has no
+        session yet, which costs nothing (nothing matches its name).
+        """
+        out: dict[str, dict] = {}
+        for t in self.store.config.tasks:
+            if t.target == "agent" or t.machine_id != machine_id:
+                continue
+            try:
+                names = list(self.scheduler.info(t).get("sessions") or [])
+            except Exception:
+                names = []
+            if t.target == "task_session" and not names:
+                names = [t.tmux_name]
+            for name in names:
+                out[name] = {"id": t.id, "name": t.name, "target": t.target}
+        return out
+
     def merge_tmux_sessions(self, m: Machine, sessions: list[dict]) -> None:
         cfg = self.store.config
         mine = {c.source_ref: c for c in cfg.contacts if c.kind == "tmux" and c.source == m.id}

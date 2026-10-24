@@ -183,7 +183,8 @@ windows, the folder and when it was last active.
 - *Enter* sends what you typed, *Shift+Enter* starts a new line first (so a multi-line message arrives as
   one), and the key row sends Esc, Tab, arrows and Ctrl-C/D/U/Z/L — enough to answer prompts, pick menu
   entries and stop a command.
-- *Scrollback* shows the last 300 lines above the visible screen.
+- *Scrollback* shows the last 300 lines above the visible screen. Sessions used by a scheduled task carry a
+*scheduled* chip and the task's name, so a session nobody recognises still has an owner.
 
 *New session* starts a session on a machine in a folder you name: the machine's agent (with its configured
 model and permission mode), Claude Code, Hermes or a plain shell. Claude Code's start-up dialog is answered
