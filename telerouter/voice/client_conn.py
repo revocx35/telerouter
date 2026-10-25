@@ -12,6 +12,8 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
                     text   {"type": "pong"} / {"type": "button", "action": "talk"|"cancel", "cue": bool}
                            talk with "cue": false = the device played its own start sound (on-device wake
                            word): listening starts at once, audio sent right after the message counts
+                    text   {"type": "assistant", "open": bool}   its assistant sheet opened/closed, so an
+                           agent that is still working knows the person stopped listening (and can call)
   server -> client  binary 16 kHz mono PCM16 LE audio to play
                     text   {"type": "state", "state": "idle|listening|thinking|speaking|ringing|call"}
                            {"type": "flush"}   drop everything queued for playback now

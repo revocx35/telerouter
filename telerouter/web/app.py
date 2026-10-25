@@ -1509,6 +1509,12 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()
+                elif t == "assistant":            # the app's assistant sheet opened/closed (it says so itself)
+                    if isinstance(obj.get("open"), bool):
+                        client.assistant_open = obj["open"]
+                        client.assistant_changed = time.time()
+                        store.save()
+                        log.info("speaker '%s' assistant %s", client.name, "open" if obj["open"] else "closed")
                 elif t == "button":               # the device's buttons act on the speaker using its mic
                     vs = engine.speaker_for_mic(client.id)
                     if vs and obj.get("action") == "talk" and vs.state == "idle":

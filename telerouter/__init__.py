@@ -1,3 +1,3 @@
 """telerouter: agentic smart-speaker manager and voice router."""
 
-__version__ = "0.12.1"
+__version__ = "0.12.2"

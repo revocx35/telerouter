@@ -33,6 +33,23 @@ log = logging.getLogger("telerouter.mcp")
 PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 MAX_BODY = 256 * 1024
 
+
+def _utc(ts: float) -> str | None:
+    """A stored timestamp as an agent-readable UTC string; None when it was never set."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
+
+
+def _ago(ts: float) -> str:
+    """How long ago a timestamp was, in words ("3 min ago"), for a message read out loud."""
+    if not ts:
+        return "a while ago"
+    d = max(0, int(time.time() - ts))
+    if d < 90:
+        return f"{d} s ago"
+    if d < 5400:
+        return f"{round(d / 60)} min ago"
+    return f"{round(d / 3600)} h ago"
+
 INSTRUCTIONS = (
     "telerouter routes voice: speakers in the home, phone extensions on a PBX, WhatsApp contacts (wa2sip) and "
     "cameras (cam2sip). Contacts have a referred name (e.g. 'dad'); use list_contacts to find them. "
@@ -115,6 +132,10 @@ class McpServer:
             raise ToolError(f"no speaker '{ref}' (see list_speakers)")
         conn = e.speakers.get(c.id)
         if not conn:
+            dev = e.store.client(c.mic) if c.mic else None
+            if dev is not None and dev.assistant_open is False:
+                raise ToolError(f"speaker '{c.name}' is offline (its app's voice assistant was closed "
+                                f"{_ago(dev.assistant_changed)}) - call the person with phone_message instead")
             raise ToolError(f"speaker '{c.name}' is offline")
         return conn
 
@@ -151,15 +172,24 @@ class McpServer:
             return {"contacts": out}
 
         @tool("list_speakers", "clients", "List the speakers and whether they are online (a speaker without a "
-              "microphone can only announce).", _obj({}))
+              "microphone can only announce). assistant_open is the app's voice assistant sheet as the device "
+              "reported it: false = the person closed it and will not hear an answer there, so call them "
+              "(phone_message) instead of answering to that speaker; null = the device never said.", _obj({}))
         async def list_speakers(tok):
             e = self.engine
             out = []
             for c in e.store.config.speakers:
                 if c.visible_to_agents and tok.allows_client(c.id):
                     conn = e.speakers.get(c.id)
+                    dev = e.store.client(c.mic) if c.mic else None
+                    open_state = dev.assistant_open if dev else None
+                    if open_state and not conn:
+                        open_state = None            # it said the sheet was open, but the device is gone now
                     out.append({"id": c.id, "name": c.name, "room": c.room, "online": bool(conn),
-                                "state": conn.state if conn else "offline", "microphone": bool(c.mic)})
+                                "state": conn.state if conn else "offline", "microphone": bool(c.mic),
+                                "assistant_open": open_state,
+                                "assistant_changed_at": _utc(dev.assistant_changed) if dev else None,
+                                "device_last_seen_at": _utc(dev.last_seen) if dev else None})
             src = self._source(tok)
             return {"speakers": out, "current_request_from": src.label if src else None}
 

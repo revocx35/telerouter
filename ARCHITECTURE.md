@@ -129,6 +129,7 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 | client -> server | binary | microphone, 16 kHz mono PCM16 LE, 20 ms blocks |
 | client -> server | `{"type":"hello","version","platform","aec","transcript","speech"}` | after connecting; `speech: false` = answers as text only |
 | client -> server | `{"type":"button","action":"talk"\|"cancel"}` | optional push-to-talk |
+| client -> server | `{"type":"assistant","open":true\|false}` | the app's voice assistant sheet opened or closed (kept on the device as `assistant_open` / `assistant_changed`) |
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
 | server -> client | `{"type":"state","state":...}` | idle, listening, thinking, speaking, ringing, call |
 | server -> client | `{"type":"flush"}` | drop queued playback now (barge-in, call ended) |
@@ -442,7 +443,7 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | tool | scope | |
 |---|---|---|
 | list_contacts | contacts | referred names, kind, notes, number |
-| list_speakers | clients | online state; tells the agent which speaker the current request came from |
+| list_speakers | clients | online state; `assistant_open` / `assistant_changed_at` from the device (false = the phone app's sheet was closed, so answer by calling instead); tells the agent which speaker the current request came from |
 | connect_call | calls | contact <-> requesting speaker / named speaker / bridge the phone caller / ring me first (`ring_first`) |
 | phone_message | calls | ring, speak a message (repeat), optionally record a spoken reply, hang up |
 | start_voice_call, say, listen, hang_up, list_calls | calls | agent-led conversation |

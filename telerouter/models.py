@@ -142,6 +142,11 @@ class Client(BaseModel):
     platform: str = ""
     client_version: str = ""
     enabled: bool = True
+    # the app's voice assistant sheet, as the device reported it: True open, False closed, None never said.
+    # A closed sheet means the person cannot hear an answer there (and it usually makes the device
+    # disconnect), so an agent that finishes late can decide to phone them instead (mcp.list_speakers).
+    assistant_open: bool | None = None
+    assistant_changed: float = 0.0            # when the device last opened or closed it
 
     @field_validator("name")
     @classmethod

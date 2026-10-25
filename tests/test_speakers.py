@@ -354,3 +354,27 @@ async def test_a_call_saying_the_wake_word_does_not_start_a_turn_on_a_speaker():
     eng.store.config.voice.wake_during_calls = True                    # the owner wants it anyway
     va._on_wake(vs, "hey_jarvis")
     assert len(started) == 3
+
+
+def test_a_device_says_when_the_apps_assistant_sheet_opens_and_closes(c):
+    """The phone app reports its assistant sheet, so an agent that finishes late can call instead of answering."""
+    import time as _time
+    h = {"X-CSRF-Token": setup_admin(c)}
+    laptop = enroll(c, h, "Zfold7")
+    with c.websocket_connect("/ws/client", headers={"Authorization": f"Bearer {laptop['token']}"}) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "assistant", "open": False})
+        dev = c.app.state.store.config.clients[0]
+        deadline = _time.time() + 5
+        while dev.assistant_open is not False and _time.time() < deadline:
+            _time.sleep(0.02)
+        assert dev.assistant_open is False and dev.assistant_changed > 0
+        first = dev.assistant_changed
+        ws.send_json({"type": "assistant", "open": True})
+        deadline = _time.time() + 5
+        while dev.assistant_open is not True and _time.time() < deadline:
+            _time.sleep(0.02)
+        assert dev.assistant_open is True and dev.assistant_changed >= first
+        ws.send_json({"type": "assistant", "open": "yes"})            # only a real bool is taken
+        _time.sleep(0.1)
+        assert dev.assistant_open is True

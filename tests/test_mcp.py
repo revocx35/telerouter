@@ -24,6 +24,9 @@ class FakeStore:
     def contact(self, cid):
         return next((c for c in self.config.contacts if c.id == cid), None)
 
+    def client(self, cid):
+        return next((c for c in self.config.clients if c.id == cid), None)
+
 
 class FakeCalls:
     """Records what connect_call did instead of dialling."""
@@ -53,6 +56,8 @@ class FakeMic:                                  # a device (ClientConn) as far a
 
 
 class FakeSpeaker:
+    state = "idle"
+
     def __init__(self, sid, name, platform):
         self.id, self.name = sid, name
         self.mic_dev = FakeMic(platform)
@@ -320,3 +325,44 @@ async def test_connect_call_ring_first_needs_a_configured_extension(mcp):
                                        "arguments": {"contact": "mom", "ring_first": True}}}, token=tok)
     assert r["result"]["isError"] and "ring me first" in r["result"]["content"][0]["text"]
     assert not mcp.engine.calls.ring
+
+
+async def test_list_speakers_reports_whether_the_apps_assistant_is_open(mcp):
+    from telerouter.models import Client
+    cfg = mcp.engine.store.config
+    cfg.clients = [Client(id="0000000a", name="Zfold7", platform="android", assistant_open=False,
+                          assistant_changed=1_700_000_000.0)]
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "list_speakers", "arguments": {}}})
+    by = {s["name"]: s for s in r["result"]["structuredContent"]["speakers"]}
+    assert by["Kitchen"]["assistant_open"] is False                   # the phone said the sheet is closed
+    assert by["Kitchen"]["assistant_changed_at"] == "2023-11-14T22:13:20Z"
+    assert by["Office"]["assistant_open"] is None                     # no device behind it: never said
+    cfg.clients[0].assistant_open = True
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": "list_speakers", "arguments": {}}})
+    # it last said open, but the device is not connected now: unknown rather than a stale "true"
+    assert {s["name"]: s for s in r["result"]["structuredContent"]["speakers"]}["Kitchen"]["assistant_open"] is None
+    mcp.engine.speakers["k1"] = FakeSpeaker("k1", "Kitchen", "android")
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                            "params": {"name": "list_speakers", "arguments": {}}})
+    assert {s["name"]: s for s in r["result"]["structuredContent"]["speakers"]}["Kitchen"]["assistant_open"] is True
+
+
+async def test_an_offline_speaker_says_when_the_assistant_was_closed(mcp):
+    from telerouter.models import Client
+    cfg = mcp.engine.store.config
+    cfg.contacts.append(Contact(id="mom", kind="pbx", name="Anne", alias="mom", number="1006"))
+    cfg.clients = [Client(id="0000000a", name="Zfold7", platform="android", assistant_open=False,
+                          assistant_changed=__import__("time").time() - 120)]
+    # not connected: the speaker is offline because the app's assistant was closed
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "connect_call",
+                                       "arguments": {"contact": "mom", "speaker": "Kitchen"}}})
+    text = r["result"]["content"][0]["text"]
+    assert r["result"]["isError"] and "voice assistant was closed" in text and "phone_message" in text
+    cfg.clients[0].assistant_open = True                              # a plain network drop says nothing extra
+    _, r = await call(mcp, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": "connect_call",
+                                       "arguments": {"contact": "mom", "speaker": "Kitchen"}}})
+    assert r["result"]["content"][0]["text"].endswith("is offline")

@@ -252,7 +252,7 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.12.0, 2026-10-24)
+## Status (v0.12.2, 2026-10-25)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
@@ -264,6 +264,18 @@ driven in a browser: the session list with agent detection, opening a pane, typi
 page and reading its output back with its colours, Ctrl-C, scrollback, creating a session and closing it (the
 agent session offered no Kill). Not yet exercised in production against a real Claude Code session on CT 105;
 the panes it was checked on were Hermes sessions (209 to 426 columns wide, with colours and status bars).
+
+0.12.2 assistant-sheet presence (owner: "add a feature to telerouter that lets the agent know if the user
+closed the voice assistant menu in the mobile app so the agent can know if it needs to call the user"): a
+device may send `{"type":"assistant","open":bool}` and the state is stored on its `Client` (`assistant_open`,
+`assistant_changed`), so `list_speakers` answers `assistant_open` (true only while the device is connected, null when it last said
+open but is gone, so nobody answers into a dead speaker) / `assistant_changed_at` / `device_last_seen_at`, and
+`connect_call` on a speaker that is offline *because the sheet was closed* says so
+("...voice assistant was closed 2 min ago) - call the person with phone_message instead"). The agent still
+decides; telerouter only reports. Sender side: the Android app (telerouter-android 0.2.2) sends it when its
+assistant sheet opens and closes. Tests: the ws message lands on the config, `list_speakers` reports open /
+closed / never-said, and the offline hint appears only for a closed sheet. A device that never sends the frame
+keeps `assistant_open: null`, so old clients are unaffected.
 
 Verified: 0.11.2 — an agent session restarted while its host's Hermes gateway keeps running no longer gets
 401 on every MCP call (the token is reused from `<dir>/mcp-token`; the unit test covers the reuse and the
