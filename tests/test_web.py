@@ -59,6 +59,7 @@ def test_cookie_flags_and_security_headers(c):
     assert h["x-frame-options"] == "DENY" and h["x-content-type-options"] == "nosniff"
     assert h["referrer-policy"] == "no-referrer" and "max-age" in h["strict-transport-security"]
     assert c.get("/api/status").headers["cache-control"] == "no-store"
+    assert c.get("/static/app.js").headers["cache-control"] == "no-cache"
 
 
 def test_wrong_password_is_generic_and_locks_out(c):

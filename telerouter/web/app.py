@@ -304,6 +304,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             h["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
             if path.startswith("/api/") or path == "/":
                 h["Cache-Control"] = "no-store"
+            elif path.startswith("/static/"):
+                h["Cache-Control"] = "no-cache"      # revalidate (ETag): a WebView otherwise keeps an old app.js for days
             return resp
 
     app.add_middleware(Guard)

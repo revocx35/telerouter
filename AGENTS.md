@@ -258,7 +258,7 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.13.0, 2026-10-31)
+## Status (v0.13.1, 2026-10-31)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
@@ -315,3 +315,5 @@ moved `--create-if-missing` under the `chat` subcommand, which the old driver di
 `start.sh` now probes which form the installed CLI takes (and reports a launch that dies at once).
 Open idea (not confirmed by the user, don't build unasked): a distinct listening blip / announcement while a
 speaker is routed to a tmux session.
+- **Android app showed the old UI after a release (0.13.0)**: `/static/*` had no Cache-Control, so the app's WebView
+  heuristically cached `app.js` (Last-Modified) for days. Static files now send `no-cache` (revalidate via ETag).
