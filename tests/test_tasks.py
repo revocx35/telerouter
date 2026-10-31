@@ -266,6 +266,56 @@ async def test_hermes_task_session_gets_the_context_reminder_too(tmp_path):
     assert r["context_note"] == "reminded; the agent cleared its context"
 
 
+async def test_a_failed_context_reminder_keeps_the_runs_result(tmp_path):
+    """2026-10-31: the F-droid run was done, then the reminder hit a slow SSH poll; the run showed only
+    "TimeoutError" and lost its answer."""
+    e = _Eng(tmp_path)
+    m = e.store.config.machines[0]
+    t = task(target="task_session", machine_id=m.id, context_limit_k=60)
+    e.store.config.tasks.append(t)
+    sch = Scheduler(e)
+    mrt = e.machine_rts[m.id]
+    mrt.tokens = 81000
+    ask = mrt.ask
+
+    async def slow_reminder(session, text, label, on_wait=None, header="", timeout=None):
+        if "context reminder" in header:
+            raise asyncio.TimeoutError()
+        return await ask(session, text, label, header=header, timeout=timeout)
+    mrt.ask = slow_reminder
+    sch.run_now(t)
+    await _settle(sch)
+    r = sch.st(t.id)["runs"][-1]
+    assert r["status"] == "ok" and r["reply"] == "Done: the report is in report.md."
+    assert r["context_note"].startswith("reminder not answered: the machine did not answer")
+
+    async def broken_reset(session, mode, keep=""):
+        raise asyncio.TimeoutError()
+    mrt.ask, mrt.answer, mrt.reset_context = ask, "TELEROUTER_COMPACT: the open MRs", broken_reset
+    mrt.tokens = 90000
+    sch.run_now(t)
+    await _settle(sch)
+    r = sch.st(t.id)["runs"][-1]
+    assert r["status"] == "ok" and "chose to compact, but it could not be typed" in r["context_note"]
+
+
+async def test_a_timeout_in_a_run_gets_a_readable_error(tmp_path):
+    e = _Eng(tmp_path)
+    m = e.store.config.machines[0]
+    t = task(target="task_session", machine_id=m.id)
+    e.store.config.tasks.append(t)
+    sch = Scheduler(e)
+    mrt = e.machine_rts[m.id]
+
+    async def hung(*a, **k):
+        raise asyncio.TimeoutError()
+    mrt.ask = hung
+    sch.run_now(t)
+    await _settle(sch)
+    r = sch.st(t.id)["runs"][-1]
+    assert r["status"] == "error" and r["error"] != "TimeoutError" and "in time" in r["error"]
+
+
 async def test_own_session_is_started_again_when_its_claude_exited(tmp_path):
     e = _Eng(tmp_path)
     m = e.store.config.machines[0]

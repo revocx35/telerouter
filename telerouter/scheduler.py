@@ -52,6 +52,13 @@ _CLEAR_RE = re.compile(r"^\W*TELEROUTER_CLEAR\W*$", re.M)
 _COMPACT_RE = re.compile(r"^\W*TELEROUTER_COMPACT\b[:\s]*(.*)$", re.M)
 
 
+def _why(e: BaseException) -> str:
+    """A readable error: asyncio's TimeoutError has no message (the run page used to say just "TimeoutError")."""
+    if isinstance(e, asyncio.TimeoutError):
+        return "the machine did not answer an SSH command in time (busy or unreachable)"
+    return str(e) or e.__class__.__name__
+
+
 def reminder_answer(reply: str) -> tuple[str, str]:
     """('clear' | 'compact' | 'keep', what to keep) from the agent's answer to the reminder."""
     if _CLEAR_RE.search(reply or ""):
@@ -186,7 +193,7 @@ class Scheduler:
             run.update(status="error", error="stopped")
             raise
         except (AgentError, OSError, asyncio.TimeoutError) as e:
-            run.update(status="error", error=str(e)[:500] or e.__class__.__name__)
+            run.update(status="error", error=_why(e)[:500])
             log.warning("task %s: failed: %s", t.name, run["error"])
         except Exception as e:
             run.update(status="error", error=str(e)[:500] or e.__class__.__name__)
@@ -258,7 +265,11 @@ class Scheduler:
         run["session"] = name
         reply = await mrt.ask(name, t.prompt, "", header=self._header(t, run), timeout=timeout)
         if t.target == "task_session" and t.context_limit_k:
-            await self._context_check(t, mrt, name, run)
+            try:
+                await self._context_check(t, mrt, name, run)
+            except (AgentError, OSError, asyncio.TimeoutError) as ex:   # never lose the run's own answer
+                run["context_note"] = f"context check failed: {_why(ex)}"
+                log.warning("task %s: %s", t.name, run["context_note"])
         return reply
 
     async def _prune(self, t: ScheduledTask, mrt) -> None:
@@ -291,15 +302,20 @@ class Scheduler:
         text = REMINDER.format(now=round(tokens / 1000), limit=t.context_limit_k)
         try:
             answer = await mrt.ask(session, text, "", header=header, timeout=REMINDER_TIMEOUT)
-        except AgentError as ex:
-            run["context_note"] = f"reminder not answered: {ex}"
+        except (AgentError, OSError, asyncio.TimeoutError) as ex:   # the run itself succeeded: keep its result
+            run["context_note"] = f"reminder not answered: {_why(ex)}"
             return
         choice, keep = reminder_answer(answer)
         if choice == "keep":
             s["reminded"] = tokens
             run["context_note"] = "reminded; the agent kept its context"
         else:
-            await mrt.reset_context(session, choice, keep)
+            try:
+                await mrt.reset_context(session, choice, keep)
+            except (AgentError, OSError, asyncio.TimeoutError) as ex:
+                run["context_note"] = f"the agent chose to {choice}, but it could not be typed: {_why(ex)}"
+                log.warning("task %s: %s", t.name, run["context_note"])
+                return
             s["reminded"] = 0
             run["context_note"] = "reminded; the agent " + ("cleared its context" if choice == "clear"
                                                             else "compacted its context")

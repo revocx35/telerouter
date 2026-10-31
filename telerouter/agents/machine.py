@@ -138,6 +138,15 @@ class MachineRuntime:
         res = await asyncio.wait_for(self.conn.run(cmd, input=input, check=False), timeout)
         return str(res.stdout or "")
 
+    async def _poll(self, cmd: str, timeout: float = 30) -> str:
+        """One poll of a wait loop: a command that hangs on a busy host is skipped, not fatal (only the
+        caller's own deadline ends the wait). A bare TimeoutError used to fail whole scheduled runs."""
+        try:
+            return await self._sh(cmd, timeout=timeout)
+        except asyncio.TimeoutError:
+            log.info("[%s] a poll took over %d s (busy host?) - trying again", self.machine.name, timeout)
+            return ""
+
     def _tmux(self, *args: str) -> str:
         return f"{_paths()}; tmux " + " ".join(ssh.q(x) for x in args)
 
@@ -478,19 +487,42 @@ class MachineRuntime:
             path = f"{self.home}/.claude/projects/{claude_project_dir(cwd)}/{sid}.jsonl"
         return path if re.match(r"^[A-Za-z0-9_./~ -]+\.jsonl$", path) else ""
 
+    async def _answer_dialog(self, session: str) -> bool:
+        """Answer a Claude Code dialog showing in `session` (one we know), so a prompt isn't typed into it."""
+        pane = f"={session}:"
+        screen = await self._poll(self._tmux("capture-pane", "-p", "-t", pane), timeout=15)
+        tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
+        keys = claude_dialog_keys(tail) if tail else None
+        if not keys:
+            return False
+        log.info("[%s] %s: answering a Claude Code dialog before typing", self.machine.name, session)
+        for k in keys:
+            await self._sh(self._tmux("send-keys", "-t", pane, k))
+            await asyncio.sleep(0.3)
+        await asyncio.sleep(1)
+        return True
+
     async def _ask_claude(self, session: str, prompt: str, nonce: str, timeout: float) -> str:
         path = await self.claude_transcript(session)
         if not path:
             raise AgentError(f"no Claude Code is running in the {session} session")
         start = int((await self._sh(f"wc -l < {ssh.q(path)} 2>/dev/null || echo 0")).strip() or 0)
+        await self._answer_dialog(session)
         await self._type(session, prompt)
+        retyped = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
-            out = await self._sh(f"tail -n +{start + 1} {ssh.q(path)} 2>/dev/null | head -c 4000000", timeout=30)
+            out = await self._poll(f"tail -n +{start + 1} {ssh.q(path)} 2>/dev/null | head -c 4000000")
             reply = turn_end_without_stop(out, nonce)
             if reply is not None:
                 return reply or "Done."
+            if f"#{nonce}" not in out and not retyped and time.monotonic() > deadline - timeout + 15:
+                # not accepted yet: a dialog Claude Code opened on its own may have taken the keys
+                if await self._answer_dialog(session):
+                    retyped = True
+                    await self._type(session, prompt)
+                    continue
             if f"#{nonce}" not in out and time.monotonic() > deadline - timeout + 30:
                 # never accepted (e.g. the session was cleared and the file changed): look again once
                 newer = await self.claude_transcript(session)
@@ -511,11 +543,10 @@ class MachineRuntime:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
-            out = await self._sh(
+            out = await self._poll(
                 f"F={start}; S=$(wc -c < {ssh.q(path)} 2>/dev/null || echo 0); "
                 f"[ \"${{S:-0}}\" -lt \"$F\" ] && F=0; "
-                f"tail -c +$((F + 1)) {ssh.q(path)} 2>/dev/null | python3 {ssh.q(reader)} {ssh.q(nonce)}",
-                timeout=30)
+                f"tail -c +$((F + 1)) {ssh.q(path)} 2>/dev/null | python3 {ssh.q(reader)} {ssh.q(nonce)}")
             line = out.strip().splitlines()[-1].strip() if out.strip() else ""
             if not line:
                 continue
@@ -551,7 +582,9 @@ class MachineRuntime:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
-            now = await self._sh(self._tmux("capture-pane", "-p", "-t", pane))
+            now = await self._poll(self._tmux("capture-pane", "-p", "-t", pane))
+            if not now:
+                continue
             changed = changed or now != before
             stable = stable + 1 if now == last else 0
             last = now

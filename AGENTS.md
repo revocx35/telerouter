@@ -140,6 +140,15 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   then Enter works in Claude Code 2.1.302. `/compact` keeps the session id (SessionStart source "compact");
   `/clear` starts a new session id (SessionStart source "clear"), which `AgentRuntime._track` stores as
   `session_uuid` so restarts `--resume` the cleared conversation. The reset waits for the turn's Stop hook.
+- **Scheduled runs failed with a bare "TimeoutError" (0.13.5)**: two causes on 2026-10-31. (1) Every 2 s poll of a
+  wait loop is an SSH command with a 30 s limit; one poll that hung on a busy host (CT 123, load 9 on 4 cores)
+  raised `asyncio.TimeoutError`, which ended the run, and after a successful run it came from the context
+  reminder and threw the run's answer away. Polls now go through `MachineRuntime._poll` (a hung poll is skipped;
+  only the task's own timeout ends the wait), a failed context check/reminder/reset is a `context_note` on a run
+  that stays "ok", and `scheduler._why` turns a timeout into a readable error. (2) Claude Code 2.1.314 opened
+  "Teach auto mode about your environment?" on its own in an idle task session; the run's prompt was typed into
+  it and never reached Claude. `claude_dialog_keys` dismisses it with Escape, `_ask_claude` answers known
+  dialogs before typing and, if the prompt is not in the transcript after 15 s, once more and retypes it.
 - **Hermes clear/context (0.13.4)**: Hermes has no `/clear` that keeps the session name (its `/clear` is
   "clear screen + new session", same as `/new`). The agent's clear types `/new telerouter-<id> #<unix time>`:
   the gateway's `/new <title>` creates the session and then renames it, and `hermes chat -c telerouter-<id>`
@@ -267,7 +276,7 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.13.4, 2026-10-31)
+## Status (v0.13.5, 2026-10-31)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the

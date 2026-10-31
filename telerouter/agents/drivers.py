@@ -271,6 +271,8 @@ def claude_dialog_keys(screen: str) -> list[str] | None:
         return menu_keys(screen, "yes, i accept")
     if "auto mode" in s and "yes, enable" in s:
         return menu_keys(screen, "yes, enable")
+    if "teach auto mode about your environment" in s and "esc to cancel" in s:
+        return ["Escape"]                            # an offer that pops up on its own; it ate a task's prompt
     return None
 
 

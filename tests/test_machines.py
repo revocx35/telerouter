@@ -301,3 +301,58 @@ async def test_hermes_machine_reads_context_from_the_pane_and_clears_with_new():
     await rt.reset_context("task-fdroid", "clear")
     typed = [c for c in sent if "send-keys" in c]
     assert "/new" in typed[0] and "/clear" not in typed[0] and typed[-1].endswith("Enter")
+
+
+TEACH = ("   Teach auto mode about your environment?\n   Claude Code reads this project, your recent Claude sessions\n"
+         "   ❯ Also scan shell history     true\n     Continue\n   ←/→ to change · Enter to continue · Esc to cancel\n")
+
+
+async def test_claude_dialog_is_closed_before_the_prompt_and_a_slow_poll_is_not_fatal():
+    """2026-10-31: Claude Code's "Teach auto mode" offer took a scheduled run's prompt, and one SSH poll that
+    took over 30 s on a busy host ended the run with a bare TimeoutError."""
+    import asyncio
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u"))
+    rt.state = "ready"
+    sent, box = [], {"screen": TEACH, "tail": 0}
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        sent.append(cmd)
+        if "sessions/$c.json" in cmd:
+            return json.dumps({"sessionId": "26e646fc-fdd6-4f2f-ab9d-ff9e40dbc292"})
+        if cmd.startswith("ls -t"):
+            return "/root/.claude/projects/-root/26e646fc-fdd6-4f2f-ab9d-ff9e40dbc292.jsonl\n"
+        if cmd.startswith("wc -l"):
+            return "120\n"
+        if "capture-pane" in cmd:
+            return box["screen"]
+        if "send-keys" in cmd and "Escape" in cmd:
+            box["screen"] = "❯ \n"
+            return ""
+        if "set-buffer" in cmd:
+            assert box["screen"] != TEACH, "typed into the dialog"
+            box["n"] = cmd.split("#", 1)[1][:6]
+            return ""
+        if cmd.startswith("tail -n +121"):
+            box["tail"] += 1
+            if box["tail"] == 1:
+                raise asyncio.TimeoutError()                     # one hung poll
+            return "\n".join([
+                json.dumps({"type": "user", "message": {"content": f"[telerouter #{box['n']} · task] check"}}),
+                json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "All fine."}]}}),
+                json.dumps({"type": "system", "subtype": "turn_duration"})])
+        return ""
+    rt._sh = fake_sh
+    orig, fast = _fast_sleep()
+    asyncio.sleep = fast
+    try:
+        reply = await rt.ask("compatibility", "check", "", header='scheduled task "Compatibility"', timeout=60)
+    finally:
+        asyncio.sleep = orig
+    assert reply == "All fine." and box["tail"] == 2
+    assert any("send-keys" in c and "Escape" in c for c in sent)
+
+
+def test_teach_auto_mode_offer_is_dismissed():
+    from telerouter.agents.drivers import claude_dialog_keys
+    assert claude_dialog_keys(TEACH) == ["Escape"]
+    assert claude_dialog_keys("❯ fix the tests\n") is None
