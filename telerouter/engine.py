@@ -71,6 +71,8 @@ class Engine:
         self.mcp = McpServer(self)
         from .scheduler import Scheduler
         self.scheduler = Scheduler(self)
+        from .messaging import Messaging
+        self.messaging = Messaging(self)
 
     # small facades used by other modules
     @property
@@ -107,6 +109,7 @@ class Engine:
         for t in list(self._tasks):
             t.cancel()
         self.scheduler.stop()
+        await self.messaging.stop()
         for vs in list(self.speakers.values()):
             await vs.close()
         for conn in list(self.clients.values()):
@@ -139,6 +142,7 @@ class Engine:
         await self._apply_machines()
         await self._apply_agents()
         await self._apply_integrations()
+        await self.messaging.sync()
         self.sync_speakers()
         self._sync_now.set()
 

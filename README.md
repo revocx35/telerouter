@@ -168,6 +168,24 @@ the agent phones you afterwards: its own rules (an agent told in its CLAUDE.md t
 done will call after every run), or only the task. Tasks run during quiet hours too, but quiet hours
 still block their calls.
 
+## Messages (web chat and Telegram)
+
+The *Messages* page is a written chat with your assistant, and **Telegram bots** put the same chat in your pocket.
+
+- **Add a bot:** create one with @BotFather (`/newbot`), paste its token into *Messages → Add a bot*. The token stays
+  on the server and is never shown again. telerouter polls Telegram (outbound HTTPS only: no port to open).
+- **Pair your chat:** press *Pair a chat*, then send `/start <code>` to your bot. The code works once and for ten
+  minutes. **Only paired private chats are answered**; everybody else (and every group) gets no reply at all.
+- **Write to the bot** and it goes to the default agent, the same one you talk to by voice.
+- **`/session`** lists the tmux sessions of your machines (with buttons in Telegram); `/session 2` or
+  `/session wa_logger` switches this chat to one: its messages are typed into that session, answers come back.
+  `/session default` goes back to the assistant. Each chat (and the web page) keeps its own choice.
+- **Every answer ends with a footer** naming the tmux session it came from, for example
+  `— Jarvis · tmux telerouter-0a823183 on laptop`.
+- **Agents can write on their own:** the MCP tool `send_message` sends a text to every paired chat (and the
+  Messages page), with the same footer. telerouter's own agents may use it without extra setup; for other MCP
+  tokens tick *send text messages*.
+
 ## tmux sessions from the browser
 
 *tmux sessions* shows every tmux session on every machine telerouter can reach — the sessions of its own

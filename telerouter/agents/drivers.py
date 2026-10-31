@@ -56,6 +56,10 @@ For those messages:
 - If the work takes longer, still finish with a short spoken summary of the result.
 - If an earlier spoken request got no answer from you (e.g. you hit a usage limit), do not carry it out
   later on your own: only act on what the person asks now.
+- Messages headed "[telerouter #... · text message ...]" are typed in a chat (Telegram or telerouter's web page):
+  answer them as normal written text, as short as the question allows (light formatting is fine), not for
+  text-to-speech. Your answer gets a footer naming this tmux session; do not add one. To write to the owner on
+  your own (a finished job, a question), use the telerouter tool send_message.
 - Messages headed "[telerouter #... · scheduled task ...]" are not spoken: they are tasks the owner scheduled
   in telerouter, and nobody is waiting on a speaker or the phone. Do the work completely, then end with a
   short plain summary of the result (it is stored as the run's result).
@@ -328,6 +332,8 @@ sleep "${{TELEROUTER_EXIT_SLEEP:-3}}"
 
     def prompt_text(self, text: str, header: str) -> str:
         # Hermes gets no system-prompt flag from us: the voice rules travel with each request.
+        if "text message" in header:       # typed chat (Telegram, web): the header says how to answer
+            return f"[{header}] {text}"
         return (f"[{header}] {text} -- (Spoken request: answer in one to three short plain sentences for "
                 f"text-to-speech, no markdown. telerouter MCP tools are available for calls and speakers.)")
 

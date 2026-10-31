@@ -75,6 +75,8 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Add inline script/style to the UI or build DOM with `innerHTML` from data (CSP, XSS).
 - Add a state-changing endpoint outside `/api/` or to `PUBLIC` without its own protection (throttle, one-time code).
 - Trust a proxy's user header for login, or disable certificate verification on outbound calls.
+- Answer or log anything for an unpaired Telegram chat, or put a bot token in a log line or exception text
+  (it is part of the request URL: report `type(e).__name__`).
 - Poll the production API with a stored password, or test-call real WhatsApp contacts or cameras.
 
 ## Hard-won facts
@@ -235,6 +237,10 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - SSO login CSRF: the start sets a `SameSite=Lax` binding cookie (Strict would not come back with the provider's
   cross-site redirect). Verified in the Android WebView against a fake provider behind Caddy.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
+- **Messaging** (0.13, `messaging.py`): a chat's footer comes from the target, not from the agent's reply; a text
+  message header must contain "text message" (drivers and the agent instructions key off it). Telegram allows one
+  poller per bot token (HTTP 409 = another program polls it). Agent tokens get `send_message` implicitly
+  (`McpServer._allowed`), other tokens need the `messaging` scope.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
 
 - **Quiet hours** (`quiet.py`): checked in the agent call path, `on_incoming` (603) and the MCP `_quiet_gate`
@@ -252,12 +258,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.12.2, 2026-10-25)
+## Status (v0.13.0, 2026-10-31)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.13 messaging (owner: "a new messaging tab where I can send/receive messages from the agent ... telegram bots ...
+/session to switch tmux session ... write at the bottom which tmux session the message came from"): tests with a
+fake Telegram (httpx MockTransport) for pairing, lockout, strangers, /session, buttons, footers, long answers,
+the token never in logs, `send_message` and the API. Not yet run against the real Telegram API or in prod.
 0.12 tmux page: 31 unit tests (parsers, command builders, key/name validation, the machine runtime with a
 fake SSH layer, and the API with its CSRF/auth paths) plus a local instance against this host's real tmux,
 driven in a browser: the session list with agent detection, opening a pane, typing a command through the

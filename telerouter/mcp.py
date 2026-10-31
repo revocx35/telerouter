@@ -57,6 +57,7 @@ INSTRUCTIONS = (
     "from their phone app it rings their own extension first and bridges the call to them when they answer. "
     "phone_message and "
     "start_voice_call/say/listen/hang_up let you talk on the phone yourself. announce/ask_speaker use a speaker. "
+    "send_message writes a text message to the owner's Telegram. "
     "Only call people the user asked you to call.")
 
 
@@ -366,6 +367,31 @@ class McpServer:
             return {"scheduled": mode, "when": when,
                     "note": "Finish your reply normally; the reset happens right after it."}
 
+        @tool("send_message", "messaging",
+              "Write a text message to the owner on their paired Telegram chats (and the Messages page of "
+              "telerouter): a finished job, a result, a question. Use it only when it is worth interrupting them. "
+              "The message gets a footer saying which tmux session it came from.",
+              _obj({"text": {**S, "description": "the message, plain text, up to 4000 characters"}}, ["text"]))
+        async def send_message(tok, text: str):
+            e = self.engine
+            text = (text or "").strip()
+            if not text:
+                raise ToolError("the message is empty")
+            if len(text) > 4000:
+                raise ToolError("the message is longer than 4000 characters")
+            from .messaging import footer_text
+            agent = e.store.agent(tok.agent_id) if tok.agent_id else None
+            if agent:
+                m = e.store.machine(agent.machine_id)
+                footer = footer_text(agent.session_name, m.name if m else "", agent.name)
+            else:
+                footer = f"— {tok.name}"
+            if not e.messaging.rate_ok(tok.id):
+                raise ToolError("too many messages in a minute; send fewer, longer ones")
+            sent = await e.messaging.notify(text, footer)
+            return {"ok": True, "delivered_to_telegram_chats": sent,
+                    "note": "" if sent else "no paired Telegram chat is online; it is in telerouter's Messages page"}
+
         @tool("announce", "speak", "Say something out loud on a speaker (e.g. a reminder or a notification).",
               _obj({"speaker": S, "text": S}, ["speaker", "text"]))
         async def announce(tok, speaker: str, text: str):
@@ -453,7 +479,7 @@ class McpServer:
     # -- JSON-RPC -------------------------------------------------------------------------------------------
     @staticmethod
     def _allowed(t: Tool, tok: McpToken) -> bool:
-        return t.scope in tok.scopes or (t.scope == "agent" and bool(tok.agent_id))
+        return t.scope in tok.scopes or (t.scope in ("agent", "messaging") and bool(tok.agent_id))
 
     def _visible(self, tok: McpToken) -> list[Tool]:
         return [t for t in self.tools.values() if self._allowed(t, tok)]

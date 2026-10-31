@@ -148,3 +148,12 @@ pre.term:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
 .term-input textarea { min-height: 52px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 @media (max-width: 760px) { pre.term { height: 48vh; font-size: 11px; } }
 
+
+.chatlog { height: 46vh; min-height: 220px; overflow-y: auto; border: 1px solid var(--line, #3334); border-radius: 8px; padding: .6rem; margin: .6rem 0; display: flex; flex-direction: column; gap: .5rem; }
+.msg { max-width: 85%; padding: .45rem .7rem; border-radius: 10px; background: var(--card2, #8881); overflow-wrap: anywhere; }
+.msg.mine { align-self: flex-end; background: var(--accent-bg, #2a6df433); }
+.msg .meta { font-size: .72rem; opacity: .65; margin-bottom: .15rem; }
+.msg .txt { white-space: pre-wrap; }
+.msg .foot { margin-top: .35rem; font-size: .75rem; opacity: .7; border-top: 1px solid #8884; padding-top: .2rem; }
+.composer { display: flex; gap: .5rem; align-items: flex-end; }
+.composer textarea { flex: 1; resize: vertical; }

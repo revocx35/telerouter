@@ -210,7 +210,7 @@ function ssoForm(d) {
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
   ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tmux", "tmux sessions"],
-  ["tasks", "Scheduled tasks"], ["connections", "Connections"],
+  ["messages", "Messages"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
   ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
 ];
@@ -247,7 +247,7 @@ function route() {
   if (t) t.textContent = p ? p[1] : "telerouter";
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
-  const fn = { dashboard, speakers, agents, tmux: tmuxPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+  const fn = { dashboard, speakers, agents, tmux: tmuxPage, messages: messagesPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
     history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
@@ -616,6 +616,91 @@ function agentForm(a, data) {
     await act(() => isNew ? api("POST", "/api/agents", d) : api("PUT", `/api/agents/${a.id}`, d), "Saved");
     close(); route();
   } }, "Save")]);
+}
+
+// ---------------------------------------------------------------------------------------------- messages
+async function messagesPage(main) {
+  let last = 0, target = "default", choices = [], bots = [];
+  const log = el("div", { class: "chatlog" });
+  const picker = el("select", { name: "target", "aria-label": "Talk to" });
+  const box = el("textarea", { name: "text", rows: 2, maxlength: 4000, placeholder: "Write to your assistant… (/session switches tmux session)", "aria-label": "Message" });
+  const botsBox = el("div");
+  const fill = () => {
+    picker.replaceChildren(...choices.map(c => { const o = el("option", { value: c.key }, c.label); if (c.key === target) o.selected = true; return o; }));
+  };
+  const bubble = m => el("div", { class: "msg " + (m.dir === "in" ? "mine" : "theirs"), "data-id": m.id },
+    el("div", { class: "meta" }, (m.dir === "in" ? (m.who || "you") : "agent") + " · " + m.channel + " · " + when(m.at)),
+    el("div", { class: "txt" }, m.text),
+    m.footer ? el("div", { class: "foot" }, m.footer) : null);
+  const add = msgs => {
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+    for (const m of msgs) { if (m.id > last) { log.append(bubble(m)); last = m.id; } }
+    if (stick) log.scrollTop = log.scrollHeight;
+  };
+  const send = async () => {
+    const text = box.value.trim();
+    if (!text) return;
+    box.value = "";
+    await act(() => api("POST", "/api/messages", { text }));
+  };
+  box.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send().catch(() => {}); } });
+  picker.addEventListener("change", async () => {
+    const r = await act(() => api("PUT", "/api/messages/target", { key: picker.value }), "Switched");
+    target = r.target;
+  });
+
+  const drawBots = () => botsBox.replaceChildren(...(bots.length ? bots.map(botCard) : [el("p", { class: "hint" }, "No Telegram bot yet.")]));
+  const reload = async () => {
+    const d = await api("GET", "/api/messaging");
+    bots = d.bots; choices = d.choices; target = d.target;
+    fill(); drawBots();
+    return d;
+  };
+  const botCard = b => el("div", { class: "card" },
+    el("div", { class: "row" }, stateDot(b.state === "ok" ? "ready" : b.state === "error" ? "error" : "connecting"),
+      el("strong", {}, b.name), b.username ? el("span", { class: "chip" }, "@" + b.username) : null,
+      el("span", { class: "hint" }, b.state === "error" ? b.error : b.enabled ? b.state : "turned off")),
+    el("p", { class: "hint" }, b.allowed_chats.length ? "Paired chats:" : "No chat is paired yet: only paired chats get an answer."),
+    el("div", {}, b.allowed_chats.map(c => el("div", { class: "row" }, c.name || String(c.id),
+      el("button", { class: "danger", onclick: async () => { if (confirm(`Unpair ${c.name || c.id}?`)) { await act(() => api("DELETE", `/api/messaging/bots/${b.id}/chats/${c.id}`), "Unpaired"); await reload(); } } }, "Unpair")))),
+    el("div", { class: "row" },
+      el("button", { onclick: async () => {
+        const r = await act(() => api("POST", `/api/messaging/bots/${b.id}/pair`));
+        alert(`Open Telegram, find @${r.username} and send:\n\n/start ${r.code}\n\nThe code works once, for ${Math.round(r.expires_in / 60)} minutes.`);
+        setTimeout(() => reload().catch(() => {}), 15000);
+      } }, "Pair a chat"),
+      el("button", { onclick: async () => { await act(() => api("PUT", `/api/messaging/bots/${b.id}`, { enabled: !b.enabled }), b.enabled ? "Turned off" : "Turned on"); await reload(); } }, b.enabled ? "Turn off" : "Turn on"),
+      el("button", { class: "danger", onclick: async () => { if (confirm(`Remove the bot ${b.name}?`)) { await act(() => api("DELETE", `/api/messaging/bots/${b.id}`), "Removed"); await reload(); } } }, "Remove")));
+  const addForm = () => {
+    const f = el("form", {}, el("div", { class: "form2" }, field("Name", inp("name", "Telegram bot")),
+      field("Bot token", pwd("token", "123456789:AA…"), "From @BotFather (/newbot). Kept on the server and never shown again.")),
+      el("button", { class: "primary", type: "submit" }, "Add bot"));
+    f.addEventListener("submit", async e => {
+      e.preventDefault();
+      const d = Object.fromEntries(new FormData(f));
+      await act(() => api("POST", "/api/messaging/bots", d), "Bot added");
+      f.reset(); await reload();
+    });
+    return f;
+  };
+
+  main.replaceChildren(el("h1", {}, "Messages"),
+    el("div", { class: "card" },
+      el("div", { class: "row" }, el("span", {}, "Talking to"), picker),
+      log,
+      el("div", { class: "composer" }, box, el("button", { class: "primary", onclick: () => send().catch(() => {}) }, "Send")),
+      el("p", { class: "hint" }, "Everything said in your Telegram chats shows up here too. Each answer ends with the tmux session it came from.")),
+    el("h2", {}, "Telegram bots"),
+    el("p", { class: "hint" }, "Create a bot with @BotFather, add its token here, then pair your own chat with the one-time code. Writing to the bot reaches your default assistant; /session lists tmux sessions and switches to one."),
+    botsBox, el("div", { class: "card" }, el("h3", {}, "Add a bot"), addForm()));
+  const d = await reload();
+  add(d.messages);
+  log.scrollTop = log.scrollHeight;
+  poll(async () => {
+    const r = await api("GET", "/api/messages?after=" + last);
+    add(r.messages);
+    if (r.target !== target) { target = r.target; fill(); }
+  }, 2500);
 }
 
 // ---------------------------------------------------------------------------------------------- scheduled tasks
@@ -992,7 +1077,7 @@ async function voice(main) {
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
   const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
-  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"]];
+  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"]];
   const f = el("form", {}, el("div", { class: "form2" }, field("Name", inp("name", "", { placeholder: "e.g. claude on my laptop", required: true }))),
     el("div", {}, SC.map(([k, t]) => chk("s_" + k, true, t))),
     field("Contacts it may use", sel("contacts_mode", "*", [["*", "all visible contacts"], ["pick", "only these…"]])),

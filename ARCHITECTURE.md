@@ -49,6 +49,7 @@ telerouter/
   sso.py               single sign-on: OpenID Connect code flow + PKCE (e.g. Authentik), allowed users/groups
   tls.py               local CA + server certificate (re-issued when names change; CA stays)
   engine.py            wiring: SIP UA + accounts, agent runtimes, integration clients, contact lookups
+  messaging.py         written chat: web page + Telegram bots (pairing, /session, footers), send_message; /data/messages.json
   scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
@@ -387,6 +388,33 @@ An agent session's start-up dialog (workspace trust, auto mode) is answered in t
 once; the Agents page owns those. Everything goes over the machine's existing asyncssh connection, so there
 is no extra port and nothing to install on the host. The pane keeps its own size (the browser scrolls
 horizontally); the page never resizes an agent's TUI, which would corrupt a running Claude Code/Hermes layout.
+
+### 4.4 Messaging (`messaging.py`)
+
+A **chat** is the web page (`web`) or one paired Telegram chat (`tg:<bot id>:<chat id>`). Every chat has a
+target: the default agent (`AgentRuntime.ask` with `Source("message", ...)`) or one tmux session
+(`MachineRuntime.ask(..., header=...)`, the same path as a voice route). The header says "text message ... not
+for text-to-speech", so the answer is written text; `drivers.prompt_text` drops Hermes' spoken-request suffix for
+it. Targets and the last 500 messages live in `/data/messages.json` (0600).
+
+* **Telegram** (`BotRuntime`): long polling `getUpdates` (25 s) with httpx (TLS verified, no redirects), plain-text
+  messages only. The token is in the request path, so the `httpx` logger is silenced and errors are reported by
+  class name, never by `str(exc)`. A Telegram update never blocks the poll loop (one task per update); a chat's
+  messages are serialised by a per-chat lock; `sendChatAction` keeps "typing…" alive while the agent works.
+* **Who may talk** (threat model): only *private* chats listed in `TelegramBot.allowed_chats`. Pairing: the admin
+  UI asks for a one-time code (8 characters, 10 minutes, stored only as SHA-256 in memory, tied to one bot);
+  `/start <code>` from an unknown chat adds it. Five wrong codes block that chat for 15 minutes. Strangers,
+  groups and non-text messages get no answer, so the bot reveals nothing. Slash commands are handled by telerouter
+  and never typed into an agent.
+* **`/session`** lists `choices()`: the default agent first, then every session the machine runtimes know (the
+  list is refreshed when asked). Telegram buttons carry an index into the list that chat was shown (`s:<n>`).
+* **Footer**: every agent answer ends with `— <agent> · tmux <session> on <machine>` (a routed foreign session:
+  `— tmux <session> on <machine>`), stored apart from the text (`footer`) and appended at send time.
+* **`send_message`** (MCP scope `messaging`; telerouter's own agent tokens have it implicitly) writes to every
+  paired chat of every connected bot and to the page; 4000 characters, 20 a minute per token.
+* API (all behind the session + CSRF checks): `GET /api/messaging`, `GET|POST /api/messages`,
+  `PUT /api/messages/target`, `POST|PUT|DELETE /api/messaging/bots[/id]`, `POST .../pair`,
+  `DELETE .../chats/<id>`. `allowed_chats` cannot be set through the API; the token is write-only.
 
 ## 5. Calls
 

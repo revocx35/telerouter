@@ -430,7 +430,7 @@ class Agent(BaseModel):
         return self.tmux_session or f"telerouter-{self.id}"
 
 
-McpScope = Literal["contacts", "calls", "speak", "clients"]
+McpScope = Literal["contacts", "calls", "speak", "clients", "messaging"]
 
 
 class McpToken(BaseModel):
@@ -768,6 +768,43 @@ class SsoSettings(BaseModel):
         return self
 
 
+BOT_TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,60}$")
+
+
+class TelegramChat(BaseModel):
+    """A private chat that may talk to the bot (added by pairing: `/start <code>`)."""
+    id: int
+    name: str = ""
+    added: float = Field(default_factory=time.time)
+
+    @field_validator("name")
+    @classmethod
+    def _n(cls, v: str) -> str:
+        return " ".join(v.split())[:64]
+
+
+class TelegramBot(BaseModel):
+    """A Telegram bot the owner made with @BotFather. Only paired chats are answered, everyone else is ignored."""
+    id: str = Field(default_factory=new_id)
+    name: str = "Telegram bot"
+    token: str = ""                   # write-only (SECRET_FIELDS)
+    enabled: bool = True
+    allowed_chats: list[TelegramChat] = Field(default_factory=list, max_length=20)
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, v: str) -> str:
+        return _name(v)
+
+    @field_validator("token")
+    @classmethod
+    def _token(cls, v: str) -> str:
+        v = v.strip()
+        if v and not BOT_TOKEN_RE.match(v):
+            raise ValueError("that is not a Telegram bot token (it looks like 123456789:AA...)")
+        return v
+
+
 class Config(BaseModel):
     version: int = 1
     admin: Admin | None = None
@@ -788,5 +825,6 @@ class Config(BaseModel):
     quiet: QuietHours = Field(default_factory=QuietHours)
     sso: SsoSettings = Field(default_factory=SsoSettings)
     tasks: list[ScheduledTask] = Field(default_factory=list)
+    telegram_bots: list[TelegramBot] = Field(default_factory=list, max_length=5)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

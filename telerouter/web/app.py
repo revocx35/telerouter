@@ -33,7 +33,7 @@ from ..agents import ssh as sshmod
 from ..agents.runtime import AgentError
 from ..engine import Engine
 from ..logbuffer import LogBuffer
-from ..models import (SECRET_FIELDS, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
+from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
                       Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
                       VoiceSettings)
 from ..router.calls import CallError
@@ -1100,6 +1100,95 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         find(cfg.tasks, tid)
         if not engine.scheduler.stop_run(tid):
             raise HTTPException(409, "it is not running")
+        return {"ok": True}
+
+    # -- messaging (web chat + Telegram bots) -------------------------------------------------------------
+    def bot_out(b: TelegramBot) -> dict:
+        return {**redact(b), **engine.messaging.bot_state(b.id)}
+
+    @app.get("/api/messaging")
+    async def messaging_state():
+        ms = engine.messaging
+        return {"bots": [bot_out(b) for b in cfg.telegram_bots],
+                "choices": await ms.choices(),
+                "target": ms.target_key("web"),
+                "messages": ms.since(0)[-200:], "last": ms.seq}
+
+    @app.get("/api/messages")
+    async def messages_since(after: int = 0):
+        ms = engine.messaging
+        return {"messages": ms.since(max(0, after))[-200:], "last": ms.seq, "target": ms.target_key("web")}
+
+    @app.post("/api/messages")
+    async def send_web_message(payload: dict):
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise HTTPException(422, "write something first")
+        if len(text) > 4000:
+            raise HTTPException(422, "that message is too long (4000 characters)")
+        ms = engine.messaging
+        who = "you"
+        engine._spawn(ms.incoming("web", who, ms.web_channel(), text))
+        return {"ok": True}
+
+    @app.put("/api/messages/target")
+    async def set_web_target(payload: dict):
+        ms = engine.messaging
+        key = str(payload.get("key") or "default")
+        choice = next((c for c in await ms.choices(refresh=True) if c["key"] == key), None)
+        if choice is None:
+            raise HTTPException(404, "no such session")
+        ms.set_target("web", choice)
+        return {"target": ms.target_key("web")}
+
+    def check_bot(b: TelegramBot) -> None:
+        if b.enabled and not b.token:
+            raise HTTPException(422, "paste the bot token from @BotFather")
+
+    @app.post("/api/messaging/bots")
+    async def create_bot(payload: dict):
+        b = merge(TelegramBot, None, {k: v for k, v in payload.items() if k != "allowed_chats"}, protected={"id"})
+        check_bot(b)
+        if any(x.token == b.token for x in cfg.telegram_bots):
+            raise HTTPException(409, "that bot is already added")
+        cfg.telegram_bots.append(b)
+        store.save()
+        await engine.messaging.sync()
+        return bot_out(b)
+
+    @app.put("/api/messaging/bots/{bid}")
+    async def update_bot(bid: str, payload: dict):
+        b = find(cfg.telegram_bots, bid)
+        new = merge(TelegramBot, b, {k: v for k, v in payload.items() if k != "allowed_chats"}, protected={"id"})
+        new.allowed_chats = b.allowed_chats
+        check_bot(new)
+        replace(cfg.telegram_bots, new)
+        store.save()
+        await engine.messaging.sync()
+        return bot_out(new)
+
+    @app.delete("/api/messaging/bots/{bid}")
+    async def delete_bot(bid: str):
+        b = find(cfg.telegram_bots, bid)
+        cfg.telegram_bots.remove(b)
+        store.save()
+        await engine.messaging.sync()
+        return {"ok": True}
+
+    @app.post("/api/messaging/bots/{bid}/pair")
+    async def pair_bot(bid: str):
+        b = find(cfg.telegram_bots, bid)
+        if not b.enabled or engine.messaging.bot_state(b.id)["state"] != "ok":
+            raise HTTPException(409, "the bot is not connected to Telegram yet")
+        code, ttl = engine.messaging.new_pair_code(b.id)
+        return {"code": code, "expires_in": ttl, "username": engine.messaging.bot_state(b.id)["username"]}
+
+    @app.delete("/api/messaging/bots/{bid}/chats/{chat_id}")
+    async def unpair_chat(bid: str, chat_id: int):
+        b = find(cfg.telegram_bots, bid)
+        b.allowed_chats = [c for c in b.allowed_chats if c.id != chat_id]
+        engine.messaging.targets.pop(f"tg:{bid}:{chat_id}", None)
+        store.save()
         return {"ok": True}
 
     AGENT_PROTECTED = {"id", "session_uuid", "mcp_token_id", "host", "port", "username", "host_key"}
