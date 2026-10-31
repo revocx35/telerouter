@@ -31,7 +31,7 @@ import asyncssh
 from ..models import Machine
 from .. import tmux as tmuxmod
 from . import ssh
-from .drivers import claude_dialog_keys, claude_reset_keys
+from .drivers import claude_dialog_keys, claude_reset_keys, hermes_context_size, hermes_reset_keys
 from .runtime import AgentError, _paths, _short, context_size, turn_end_without_stop
 
 if TYPE_CHECKING:
@@ -395,15 +395,22 @@ class MachineRuntime:
         self.refresh()
 
     async def context_tokens(self, session: str) -> int | None:
-        """Context size of the Claude Code conversation in `session` after its last turn (None: unknown)."""
+        """Context size of the agent's conversation in `session` after its last turn (None: unknown).
+        Claude Code: the transcript's last usage. Hermes: its status bar (its hooks and session DB carry
+        only cumulative token counts)."""
+        if self.machine.agent_kind == "hermes":
+            await asyncio.sleep(1)                      # the bar redraws just after the turn's hook
+            return hermes_context_size(await self._sh(self._tmux("capture-pane", "-p", "-t", f"={session}:"),
+                                                      timeout=10))
         path = await self.claude_transcript(session)
         if not path:
             return None
         return context_size(await self._sh(f"tail -n 80 {ssh.q(path)} 2>/dev/null", timeout=15))
 
     async def reset_context(self, session: str, mode: str, keep: str = "") -> None:
-        """Type /clear or /compact into an idle Claude Code session."""
-        keys = claude_reset_keys(mode, keep)
+        """Type /clear or /compact (Hermes: /new or /compress) into an idle agent session."""
+        keys = (hermes_reset_keys(mode, keep) if self.machine.agent_kind == "hermes"
+                else claude_reset_keys(mode, keep))
         if not keys or not SESSION_RE.match(session):
             raise AgentError(f"can't {mode} that session")
         pane = f"={session}:"

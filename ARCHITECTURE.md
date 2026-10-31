@@ -250,9 +250,11 @@ returns `app_link`, and `Authorization: Bearer` still works on `/ws/client`.
 
 **Context management**: after every turn telerouter reads the context size from the transcript's last
 `usage` (input + cache + output tokens) and puts it in the next voice request's header ("context 112k
-tokens"). The agent-only MCP tools `context_status` and `reset_context(mode, keep)` let the agent decide to
-compact (keeping what it names) or clear; telerouter types `/compact <keep>` / `/clear` (Hermes:
-`/compress`) into the pane right after the current turn's Stop hook, never during a voice request.
+tokens"; Hermes: the status bar after each `on_session_end`). The agent-only MCP tools `context_status` and
+`reset_context(mode, keep)` let the agent decide to compact (keeping what it names) or clear; telerouter types
+`/compact <keep>` / `/clear` (Hermes: `/compress <keep>` / `/new telerouter-<id> #<time>`, a titled new
+session that `hermes chat -c telerouter-<id>` resumes after restarts) into the pane right after the current
+turn's Stop hook, never during a voice request.
 
 **Extra MCP servers** (`Agent.mcp_servers`, e.g. Home Assistant's `/api/mcp`): added to Claude's
 `mcp.json` (with `permissions.allow: mcp__<name>` when auto-approve is on) or to Hermes' `mcp_servers`
@@ -342,13 +344,15 @@ requests. With `calls: "task"` the header (or, for an agent, a line after the pr
 message or announce anything about this run unless the task asks you to". MCP `_source()` treats a
 scheduled run like the agent acting on its own (no requesting speaker, quiet hours apply).
 
-**Context reminder** (`task_session`, Claude Code, `context_limit_k` > 0): after the run telerouter reads the
-context size from the session's transcript (the usage of the last assistant message). At or above the limit
+**Context reminder** (`task_session`, Claude Code or Hermes, `context_limit_k` > 0): after the run telerouter
+reads the context size from the session's transcript (the usage of the last assistant message; Hermes: its
+status bar, which shows the last prompt's size when the pane is at least 76 columns wide). At or above the limit
 it sends a gentle note: the size, the advised size, that this is only a suggestion, and how to answer.
 `TELEROUTER_CLEAR` on its own line makes telerouter type `/clear`, `TELEROUTER_COMPACT: <keep>` makes it type
 `/compact <keep>`, and anything else ("keeping it") makes telerouter remember the size and remind again only
 after the context grew by another 10% of the limit. `/clear` gives the session a new id; Claude Code
 updates `~/.claude/sessions/<pid>.json`, so the next run finds the new transcript (verified on 2.1.303).
+On Hermes the clear is `/new` and the compact `/compress <keep>`.
 
 ### 4.3 The tmux page (`tmux.py`, `machine.py`)
 

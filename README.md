@@ -159,7 +159,7 @@ cron expression, in a time zone. Each task runs in one of three places:
   run. Give it an **advised context size** (e.g. 300 = 300k tokens): when the context is above it after a
   run, the agent gets a gentle reminder that its context is high and that it may clear or compact it if it
   isn't working on something and doesn't need it. The agent decides. If it keeps its context, it is
-  reminded again only after its context has grown another 10%.
+  reminded again only after its context has grown another 10%. Works with Claude Code and Hermes.
 
 The page keeps each run's answer, how long it took and the session it ran in, with *Run now* and *Stop run*.
 Sessions use the machine's new-session model and permission mode. Nobody can answer a permission prompt

@@ -20,7 +20,7 @@ from .. import __version__
 from ..models import Agent, McpToken
 from ..security import new_token, token_hash, token_matches
 from . import ssh
-from .drivers import Driver, make_driver
+from .drivers import Driver, hermes_context_size, make_driver
 
 if TYPE_CHECKING:
     from ..engine import Engine
@@ -502,6 +502,8 @@ class AgentRuntime:
             return
         if a.kind == "claude":
             asyncio.create_task(self._update_context_size(str(ev.get("transcript_path") or "")))
+        elif name == "on_session_end":
+            asyncio.create_task(self._update_hermes_context_size())
         if getattr(self, "_restart_after_turn", False):
             self._restart_after_turn = False
             log.info("[%s] turn finished - restarting its session for the new telerouter version", a.name)
@@ -522,6 +524,23 @@ class AgentRuntime:
         size = context_size(out)
         if size is not None:
             self.context_tokens = size
+
+    async def _update_hermes_context_size(self) -> None:
+        await asyncio.sleep(1)                       # Hermes redraws its status bar just after the hook
+        size = hermes_context_size(await self.screen())
+        if size is not None:
+            self.context_tokens = size
+
+    def new_conversation(self) -> None:
+        """The web UI's "New conversation". Claude Code: restart on a new session id. Hermes: type its
+        titled /new once no request is running (a restart would resume the same titled session)."""
+        if self.agent.kind == "claude":
+            self.request_restart()
+        else:
+            if not self.driver or not self._ready.is_set():
+                raise AgentError(f"{self.agent.name} is not running")
+            self.pending_reset = None
+            asyncio.create_task(self._do_reset("clear", ""))
 
     def request_reset(self, mode: str, keep: str) -> str:
         """Called by the agent through MCP; runs right after its current turn ends."""

@@ -264,7 +264,23 @@ def test_reset_keys():
     assert c.reset_keys("clear", "") == ["/clear", "Enter"]
     assert c.reset_keys("compact", "the  Proxmox\nwork") == ["/compact the Proxmox work", "Enter"]
     h = make_driver(agent(kind="hermes"), "/d", "/w", "http://x")
-    assert h.reset_keys("compact", "x") == ["/compress x", "Enter"] and h.reset_keys("clear", "") == []
+    assert h.reset_keys("compact", "x") == ["/compress x", "Enter"]
+    # Hermes' clear is a titled /new: `hermes chat -c telerouter-<id>` then resumes the new conversation
+    keys = h.reset_keys("clear", "")
+    assert keys[0].startswith(f"/new telerouter-{h.agent.id} #") and keys[0].split("#")[1].isdigit()
+    assert keys[1] == "Enter"
+
+
+def test_hermes_context_size_from_its_status_bar():
+    from telerouter.agents.drivers import hermes_context_size
+    bar = " \u2624 deepseek-flash \u00b7 ~75.5K/1M \u00b7 [\u2588\u2591\u2591] ~7% \u00b7 \u25ce 98.6% \u00b7 \u2191 143 t..."
+    assert hermes_context_size("answer text 12K/40K\n" + bar + "\n") == 75500
+    assert hermes_context_size(" \u2624 claude-sonnet-5-5 \u00b7 212K/1M \u00b7 [\u2588\u2588] 21%") == 212000
+    assert hermes_context_size(" \u2624 m \u00b7 1.25M/2M") == 1250000
+    assert hermes_context_size(" \u2624 m \u00b7 830/200K") == 830
+    assert hermes_context_size(" \u2624 deepseek-flash \u00b7 ctx -- \u00b7 [\u2591\u2591] -- \u00b7 1s") is None
+    assert hermes_context_size(" \u2624 m \u00b7 4.6s") is None                # narrow pane: no detail
+    assert hermes_context_size("no status bar 10K/20K") is None
 
 
 class _Store:
@@ -454,3 +470,57 @@ def test_start_reuses_the_agents_mcp_token(tmp_path):
     fresh = asyncio.run(rt._issue_mcp_token())
     assert fresh.startswith("trm_") and fresh != "trm_kept"
     assert store.saves == 1 and token_hash(fresh) == cfg.mcp_tokens[0].token_hash
+
+
+async def test_hermes_clear_after_the_turn_and_context_from_the_status_bar():
+    rt = AgentRuntime(_Engine2(), agent(kind="hermes", session_uuid=""))
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+    sent = []
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        sent.append(cmd)
+        if "capture-pane" in cmd:
+            return "\u276f\n \u2624 deepseek-flash \u00b7 ~143K/1M \u00b7 [\u2588\u2591] ~14%\n"
+        return ""
+    rt._sh = fake_sh
+    rt.request_reset("clear", "")                                # Hermes can clear now
+    await rt._on_event({"hook_event_name": "post_llm_call", "session_id": "local-1",
+                        "extra": {"assistant_response": "ok"}})
+    await rt._on_event({"hook_event_name": "on_session_end", "session_id": "local-1", "extra": {"completed": True}})
+    await asyncio.sleep(2.3)
+    typed = [c for c in sent if "send-keys" in c]
+    assert any(f"/new telerouter-{rt.agent.id} #" in c for c in typed) and typed[-1].endswith("Enter")
+    assert rt.pending_reset is None and rt.engine.store.saved == 0   # no Claude session id bookkeeping
+
+
+async def test_hermes_context_size_is_read_after_each_turn():
+    rt = AgentRuntime(_Engine2(), agent(kind="hermes", session_uuid=""))
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        return " \u2624 deepseek-flash \u00b7 ~143K/1M \u00b7 [\u2588\u2591] ~14%\n" if "capture-pane" in cmd else ""
+    rt._sh = fake_sh
+    await rt._on_event({"hook_event_name": "on_session_end", "session_id": "local-1", "extra": {"completed": True}})
+    await asyncio.sleep(1.2)
+    assert rt.context_tokens == 143000
+
+
+async def test_new_conversation_on_hermes_types_a_titled_new_instead_of_restarting():
+    rt = AgentRuntime(_Engine2(), agent(kind="hermes", session_uuid=""))
+    from telerouter.agents.runtime import AgentError
+    with pytest.raises(AgentError):
+        rt.new_conversation()                                    # not running: nothing to type into
+    rt.driver = make_driver(rt.agent, "/d", "/w", "http://x")
+    rt._ready.set()
+    sent = []
+
+    async def fake_sh(cmd, check=False, input=None, timeout=30):
+        sent.append(cmd)
+        return ""
+    rt._sh = fake_sh
+    rt.new_conversation()
+    await asyncio.sleep(2.2)
+    assert any("/new telerouter-" in c for c in sent) and not rt._restart.is_set()
+    c = AgentRuntime(_Engine2(), agent())
+    c.new_conversation()
+    assert c._restart.is_set()                                   # Claude Code: restart on the new session id

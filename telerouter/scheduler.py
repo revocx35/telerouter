@@ -5,7 +5,8 @@
                 the last `keep_sessions` runs stay open for the owner to look at, older ones are closed.
 * task_session: one tmux session the task keeps (`task-<name>`), started on the first run. Above the
                 task's advised context size the agent gets a gentle reminder after a run: it may answer
-                TELEROUTER_CLEAR / TELEROUTER_COMPACT: <keep>, and telerouter types /clear or /compact.
+                TELEROUTER_CLEAR / TELEROUTER_COMPACT: <keep>, and telerouter types /clear or /compact
+                (Hermes: /new or /compress).
 
 Run state (next run, recent runs, the task's sessions) lives in /data/tasks.json, not in config.json.
 """
@@ -256,7 +257,7 @@ class Scheduler:
                 self._save()
         run["session"] = name
         reply = await mrt.ask(name, t.prompt, "", header=self._header(t, run), timeout=timeout)
-        if t.target == "task_session" and t.context_limit_k and mrt.machine.agent_kind == "claude":
+        if t.target == "task_session" and t.context_limit_k:
             await self._context_check(t, mrt, name, run)
         return reply
 

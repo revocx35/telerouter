@@ -14,7 +14,9 @@ The hook script only appends the event JSON (one line) to a file; telerouter tai
 from __future__ import annotations
 
 import json
+import re
 import shlex
+import time
 
 from ..models import Agent
 
@@ -234,6 +236,32 @@ def claude_reset_keys(mode: str, keep: str) -> list[str]:
     return []
 
 
+def hermes_reset_keys(mode: str, keep: str, title: str = "") -> list[str]:
+    """What to type to clear or compact a Hermes conversation. Hermes has no /clear that keeps the session
+    name: `/new <title>` starts a fresh session, and `hermes chat -c <title>` resumes the newest
+    "<title> #N", so a restart after a clear lands in the new conversation, not the old one."""
+    if mode == "clear":
+        return [f"/new {title} #{int(time.time())}" if title else "/new", "Enter"]
+    if mode == "compact":                            # /compress [<focus>]
+        keep = " ".join(keep.split())[:500]
+        return [f"/compress {keep}".strip(), "Enter"]
+    return []
+
+
+# Hermes' status bar (panes 76+ columns wide): "☤ model · ~75.5K/1M · [█░░] ~7% ..."; "ctx --" = not known yet
+_HERMES_CTX_RE = re.compile(r"~?(\d+(?:\.\d+)?)([KMB]?)/\d+(?:\.\d+)?[KMB]\b")
+_UNITS = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
+
+def hermes_context_size(screen: str) -> int | None:
+    """Context size Hermes shows in its status bar (None: not shown, e.g. a narrow pane or no turn yet)."""
+    for line in reversed((screen or "").splitlines()):
+        if "\u2624" in line:                         # ☤, the status bar's first glyph
+            m = _HERMES_CTX_RE.search(line)
+            return round(float(m.group(1)) * _UNITS[m.group(2)]) if m else None
+    return None
+
+
 def claude_dialog_keys(screen: str) -> list[str] | None:
     """Keys for a Claude Code start-up dialog (workspace trust, permission-mode confirmations), or None."""
     s = screen.lower()
@@ -268,10 +296,7 @@ class HermesDriver(Driver):
     kind = "hermes"
 
     def reset_keys(self, mode: str, keep: str) -> list[str]:
-        if mode == "compact":                        # gateway CLI: /compress [<focus>]
-            keep = " ".join(keep.split())[:500]
-            return [f"/compress {keep}".strip(), "Enter"]
-        return []
+        return hermes_reset_keys(mode, keep, f"telerouter-{self.agent.id}")
 
     def files(self, mcp_token: str) -> dict[str, tuple[str, int]]:
         out = super().files(mcp_token)

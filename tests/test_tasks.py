@@ -249,6 +249,23 @@ async def test_own_session_gets_a_gentle_context_reminder(tmp_path):
     assert mrt.sessions == ["task-mail-summary"]                   # the same session every run
 
 
+async def test_hermes_task_session_gets_the_context_reminder_too(tmp_path):
+    e = _Eng(tmp_path)
+    m = e.store.config.machines[0]
+    m.agent_kind = "hermes"
+    t = task(target="task_session", machine_id=m.id, context_limit_k=100)
+    e.store.config.tasks.append(t)
+    sch = Scheduler(e)
+    mrt = e.machine_rts[m.id]
+    mrt.tokens, mrt.answer = 143000, "TELEROUTER_CLEAR"
+    sch.run_now(t)
+    await _settle(sch)
+    r = sch.st(t.id)["runs"][-1]
+    assert "context reminder" in mrt.asked[-1][2] and r["context_k"] == 143
+    assert mrt.resets == [("task-mail-summary", "clear", "")]
+    assert r["context_note"] == "reminded; the agent cleared its context"
+
+
 async def test_own_session_is_started_again_when_its_claude_exited(tmp_path):
     e = _Eng(tmp_path)
     m = e.store.config.machines[0]

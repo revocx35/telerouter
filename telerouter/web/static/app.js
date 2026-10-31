@@ -493,7 +493,7 @@ async function agents(main) {
       el("div", { class: "row" },
         el("button", { disabled: !rt, onclick: () => act(() => api("POST", `/api/agents/${a.id}/restart`), "Restarting the session…") }, "Start / restart session"),
         el("button", { disabled: !rt, onclick: () => act(() => api("POST", `/api/agents/${a.id}/stop`), "Stopped") }, "Stop session"),
-        a.kind === "claude" ? el("button", { disabled: !rt, onclick: () => { if (confirm("Start a fresh conversation? The old one stays in Claude Code's history.")) act(() => api("POST", `/api/agents/${a.id}/new-conversation`), "New conversation"); } }, "New conversation") : "",
+        el("button", { disabled: !rt, onclick: () => { if (confirm(`Start a fresh conversation? The old one stays in ${a.kind === "claude" ? "Claude Code" : "Hermes"}'s history.`)) act(() => api("POST", `/api/agents/${a.id}/new-conversation`), "New conversation"); } }, "New conversation"),
         el("button", { disabled: !rt, onclick: async () => { screen.hidden = false; screen.textContent = (await act(() => api("GET", `/api/agents/${a.id}/screen`))).screen || "(empty)"; } }, "Show terminal"),
         el("a", { class: "button small", href: `#/tmux/${encodeURIComponent(a.machine_id)}/${encodeURIComponent(a.tmux_session || "telerouter-" + a.id)}` }, "Open in tmux"),
         el("span", { class: "spacer" }),
@@ -770,7 +770,7 @@ async function tasksPage(main) {
       newBox.classList.toggle("hidden", target.value !== "new_session");
       ownBox.classList.toggle("hidden", target.value !== "task_session");
       const m = data.machines.find(x => x.id === $("[name=machine_id]", sessBox).value);
-      machineHint.textContent = m ? `Sessions run ${m.agent_kind === "hermes" ? "Hermes" : "Claude Code"} as the machine's SSH user, with its settings for new sessions (model ${m.new_session_model || "default"}, permission mode ${m.new_session_permission_mode}; edit them under Agents & machines). Nobody can answer a permission prompt during a run, so use a mode that doesn't ask.${m.agent_kind === "hermes" ? " The advised context size works with Claude Code only." : ""}` : "Add a machine under Agents & machines first.";
+      machineHint.textContent = m ? `Sessions run ${m.agent_kind === "hermes" ? "Hermes" : "Claude Code"} as the machine's SSH user, with its settings for new sessions (model ${m.new_session_model || "default"}, permission mode ${m.new_session_permission_mode}; edit them under Agents & machines). Nobody can answer a permission prompt during a run, so use a mode that doesn't ask.${m.agent_kind === "hermes" ? " Hermes shows its context size only in panes at least 76 columns wide." : ""}` : "Add a machine under Agents & machines first.";
       for (const [v, b] of [["daily", dailyBox], ["interval", intervalBox], ["once", onceBox], ["cron", cronBox]]) b.classList.toggle("hidden", kind.value !== v);
     }
     const f = el("div", {},

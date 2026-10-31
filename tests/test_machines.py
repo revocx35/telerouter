@@ -284,3 +284,20 @@ async def test_a_new_hermes_session_is_settled_before_typing():
     rt._sh = fake_sh
     await rt._settle_hermes("newtask")
     assert screens == ["menu"]                          # three identical screens in a row = settled
+
+
+async def test_hermes_machine_reads_context_from_the_pane_and_clears_with_new():
+    rt = MachineRuntime(_Eng(), Machine(name="lxc", host="h", username="u", agent_kind="hermes"))
+    sent = []
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        sent.append(cmd)
+        if "capture-pane" in cmd:
+            return "\u276f\n \u2624 deepseek-flash \u00b7 ~75.5K/1M \u00b7 [\u2588\u2591] ~7%\n"
+        return ""
+    rt._sh = fake_sh
+    assert await rt.context_tokens("task-fdroid") == 75500
+    assert not any("claude" in c for c in sent)                  # no Claude transcript lookup on Hermes
+    await rt.reset_context("task-fdroid", "clear")
+    typed = [c for c in sent if "send-keys" in c]
+    assert "/new" in typed[0] and "/clear" not in typed[0] and typed[-1].endswith("Enter")

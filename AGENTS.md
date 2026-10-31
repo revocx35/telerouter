@@ -140,6 +140,15 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   then Enter works in Claude Code 2.1.302. `/compact` keeps the session id (SessionStart source "compact");
   `/clear` starts a new session id (SessionStart source "clear"), which `AgentRuntime._track` stores as
   `session_uuid` so restarts `--resume` the cleared conversation. The reset waits for the turn's Stop hook.
+- **Hermes clear/context (0.13.4)**: Hermes has no `/clear` that keeps the session name (its `/clear` is
+  "clear screen + new session", same as `/new`). The agent's clear types `/new telerouter-<id> #<unix time>`:
+  the gateway's `/new <title>` creates the session and then renames it, and `hermes chat -c telerouter-<id>`
+  resumes the newest `"<title> #N"` (`resolve_session_by_title`), so a restart lands in the cleared
+  conversation. Task sessions run a bare `hermes` and just get `/new`. Compact is `/compress <keep>`. The web
+  UI's "New conversation" on a Hermes agent types that `/new` (a restart would resume the same titled session).
+  Context size: Hermes' hooks and `state.db` hold only cumulative token counts, so telerouter reads the status
+  bar (`☤ model · ~75.5K/1M · ...`, `hermes_context_size`); Hermes draws that part only in panes >= 76 columns,
+  narrower panes give "unknown" and no reminder. Never resize a pane to get it (see the tmux page note).
 - **Claude Code ends some turns without the Stop hook**: on a subscription usage limit it prints "You've hit
   your session limit · resets …" and ends the turn (transcript: assistant text + `system`/`turn_duration`).
   `AgentRuntime._watch_turn_end` tails the transcript during a voice request and answers with that text,
@@ -258,12 +267,17 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.13.3, 2026-10-31)
+## Status (v0.13.4, 2026-10-31)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.13.4 Hermes context (owner: "/clear and advising the agent to clear the context in scheduled tasks only work
+for claude code ... add that support to hermes too"): unit tests with fake SSH for the titled `/new`, status-bar
+parsing, the reminder on a Hermes task session and "New conversation". The Hermes commands, title resolution and
+status-bar format were checked in the Hermes 0.22.4 source and a live pane on CT 123 (read-only); not yet typed
+into a real Hermes session.
 0.13 messaging (owner: "a new messaging tab where I can send/receive messages from the agent ... telegram bots ...
 /session to switch tmux session ... write at the bottom which tmux session the message came from"): tests with a
 fake Telegram (httpx MockTransport) for pairing, lockout, strangers, /session, buttons, footers, long answers,

@@ -1275,9 +1275,14 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     @app.post("/api/agents/{aid}/new-conversation")
     async def agent_new_conversation(aid: str):
         a = find(cfg.agents, aid)
-        a.session_uuid = str(uuid.uuid4()) if a.kind == "claude" else ""
-        store.save()
-        runtime(aid).request_restart()
+        if a.kind == "claude":
+            a.session_uuid = str(uuid.uuid4())
+            store.save()
+        from ..agents.runtime import AgentError
+        try:
+            runtime(aid).new_conversation()
+        except AgentError as e:
+            raise HTTPException(409, str(e)) from e
         return {"ok": True}
 
     @app.get("/api/agents/{aid}/screen")
