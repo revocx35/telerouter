@@ -410,3 +410,29 @@ async def test_session_new_starts_a_session_and_switches_to_it(eng, tg):
     assert machine.asked[-1][:2] == ("pokerbot", "hi")
     await rt._message(private("/session new pokerbot"))
     assert "Could not start it: a session called pokerbot already exists" in tg.sent()[-1]
+
+
+async def test_session_new_asks_which_machine_and_takes_the_answer(eng, tg):
+    from telerouter.models import Machine
+    eng.store.config.machines = [Machine(id="m1", name="claude", host="10.0.0.2", username="u", host_key="k",
+                                         allow_new_sessions=True),
+                                 Machine(id="m2", name="hermes", host="10.0.0.3", username="u", host_key="k",
+                                         allow_new_sessions=True)]
+    for mid in ("m1", "m2"):
+        rt_ = FakeMachineRt([])
+        rt_.machine = next(m for m in eng.store.config.machines if m.id == mid)
+        eng.machine_rts[mid] = rt_
+    rt = runtime(eng)
+    await rt._message(private("/session new jellyfin"))
+    ask = [b for m, b in tg.calls if m == "sendMessage"][-1]
+    assert "Which machine for jellyfin?" in ask["text"]
+    assert [b["callback_data"] for r in ask["reply_markup"]["inline_keyboard"] for b in r] == ["n:m1", "n:m2"]
+    await rt._message(private("claude"))                               # a plain answer, not a question to the agent
+    assert eng.agent_rts["a1"].asked == []
+    assert "Started jellyfin on claude and switched to it" in tg.sent()[-1]
+    assert [s["name"] for s in eng.machine_rts["m1"].sessions] == ["jellyfin"]
+    # the buttons work as well, and an unrelated message cancels the question
+    await rt._message(private("/session new two"))
+    await rt._message(private("something else"))
+    assert eng.machine_rts["m1"].asked[-1][:2] == ("jellyfin", "something else")
+    assert "two" not in [s["name"] for s in eng.machine_rts["m2"].sessions]

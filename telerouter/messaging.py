@@ -240,6 +240,12 @@ class BotRuntime:
         if data.startswith("s:"):
             key = f"tg:{self.bot_id}:{cid}"
             await self.svc.pick(key, data[2:], self._channel(cid, self._allowed(cid).name))      # type: ignore[union-attr]
+        elif data.startswith("n:"):
+            key = f"tg:{self.bot_id}:{cid}"
+            pend = self.svc._pending_new.pop(key, None)
+            if pend:
+                await self.svc.new_session(key, list(pend), self._channel(cid, self._allowed(cid).name),   # type: ignore[union-attr]
+                                           pick_machine=data[2:])
 
 
 class Messaging:
@@ -255,6 +261,7 @@ class Messaging:
         self.bots: dict[str, BotRuntime] = {}
         self._sigs: dict[str, tuple] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._pending_new: dict[str, tuple[str, str]] = {}   # chat -> (name, folder) waiting for a machine answer
         self._lists: dict[str, list[dict]] = {}     # the choices each chat was last shown
         self._pair: dict[str, tuple[str, float]] = {}      # sha256(code) -> (bot id, expires)
         self._bad: dict[tuple[str, int], tuple[int, float]] = {}
@@ -423,9 +430,9 @@ class Messaging:
         else:
             await self._say(chat, ch, f"Now talking to {await self._label(chat)}. /session default goes back.")
 
-    async def new_session(self, chat: str, words: list[str], ch: Channel) -> None:
+    async def new_session(self, chat: str, words: list[str], ch: Channel, pick_machine: str = "") -> None:
         """`/session new <name> [folder] [on <machine>]`: start a fresh agent session and switch the chat to it."""
-        machine = ""
+        machine = pick_machine.lower()
         if "on" in [w.lower() for w in words]:
             i = [w.lower() for w in words].index("on")
             machine, words = " ".join(words[i + 1:]).lower(), words[:i]
@@ -438,9 +445,14 @@ class Messaging:
             rts = [rt for rt in rts if machine in (rt.machine.id, rt.machine.name.lower())] or \
                   [rt for rt in rts if machine in rt.machine.name.lower()]
         if len(rts) != 1:
-            await self._say(chat, ch, ("Which machine? Add: on " + " / ".join(rt.machine.name for rt in rts)) if rts else
-                            "No machine allows new sessions. The owner can turn it on under Agents & machines.")
+            if not rts:
+                await self._say(chat, ch, "No machine allows new sessions. The owner can turn it on under Agents & machines.")
+                return
+            self._pending_new[chat] = (name, folder)
+            await self._say(chat, ch, f"Which machine for {name}? Tap one or type its name.",
+                            [[(rt.machine.name, f"n:{rt.machine.id}")] for rt in rts])
             return
+        self._pending_new.pop(chat, None)
         rt = rts[0]
         await self._say(chat, ch, f"Starting {name} on {rt.machine.name}, this takes a few seconds.")
         try:
@@ -496,6 +508,12 @@ class Messaging:
             else:
                 await self._say(chat, ch, "I don't know that command. /help lists them.")
             return
+        pending = self._pending_new.pop(chat, None)
+        if pending and len(text) <= 60:
+            m = text.lower()
+            if any(m in (rt.machine.id, rt.machine.name.lower()) for rt in self.engine.machine_rts.values()):
+                await self.new_session(chat, list(pending), ch, pick_machine=m)
+                return
         async with self._locks.setdefault(chat, asyncio.Lock()):
             await self._ask(chat, who, ch, text)
 
