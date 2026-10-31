@@ -180,6 +180,8 @@ The *Messages* page is a written chat with your assistant, and **Telegram bots**
 - **`/session`** lists the tmux sessions of your machines (with buttons in Telegram); `/session 2` or
   `/session wa_logger` switches this chat to one: its messages are typed into that session, answers come back.
   `/session default` goes back to the assistant. Each chat (and the web page) keeps its own choice.
+  `/session new <name> [folder] [on <machine>]` starts a fresh agent session there (only on machines that allow new
+  sessions) and switches the chat to it.
 - **Every answer ends with a footer** naming the tmux session it came from, for example
   `— Jarvis · tmux telerouter-0a823183 on laptop`.
 - **Agents can write on their own:** the MCP tool `send_message` sends a text to every paired chat (and the

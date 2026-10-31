@@ -71,6 +71,12 @@ class FakeMachineRt:
     async def list_sessions(self):
         return self.sessions
 
+    async def new_session(self, name, workdir="~", by_admin=False):
+        if any(x["name"] == name for x in self.sessions):
+            raise RuntimeError(f"a session called {name} already exists on laptop")
+        self.sessions.append({"name": name, "command": "claude", "path": workdir})
+        return self.sessions[-1]
+
     async def ask(self, session, text, label, on_wait=None, header="", timeout=None):
         self.asked.append((session, text, label, header))
         return f"answer from {session}"
@@ -386,3 +392,21 @@ def test_the_web_chat_sends_and_lists(web):
     assert web.get(f"/api/messages?after={msgs[-1]['id']}").json()["messages"] == []
     assert web.put("/api/messages/target", json={"key": "nope|nope"}, headers=h).status_code == 404
     assert web.put("/api/messages/target", json={"key": "default"}, headers=h).json()["target"] == "default"
+
+
+async def test_session_new_starts_a_session_and_switches_to_it(eng, tg):
+    rt = runtime(eng)
+    machine = eng.machine_rts["m1"]
+    machine.machine = eng.store.config.machines[0]
+    await rt._message(private("/session new pokerbot"))
+    assert "No machine allows new sessions" in tg.sent()[-1]           # off by default
+    eng.store.config.machines[0].allow_new_sessions = True
+    await rt._message(private("/session new"))
+    assert tg.sent()[-1].startswith("Usage: /session new")
+    await rt._message(private("/session new pokerbot ~/bots on laptop"))
+    assert "Started pokerbot on laptop and switched to it" in tg.sent()[-1]
+    assert [s["name"] for s in machine.sessions][-1] == "pokerbot"
+    await rt._message(private("hi"))
+    assert machine.asked[-1][:2] == ("pokerbot", "hi")
+    await rt._message(private("/session new pokerbot"))
+    assert "Could not start it: a session called pokerbot already exists" in tg.sent()[-1]

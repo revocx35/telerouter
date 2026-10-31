@@ -51,6 +51,7 @@ AGENT_MSGS_PER_MIN = 20
 HELP = ("You are talking to {target}.\n"
         "/session - list the tmux sessions and switch to one\n"
         "/session default - back to the assistant\n"
+        "/session new <name> [folder] [on <machine>] - start a new agent session and switch to it\n"
         "/help - this text")
 
 
@@ -422,6 +423,37 @@ class Messaging:
         else:
             await self._say(chat, ch, f"Now talking to {await self._label(chat)}. /session default goes back.")
 
+    async def new_session(self, chat: str, words: list[str], ch: Channel) -> None:
+        """`/session new <name> [folder] [on <machine>]`: start a fresh agent session and switch the chat to it."""
+        machine = ""
+        if "on" in [w.lower() for w in words]:
+            i = [w.lower() for w in words].index("on")
+            machine, words = " ".join(words[i + 1:]).lower(), words[:i]
+        if not words or len(words) > 2:
+            await self._say(chat, ch, "Usage: /session new <name> [folder] [on <machine>]")
+            return
+        name, folder = words[0], (words[1] if len(words) > 1 else "~")
+        rts = [rt for rt in self.engine.machine_rts.values() if rt.machine.allow_new_sessions and rt.machine.enabled]
+        if machine:
+            rts = [rt for rt in rts if machine in (rt.machine.id, rt.machine.name.lower())] or \
+                  [rt for rt in rts if machine in rt.machine.name.lower()]
+        if len(rts) != 1:
+            await self._say(chat, ch, ("Which machine? Add: on " + " / ".join(rt.machine.name for rt in rts)) if rts else
+                            "No machine allows new sessions. The owner can turn it on under Agents & machines.")
+            return
+        rt = rts[0]
+        await self._say(chat, ch, f"Starting {name} on {rt.machine.name}, this takes a few seconds.")
+        try:
+            info = await rt.new_session(name, folder)
+        except Exception as e:                                      # AgentError: its text is meant for the person
+            await self._say(chat, ch, f"Could not start it: {str(e)[:300]}")
+            return
+        self.set_target(chat, {"key": f"{rt.machine.id}|{info['name']}", "machine_id": rt.machine.id,
+                               "session": info["name"]})
+        self._lists.pop(chat, None)
+        await self._say(chat, ch, f"Started {info['name']} on {rt.machine.name} and switched to it. "
+                                  "/session default goes back.")
+
     async def _session_list(self, chat: str, ch: Channel) -> None:
         opts = await self.choices(refresh=True)
         self._lists[chat] = opts
@@ -432,7 +464,8 @@ class Messaging:
             mark = "▶ " if c["key"] == cur else ""
             lines.append(f"{i}. {mark}{c['label']}")
             buttons.append([((("✓ " if c["key"] == cur else "") + c["label"]), f"s:{i}")])
-        lines += ["", "Tap one, or send /session <number or name>."]
+        lines += ["", "Tap one, or send /session <number or name>.",
+                  "/session new <name> [folder] [on <machine>] starts a new session."]
         await self._say(chat, ch, "\n".join(lines), buttons)
 
     async def _say(self, chat: str, ch: Channel, text: str, buttons: Buttons | None = None, footer: str = "") -> None:
@@ -449,7 +482,10 @@ class Messaging:
             cmd, _, arg = text.partition(" ")
             cmd = cmd.split("@")[0].lower()
             if cmd in ("/session", "/sessions"):
-                if arg.strip():
+                words = arg.split()
+                if words and words[0].lower() == "new":
+                    await self.new_session(chat, words[1:], ch)
+                elif arg.strip():
                     await self.pick(chat, arg, ch)
                 else:
                     await self._session_list(chat, ch)
