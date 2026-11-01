@@ -259,6 +259,7 @@ class SipStack(asyncio.DatagramProtocol):
             return  # CRLF keep-alive
         try:
             msg = SipMessage.parse(data)
+            msg.cseq, msg.top_via          # parsed lazily elsewhere: refuse a malformed one here, not mid-dispatch
         except (SipParseError, ValueError, IndexError) as e:
             log.debug("dropping unparsable packet from %s: %s", addr, e)
             return
@@ -266,10 +267,14 @@ class SipStack(asyncio.DatagramProtocol):
         msg.source = addr  # type: ignore[attr-defined]
         if trace.isEnabledFor(logging.DEBUG):
             trace.debug("<-- %s:%d\n%s", addr[0], addr[1], data.decode("utf-8", "replace"))
-        if msg.is_request:
-            self._on_request(msg, addr)
-        else:
-            self._on_response(msg)
+        # anyone who can reach the port must not be able to raise out of the transport callback
+        try:
+            if msg.is_request:
+                self._on_request(msg, addr)
+            else:
+                self._on_response(msg)
+        except (SipParseError, ValueError, IndexError) as e:
+            log.debug("dropping malformed %s from %s: %s", "request" if msg.is_request else "response", addr, e)
 
     def _on_response(self, resp: SipMessage) -> None:
         key = (resp.branch or "", resp.cseq[1])
