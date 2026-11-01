@@ -441,12 +441,13 @@ class CallManager:
             ended = asyncio.create_task(s.call.ended.wait())
             ans = asyncio.create_task(ans_ev.wait())
             hup = asyncio.create_task(s.hangup_requested.wait())
+            gone = asyncio.create_task(conn.closed.wait())
             try:
-                await asyncio.wait({ended, ans, hup, asyncio.create_task(conn.closed.wait())},
+                await asyncio.wait({ended, ans, hup, gone},
                                    timeout=self.cfg.ring_timeout, return_when=asyncio.FIRST_COMPLETED)
             finally:
                 ring.cancel()
-                for t in (ended, ans, hup):
+                for t in (ended, ans, hup, gone):
                     t.cancel()
                 conn.flush()
             if not ans_ev.is_set() or s.call.state != "ringing":
