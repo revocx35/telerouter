@@ -276,11 +276,14 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.13.5, 2026-10-31)
+## Status (v0.13.6, 2026-11-01)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
+
+0.13.6 (2026-11-01, bug hunt): SIP packets whose Via or CSeq does not parse are dropped instead of raising in the UDP
+callback; an inbound speaker call cancels its wait on the speaker's connection when ringing ends.
 
 0.13.4 Hermes context (owner: "/clear and advising the agent to clear the context in scheduled tasks only work
 for claude code ... add that support to hermes too"): unit tests with fake SSH for the titled `/new`, status-bar
