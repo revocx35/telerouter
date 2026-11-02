@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from . import __version__
+from .memory import MemError, Who
 from .models import Contact, McpToken
 from .router.calls import CallError
 from .security import bearer, token_matches
@@ -59,6 +60,18 @@ INSTRUCTIONS = (
     "start_voice_call/say/listen/hang_up let you talk on the phone yourself. announce/ask_speaker use a speaker. "
     "send_message writes a text message to the owner's Telegram. "
     "Only call people the user asked you to call.")
+
+MEMORY_INSTRUCTIONS = (
+    "Shared memory: the owner runs several agents (Claude Code, Hermes, ...) on the same servers and repos, and "
+    "they don't see each other's conversations. telerouter's memory tools are how you stay in step. "
+    "BEFORE you change a server, container, service or repo: read_agent_messages, list_peer_agents (who is "
+    "working on what right now) and the notes in its folder (search_notes / list_folder). Folder layout: "
+    "servers/<physical host>/<lxc or vm>/<service>, repos/<repo name>; create a missing folder the same way. "
+    "WHILE you work on it: set_status to what you are doing; if another agent's status or a message says it works "
+    "on the same thing, send_agent_message it and agree before touching it. AFTER a change: append_note to a note "
+    "named 'changelog' in that folder (what you changed, why, how to undo it) and keep an 'architecture' note "
+    "current (write_note with the version you read); then clear your status. Reply to a message with reply_to. "
+    "Never put passwords, tokens or private keys in notes or messages: say where the secret lives instead.")
 
 
 class ToolError(Exception):
@@ -392,6 +405,150 @@ class McpServer:
             return {"ok": True, "delivered_to_telegram_chats": sent,
                     "note": "" if sent else "no paired Telegram chat is online; it is in telerouter's Messages page"}
 
+        # -- shared memory: messages between agents and project notes ----------------------------------------
+        def memtool(name, desc, schema):
+            def deco(fn):
+                async def wrapped(tok, **kw):
+                    mem, who = self.engine.memory, self._who(tok)
+                    try:
+                        await mem.run(mem.touch, who)
+                        out = await fn(tok, who, **kw)
+                    except MemError as ex:
+                        raise ToolError(str(ex)) from ex
+                    if name != "read_agent_messages":
+                        n = await mem.run(mem.unread, who)
+                        if n:
+                            out = {**out, "unread_agent_messages": n,
+                                   "hint": "other agents wrote to you: read_agent_messages"}
+                    return out
+                self.tools[name] = Tool(name, "memory", desc, schema, wrapped)
+                return fn
+            return deco
+
+        PATH = {**S, "description": "folder path, e.g. servers/pve1/ct-118-telerouter/telerouter or repos/telerouter; "
+                                    "'' = top level"}
+
+        @memtool("list_folder",
+                 "Shared notes: a folder's description, its notes (titles, versions, who changed them when) and its "
+                 "sub-folders. Start at the top level ('') to see the layout.",
+                 _obj({"path": PATH, "depth": {"type": "integer", "minimum": 1, "maximum": 6, "default": 2,
+                                               "description": "how many folder levels to show"}}))
+        async def list_folder(tok, who, path: str = "", depth: int = 2):
+            mem = self.engine.memory
+            return await mem.run(mem.list_folder, path, depth)
+
+        @memtool("create_folder",
+                 "Create a folder in the shared notes (parents too) or change its description (say what it holds, "
+                 "e.g. 'CT 118 on pve1, 192.168.x.x: telerouter in Docker').",
+                 _obj({"path": PATH, "description": S}, ["path"]))
+        async def create_folder(tok, who, path: str, description: str | None = None):
+            mem = self.engine.memory
+            return await mem.run(mem.create_folder, who, path, description)
+
+        @memtool("move_folder", "Rename or move a folder with everything in it.",
+                 _obj({"path": PATH, "new_path": S}, ["path", "new_path"]))
+        async def move_folder(tok, who, path: str, new_path: str):
+            mem = self.engine.memory
+            return await mem.run(mem.move_folder, who, path, new_path)
+
+        @memtool("delete_folder", "Delete an empty folder.", _obj({"path": PATH}, ["path"]))
+        async def delete_folder(tok, who, path: str):
+            mem = self.engine.memory
+            return await mem.run(mem.delete_folder, who, path)
+
+        @memtool("read_note", "Read a shared note by id, or by folder + title. Returns its version (needed to "
+                 "replace it).", _obj({"note_id": S, "folder": PATH, "title": S}))
+        async def read_note(tok, who, note_id: str = "", folder: str = "", title: str = ""):
+            if not note_id and not title:
+                raise ToolError("pass note_id, or folder and title")
+            mem = self.engine.memory
+            return await mem.run(mem.read_note, note_id, folder, title)
+
+        @memtool("write_note",
+                 "Create a shared note (markdown), or replace one: then pass the version you read, so another "
+                 "agent's newer edit is never overwritten (a stale version is refused). To add to a log, use "
+                 "append_note instead.",
+                 _obj({"folder": PATH, "title": {**S, "description": "e.g. architecture, changelog, todo"},
+                       "body": S, "version": {"type": "integer", "description": "the version you read; omit to create"}},
+                      ["folder", "title", "body"]))
+        async def write_note(tok, who, folder: str, title: str, body: str, version: int | None = None):
+            mem = self.engine.memory
+            return await mem.run(mem.write_note, who, folder, title, body, version)
+
+        @memtool("append_note",
+                 "Add a dated entry signed with your name to the end of a shared note (created if missing). The "
+                 "way to log what you did: folder of the server/service/repo, title 'changelog'.",
+                 _obj({"folder": PATH, "title": S, "text": S}, ["folder", "title", "text"]))
+        async def append_note(tok, who, folder: str, title: str, text: str):
+            mem = self.engine.memory
+            return await mem.run(mem.append_note, who, folder, title, text)
+
+        @memtool("move_note", "Move a shared note to another folder and/or rename it.",
+                 _obj({"note_id": S, "version": {"type": "integer"}, "folder": PATH, "title": S},
+                      ["note_id", "version"]))
+        async def move_note(tok, who, note_id: str, version: int, folder: str | None = None, title: str | None = None):
+            mem = self.engine.memory
+            return await mem.run(mem.update_note, who, note_id, version, None, title, folder)
+
+        @memtool("delete_note", "Delete a shared note (it stays in the owner's trash for a while).",
+                 _obj({"note_id": S}, ["note_id"]))
+        async def delete_note(tok, who, note_id: str):
+            mem = self.engine.memory
+            return await mem.run(mem.delete_note, who, note_id)
+
+        @memtool("search_notes", "Find shared notes containing all the words (title, folder or text), newest first.",
+                 _obj({"query": S, "folder": {**PATH, "description": "only inside this folder"},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}}, ["query"]))
+        async def search_notes(tok, who, query: str, folder: str = "", limit: int = 20):
+            mem = self.engine.memory
+            return {"notes": await mem.run(mem.search, query, folder, limit)}
+
+        @memtool("recent_changes", "Shared notes changed recently (by anyone), newest first: what other agents did.",
+                 _obj({"folder": PATH, "hours": {"type": "number", "minimum": 1, "maximum": 2160, "default": 72},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}}))
+        async def recent_changes(tok, who, folder: str = "", hours: float = 72, limit: int = 30):
+            mem = self.engine.memory
+            return {"notes": await mem.run(mem.recent, folder, time.time() - hours * 3600, limit)}
+
+        @memtool("list_peer_agents",
+                 "The owner's agents that share this memory (and the owner): what each says it is working on "
+                 "(status) and when it last used the shared memory.", _obj({}))
+        async def list_peer_agents(tok, who):
+            return {"you": who.name, "agents": await self._peer_list(who)}
+
+        @memtool("set_status",
+                 "Tell the other agents what you are working on now (e.g. 'upgrading Docker on CT 118, don't "
+                 "deploy there until ~15:00'); an empty text clears it. Clear it when you are done.",
+                 _obj({"text": S}, ["text"]))
+        async def set_status(tok, who, text: str):
+            mem = self.engine.memory
+            return await mem.run(mem.set_status, who, text)
+
+        @memtool("send_agent_message",
+                 "Write to another of the owner's agents (see list_peer_agents), to 'everyone', or to 'owner' (shown "
+                 "in telerouter's Shared memory page, not sent to the phone; use send_message for that). E.g. "
+                 "'I'm migrating the DB on CT 122, please don't restart wa_logger until I say done'.",
+                 _obj({"to": {**S, "description": "agent name, 'everyone' or 'owner'"}, "text": S,
+                       "project": {**S, "description": "what it is about: a folder path, server or repo"},
+                       "reply_to": {"type": "integer", "description": "id of the message you answer"}},
+                      ["to", "text"]))
+        async def send_agent_message(tok, who, to: str, text: str, project: str = "", reply_to: int | None = None):
+            mem = self.engine.memory
+            target = self.find_peer(to, who)
+            return await mem.run(mem.send, who, target, text, project, reply_to)
+
+        @memtool("read_agent_messages",
+                 "Messages other agents (or the owner) wrote to you or to everyone. By default only new ones, which "
+                 "are then marked read.",
+                 _obj({"include_read": {"type": "boolean", "default": False},
+                       "project": {**S, "description": "only messages about this"},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}}))
+        async def read_agent_messages(tok, who, include_read: bool = False, project: str = "", limit: int = 20):
+            mem = self.engine.memory
+            msgs = await mem.run(mem.inbox, who, include_read, limit, project)
+            return {"you": who.name, "messages": msgs,
+                    **({} if msgs else {"note": "no new messages"})}
+
         @tool("announce", "speak", "Say something out loud on a speaker (e.g. a reminder or a notification).",
               _obj({"speaker": S, "text": S}, ["speaker", "text"]))
         async def announce(tok, speaker: str, text: str):
@@ -440,6 +597,52 @@ class McpServer:
                 "note": f"From the next sentence on, the person talks to the {c.label} session directly. Tell them "
                         f"in a few words, and that saying '{back}' returns to you."}
 
+    # -- shared memory identities ------------------------------------------------------------------------------
+    def _who(self, tok: McpToken) -> Who:
+        agent = self.engine.store.agent(tok.agent_id) if tok.agent_id else None
+        if agent:
+            return Who(f"agent:{agent.id}", agent.name)
+        return Who(f"token:{tok.id}", tok.name)
+
+    def peer_identities(self) -> list[Who]:
+        """Everyone who can use the shared memory: telerouter's agents, tokens with the memory scope, the owner."""
+        cfg = self.engine.store.config
+        out = [Who(f"agent:{a.id}", a.name) for a in cfg.agents]
+        out += [Who(f"token:{t.id}", t.name) for t in cfg.mcp_tokens if not t.agent_id and "memory" in t.scopes]
+        return out + [Who("owner", "owner")]
+
+    def find_peer(self, ref: str, me: Who | None = None) -> Who | None:
+        """'everyone' -> None; else the identity named `ref` (exact, then a unique substring)."""
+        r = " ".join(str(ref or "").lower().split())
+        if r in ("everyone", "all", "*", "everybody", "all agents"):
+            return None
+        peers = [p for p in self.peer_identities() if not me or p.key != me.key]
+        for pred in (lambda p: p.key == ref or p.name.lower() == r,
+                     lambda p: r and r in p.name.lower()):
+            hits = [p for p in peers if pred(p)]
+            if len(hits) == 1:
+                return hits[0]
+            if len(hits) > 1:
+                raise MemError(f"'{ref}' matches several agents: " + ", ".join(p.name for p in hits))
+        raise MemError(f"no agent '{ref}'; these share the memory: " + ", ".join(p.name for p in peers) + ", everyone")
+
+    async def _peer_list(self, me: Who | None = None) -> list[dict]:
+        mem = self.engine.memory
+        seen = await mem.run(mem.peers)
+        out = []
+        for p in self.peer_identities():
+            row = seen.get(p.key, {})
+            out.append({"name": p.name, "key": p.key, "is_you": bool(me and me.key == p.key),
+                        "status": row.get("status", ""), "status_at": _utc(row.get("status_at", 0)),
+                        "last_seen": _utc(row.get("seen", 0))})
+        return out
+
+    def instructions(self, tok: McpToken) -> str:
+        text = INSTRUCTIONS
+        if any(t.scope == "memory" for t in self._visible(tok)):
+            text += " " + MEMORY_INSTRUCTIONS
+        return text
+
     def _session_machine(self, ref: str):
         rts = [rt for rt in self.engine.machine_rts.values() if rt.machine.allow_new_sessions]
         if ref:
@@ -479,7 +682,7 @@ class McpServer:
     # -- JSON-RPC -------------------------------------------------------------------------------------------
     @staticmethod
     def _allowed(t: Tool, tok: McpToken) -> bool:
-        return t.scope in tok.scopes or (t.scope in ("agent", "messaging") and bool(tok.agent_id))
+        return t.scope in tok.scopes or (t.scope in ("agent", "messaging", "memory") and bool(tok.agent_id))
 
     def _visible(self, tok: McpToken) -> list[Tool]:
         return [t for t in self.tools.values() if self._allowed(t, tok)]
@@ -522,7 +725,7 @@ class McpServer:
             return _ok(mid, {"protocolVersion": want if want in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0],
                              "capabilities": {"tools": {"listChanged": False}},
                              "serverInfo": {"name": "telerouter", "version": __version__},
-                             "instructions": INSTRUCTIONS})
+                             "instructions": self.instructions(tok)})
         if method == "ping":
             return _ok(mid, {})
         if method == "tools/list":

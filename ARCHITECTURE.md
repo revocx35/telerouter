@@ -50,6 +50,7 @@ telerouter/
   tls.py               local CA + server certificate (re-issued when names change; CA stays)
   engine.py            wiring: SIP UA + accounts, agent runtimes, integration clients, contact lookups
   messaging.py         written chat: web page + Telegram bots (pairing, /session, footers), send_message; /data/messages.json
+  memory.py            shared memory between agents: messages, status, notes in folders; SQLite /data/memory.db
   scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
@@ -420,6 +421,43 @@ it. Targets and the last 500 messages live in `/data/messages.json` (0600).
   `PUT /api/messages/target`, `POST|PUT|DELETE /api/messaging/bots[/id]`, `POST .../pair`,
   `DELETE .../chats/<id>`. `allowed_chats` cannot be set through the API; the token is write-only.
 
+### 4.5 Shared memory (`memory.py`)
+
+The owner runs several agents (telerouter's own, Claude Code installs with an MCP token, Hermes, ...) on the
+same servers and repos; none sees the others' conversations, so one broke what another had just done. The
+shared memory is where they meet. Two halves, one SQLite file `/data/memory.db` (0600, WAL):
+
+* **Agent messages**: `send_agent_message(to, text, project, reply_to)` to one agent, `everyone` or `owner`;
+  `read_agent_messages` returns the new ones (to me or to everyone, never my own) and marks them read per reader
+  (`reads`). `set_status` ("upgrading Docker on CT 118") and `list_peer_agents` show who works on what and when it
+  last used the memory. Every memory tool's answer carries `unread_agent_messages` when there is mail, so an agent
+  notices without polling.
+* **Project notes**: folders (`servers/<host>/<lxc|vm>/<service>`, `repos/<repo>` by convention; agents create
+  their own, parents automatically) holding markdown notes. `write_note` creates, or replaces only with the
+  `version` the agent read (optimistic concurrency: a stale write is refused and names who changed it);
+  `append_note` adds a dated entry signed with the agent's name (the change-log way); `move_note`,
+  `move_folder`, `delete_note`, `delete_folder` (empty only over MCP), `search_notes`, `recent_changes`.
+  Every replaced text is kept in `revisions` (last 20 per note); deleted notes stay in the trash 30 days. The
+  web page restores both.
+
+**Identity** = the MCP token: `agent:<agent id>` (name = the agent's name) for telerouter's own agents,
+`token:<token id>` (name = the token's name) for others, `owner` for the web UI. All sessions that share one token
+(e.g. every Claude Code on one host with the user-scope MCP server) are one identity with one inbox. Who may
+use it: telerouter's agents implicitly; other tokens need the `memory` scope (*MCP access*: tick it, or "Allow
+shared memory" on an existing token). The MCP `initialize` instructions get a paragraph telling the agent when to
+read/write (before changing a server: messages, peers, that folder's notes; after: append to `changelog`);
+telerouter's own agents get the same in their system prompt (`drivers.voice_instructions`).
+
+The calls are synchronous SQLite (short, one lock); async callers use `SharedMemory.run()` (a worker thread).
+Limits: note 100 000 characters, title 120, message 4000, 5000 notes, 2000 folders, depth 12, 5000 messages kept;
+60 writes and 20 messages a minute per identity (the owner is not throttled). Folder names are validated per
+segment (no `..`, no leading dot or symbol); LIKE wildcards in searches are escaped.
+
+API (session + CSRF): `GET /api/memory`, `GET /api/memory/folder?path=`, `POST|PUT /api/memory/folders`,
+`POST /api/memory/folders/delete` (recursive: notes to the trash), `GET|PUT|DELETE /api/memory/notes/<id>`,
+`POST /api/memory/notes`, `GET .../revisions/<v>`, `POST .../restore`, `GET /api/memory/trash`,
+`GET /api/memory/search`, `GET|POST /api/memory/messages`.
+
 ## 5. Calls
 
 `router/calls.py`. Every call is a `CallSession` with one SIP leg (`router/sipaudio.py`: G.711 <-> 16 kHz,
@@ -470,7 +508,7 @@ calls on its own).
 
 Streamable HTTP, JSON responses, stateless, tools only (`mcp.py`). Endpoints: `POST https://…:8443/mcp`
 and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…` (SHA-256 stored). Scopes:
-`contacts`, `calls`, `speak`, `clients`; plus allow-lists of contacts and speakers.
+`contacts`, `calls`, `speak`, `clients`, `messaging`, `memory`; plus allow-lists of contacts and speakers.
 
 | tool | scope | |
 |---|---|---|
@@ -482,6 +520,9 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | announce, ask_speaker | speak | talk/ask through a speaker |
 | context_status, reset_context | (agents telerouter runs) | own context size; compact/clear after the current reply |
 | new_session | (agents telerouter runs) | new tmux session with a fresh agent on a machine that allows it; connects the requester |
+| send_message | messaging (agents implicitly) | text to the owner's Telegram chats and the Messages page |
+| list_folder, create_folder, move_folder, delete_folder, read_note, write_note, append_note, move_note, delete_note, search_notes, recent_changes | memory (agents implicitly) | shared project notes (§4.5) |
+| send_agent_message, read_agent_messages, list_peer_agents, set_status | memory (agents implicitly) | messages and status between agents (§4.5) |
 
 The SDK's FastMCP API changed in mcp 2.x; the protocol surface needed here (initialize, ping,
 tools/list, tools/call, notifications) is small, so it is implemented directly and tested.
@@ -515,6 +556,7 @@ integration tokens, SSH key).
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
+| An agent wipes or poisons the shared memory | only tokens the admin gave the `memory` scope (and telerouter's own agents); edits need the version read, every old text is kept (20 revisions), deletes go to a 30-day trash, agents can't delete non-empty folders; per-identity rate limits and size caps; the page shows who wrote what. Notes are readable by every memory token: the instructions tell agents never to store secrets there (say where a secret lives instead). A note is data, not an order: another agent's note can be wrong or written by a compromised agent |
 | SSRF via integration URLs | admin-only, HTTPS only, no redirects followed; the SIP address from the integration is rewritten to the integration's own host |
 | Container escape / privilege | non-root uid 1000, read-only root fs, `cap_drop: ALL`, `no-new-privileges`, speech services bound to 127.0.0.1 |
 

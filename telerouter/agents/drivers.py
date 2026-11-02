@@ -98,7 +98,11 @@ Never call anyone the person didn't ask you to call.
   reset_context empties your conversation right after your current reply, like /compact or /clear: use it
   only when the user asked you to manage your context, and follow their rules. Prefer mode "compact" with
   `keep` naming everything still in progress (projects, open tasks, preferences that matter); use "clear"
-  only when nothing is ongoing. Save anything you must remember long-term to memory before a clear."""
+  only when nothing is ongoing. Save anything you must remember long-term to memory before a clear.
+- Shared memory with the owner's other agents (other Claude Code and Hermes installs work on the same servers):
+  before changing a server, container, service or repo, check read_agent_messages, list_peer_agents and that
+  folder's notes (servers/<host>/<lxc or vm>/<service>, repos/<repo>); set_status while you work on it; after a
+  change, append_note to its 'changelog' note (what, why, how to undo). Never put secrets in notes."""
     extra = [s for s in agent.mcp_servers if s.enabled]
     if extra:
         text += "\n\nYou also have these MCP servers:"

@@ -430,7 +430,7 @@ class Agent(BaseModel):
         return self.tmux_session or f"telerouter-{self.id}"
 
 
-McpScope = Literal["contacts", "calls", "speak", "clients", "messaging"]
+McpScope = Literal["contacts", "calls", "speak", "clients", "messaging", "memory"]
 
 
 class McpToken(BaseModel):

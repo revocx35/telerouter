@@ -260,6 +260,13 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   poller per bot token (HTTP 409 = another program polls it). Agent tokens get `send_message` implicitly
   (`McpServer._allowed`), other tokens need the `messaging` scope.
 - Agents search contacts by words like "camera": `list_contacts` matches the kind and its synonyms too.
+- **Shared memory** (0.14, `memory.py`, SQLite `/data/memory.db`): the identity is the MCP *token*, not the
+  session (all Claude Code sessions on a host that share the user-scope token are one agent with one inbox).
+  Memory tools are registered with `memtool()` in `McpServer._define()`: it maps `MemError` to `ToolError`, records
+  "last seen" and adds `unread_agent_messages`. `MemError` is the module's own exception (not the builtin
+  `MemoryError`). SQLite calls are sync: call them through `engine.memory.run(...)` from async code. Replacing a
+  note needs the version read (a stale one is refused); keep that, it is what stops two agents from overwriting
+  each other. The MCP `initialize` instructions include `MEMORY_INSTRUCTIONS` only for tokens that can use the tools.
 
 - **Quiet hours** (`quiet.py`): checked in the agent call path, `on_incoming` (603) and the MCP `_quiet_gate`
   (connect_call/phone_message/start_voice_call/announce/ask_speaker unless the user asked by voice). Blocked
@@ -276,12 +283,20 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.13.6, 2026-11-01)
+## Status (v0.14.0, 2026-11-02)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.14 shared memory (owner: "an shared memory tab ... agent to agent messages ... so they dont crash into each
+others work ... project notes ... folders ... repos ... servers/<physical server>/<lxc/vm>/<service> ... agents
+should be able to create their own folders"): 20 tests (paths, versions/conflicts, revisions cap, trash + purge,
+folder moves/deletes, search, limits, messages/read state/replies, status, MCP scopes and instructions, two
+agents coordinating over MCP, the API with login/CSRF). Browser (Playwright, local instance): two MCP tokens with
+the scope turned on from the MCP access page, messages + status + reply from the page, notes tree, edit, stale
+version refused, history restore, delete + trash restore, search; at 360 px (phone app WebView) no horizontal
+overflow. Not yet used by the real Claude Code / Hermes installs.
 0.13.6 (2026-11-01, bug hunt): SIP packets whose Via or CSeq does not parse are dropped instead of raising in the UDP
 callback; an inbound speaker call cancels its wait on the speaker's connection when ringing ends.
 

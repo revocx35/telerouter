@@ -33,6 +33,7 @@ from ..agents import ssh as sshmod
 from ..agents.runtime import AgentError
 from ..engine import Engine
 from ..logbuffer import LogBuffer
+from ..memory import MemError, Who
 from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
                       Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
                       VoiceSettings)
@@ -121,6 +122,26 @@ class TmuxNew(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     folder: str = Field(default="~", max_length=200)
     run: Literal["agent", "claude", "hermes", "shell"] = "agent"
+
+
+class MemFolder(BaseModel):
+    path: str = Field(max_length=400)
+    new_path: str | None = Field(default=None, max_length=400)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class MemNote(BaseModel):
+    folder: str | None = Field(default=None, max_length=400)
+    title: str | None = Field(default=None, max_length=200)
+    body: str | None = Field(default=None, max_length=100_000)
+    version: int | None = None
+
+
+class MemMessage(BaseModel):
+    to: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=4000)
+    project: str = Field(default="", max_length=120)
+    reply_to: int | None = None
 
 
 # -- helpers --------------------------------------------------------------------------------------------------
@@ -1192,6 +1213,92 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         engine.messaging.targets.pop(f"tg:{bid}:{chat_id}", None)
         store.save()
         return {"ok": True}
+
+    # -- shared memory (agent-to-agent messages + project notes) ----------------------------------------------
+    OWNER = Who("owner", "owner")
+
+    async def mem(fn, *args):
+        try:
+            return await engine.memory.run(fn, *args)
+        except MemError as e:
+            raise HTTPException(409 if "changed since" in str(e) or "exists" in str(e) or "already" in str(e)
+                                else 404 if str(e).startswith("no ") else 422, str(e)) from e
+
+    @app.get("/api/memory")
+    async def memory_state():
+        m = engine.memory
+        return {"folders": await mem(m.folders), "stats": await mem(m.stats),
+                "agents": await engine.mcp._peer_list(OWNER)}
+
+    @app.get("/api/memory/folder")
+    async def memory_folder(path: str = ""):
+        return await mem(engine.memory.list_folder, path, 1)
+
+    @app.post("/api/memory/folders")
+    async def memory_create_folder(body: MemFolder):
+        return await mem(engine.memory.create_folder, OWNER, body.path, body.description)
+
+    @app.put("/api/memory/folders")
+    async def memory_update_folder(body: MemFolder):
+        m = engine.memory
+        out = {"path": body.path}
+        if body.new_path is not None and body.new_path.strip() != body.path.strip():
+            out = await mem(m.move_folder, OWNER, body.path, body.new_path)
+        if body.description is not None:
+            out = await mem(m.create_folder, OWNER, out["path"], body.description)
+        return out
+
+    @app.post("/api/memory/folders/delete")
+    async def memory_delete_folder(body: MemFolder):
+        return await mem(engine.memory.delete_folder, OWNER, body.path, True)
+
+    @app.get("/api/memory/notes/{nid}")
+    async def memory_note(nid: str):
+        m = engine.memory
+        return {**await mem(m.read_note, nid), "revisions": await mem(m.revisions, nid)}
+
+    @app.get("/api/memory/notes/{nid}/revisions/{version}")
+    async def memory_revision(nid: str, version: int):
+        return await mem(engine.memory.revision, nid, version)
+
+    @app.post("/api/memory/notes")
+    async def memory_create_note(body: MemNote):
+        return await mem(engine.memory.write_note, OWNER, body.folder, body.title, body.body, None)
+
+    @app.put("/api/memory/notes/{nid}")
+    async def memory_update_note(nid: str, body: MemNote):
+        if body.version is None:
+            raise HTTPException(422, "version missing")
+        return await mem(engine.memory.update_note, OWNER, nid, body.version, body.body, body.title, body.folder)
+
+    @app.delete("/api/memory/notes/{nid}")
+    async def memory_delete_note(nid: str):
+        return await mem(engine.memory.delete_note, OWNER, nid)
+
+    @app.get("/api/memory/trash")
+    async def memory_trash():
+        return {"notes": await mem(engine.memory.trash)}
+
+    @app.post("/api/memory/notes/{nid}/restore")
+    async def memory_restore(nid: str):
+        return await mem(engine.memory.restore_note, OWNER, nid)
+
+    @app.get("/api/memory/search")
+    async def memory_search(q: str = "", folder: str = ""):
+        return {"notes": await mem(engine.memory.search, q[:200], folder, 50)}
+
+    @app.get("/api/memory/messages")
+    async def memory_messages(after: int = 0):
+        return {"messages": await mem(engine.memory.all_messages, max(0, after), 200),
+                "agents": await engine.mcp._peer_list(OWNER)}
+
+    @app.post("/api/memory/messages")
+    async def memory_send(body: MemMessage):
+        try:
+            to = engine.mcp.find_peer(body.to, OWNER)
+        except MemError as e:
+            raise HTTPException(404, str(e)) from e
+        return await mem(engine.memory.send, OWNER, to, body.text, body.project, body.reply_to)
 
     AGENT_PROTECTED = {"id", "session_uuid", "mcp_token_id", "host", "port", "username", "host_key"}
 

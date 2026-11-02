@@ -157,3 +157,27 @@ pre.term:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
 .msg .foot { margin-top: .35rem; font-size: .75rem; opacity: .7; border-top: 1px solid #8884; padding-top: .2rem; }
 .composer { display: flex; gap: .5rem; align-items: flex-end; }
 .composer textarea { flex: 1; resize: vertical; }
+
+/* shared memory */
+.peers { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.peer { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.notes-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+.notes-side input[type=search] { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; width: 100%; margin-bottom: 8px; }
+.tree { max-height: 60vh; overflow: auto; margin-bottom: 8px; }
+.tree a { display: block; padding: 3px 6px; border-radius: 6px; color: var(--text); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree a:hover, .tree a.on { background: var(--chip); }
+.tree a.on { font-weight: 600; } .tree a.up { color: var(--accent); }
+.tree a.d1 { padding-left: 18px; } .tree a.d2 { padding-left: 30px; } .tree a.d3 { padding-left: 42px; }
+.tree a.d4 { padding-left: 54px; } .tree a.d5 { padding-left: 66px; } .tree a.d6 { padding-left: 78px; }
+.crumbs { overflow-wrap: anywhere; }
+.subfolders { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.note-row { padding: 8px 6px; border-bottom: 1px solid var(--line); cursor: pointer; overflow-wrap: anywhere; }
+.note-row:hover { background: var(--chip); }
+.note-title { margin-top: 12px; font-size: 17px; overflow-wrap: anywhere; }
+pre.note-body { font-size: 13px; line-height: 1.45; word-break: normal; overflow-wrap: anywhere; max-height: 65vh; }
+textarea.note-edit { min-height: 45vh; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+p.desc { white-space: pre-wrap; margin: 10px 0; }
+@media (max-width: 760px) {
+  .notes-layout { grid-template-columns: minmax(0, 1fr); }
+  .tree { max-height: 30vh; }
+}

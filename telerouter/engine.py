@@ -73,6 +73,8 @@ class Engine:
         self.scheduler = Scheduler(self)
         from .messaging import Messaging
         self.messaging = Messaging(self)
+        from .memory import SharedMemory
+        self.memory = SharedMemory(store.dir / "memory.db")
 
     # small facades used by other modules
     @property

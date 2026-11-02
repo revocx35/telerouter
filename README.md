@@ -188,6 +188,25 @@ The *Messages* page is a written chat with your assistant, and **Telegram bots**
   Messages page), with the same footer. telerouter's own agents may use it without extra setup; for other MCP
   tokens tick *send text messages*.
 
+## Shared memory between agents
+
+When several agents (Claude Code on one machine, Hermes on another, telerouter's own Jarvis) work on the same
+servers, one doesn't know what the other just did. The *Shared memory* page and its MCP tools fix that:
+
+- **Agent messages:** an agent writes to another one, to everyone or to you (`send_agent_message`: *"I'm
+  migrating the DB on CT 122, don't restart wa_logger until I say done"*), reads its new messages
+  (`read_agent_messages`) and says what it is working on (`set_status`). The page shows every message, who has
+  read it, each agent's status, and lets you write and reply too.
+- **Project notes:** folders the agents build themselves, e.g. `servers/<physical host>/<lxc or vm>/<service>` and
+  `repos/<repo>`, with markdown notes such as `architecture` and `changelog`. `append_note` adds a dated, signed
+  entry; `write_note` replaces a note only with the version the agent read, so nobody overwrites a newer edit.
+  On the page you browse, search, edit, see earlier versions and restore deleted notes (30-day trash).
+- **Who takes part:** telerouter's own agents automatically. Any other agent needs an MCP token with *shared
+  memory* (*MCP access* → tick it on a new token, or *Allow shared memory* on an existing one). The token's name
+  is the agent's name for the others, so name tokens after the agent (`claude laptop`, `hermes CT 123`).
+- The MCP server tells connected agents when to use it (before touching a server: read messages and that
+  folder's notes; afterwards: log the change). Don't let agents store passwords in notes.
+
 ## tmux sessions from the browser
 
 *tmux sessions* shows every tmux session on every machine telerouter can reach — the sessions of its own
@@ -247,7 +266,8 @@ NODE_EXTRA_CA_CERTS=~/.config/telerouter/ca.pem claude
 ```
 
 Tools: `list_contacts`, `list_speakers`, `connect_call`, `phone_message`, `start_voice_call`, `say`,
-`listen`, `hang_up`, `list_calls`, `announce`, `ask_speaker`. Example: *"phone_message(contact='me',
+`listen`, `hang_up`, `list_calls`, `announce`, `ask_speaker`, `send_message`, and with the *shared memory* scope the
+note and agent-message tools (see *Shared memory between agents*). Example: *"phone_message(contact='me',
 message='The deploy finished')"* rings your extension and reads it to you; with `wait_for_reply` it returns
 what you answered. Agents telerouter runs (Jarvis) also get `new_session`: *"start a new Claude session
 called pokerbot in projects/pokerbot"* starts a fresh Claude Code (or Hermes) in a new tmux session on a

@@ -210,7 +210,7 @@ function ssoForm(d) {
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
   ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tmux", "tmux sessions"],
-  ["messages", "Messages"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
+  ["messages", "Messages"], ["memory", "Shared memory"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
   ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
 ];
@@ -247,7 +247,7 @@ function route() {
   if (t) t.textContent = p ? p[1] : "telerouter";
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
-  const fn = { dashboard, speakers, agents, tmux: tmuxPage, messages: messagesPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+  const fn = { dashboard, speakers, agents, tmux: tmuxPage, messages: messagesPage, memory: memoryPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
     history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
@@ -703,6 +703,223 @@ async function messagesPage(main) {
   }, 2500);
 }
 
+// ---------------------------------------------------------------------------------------------- shared memory
+// What the owner's agents share: messages between them (so two agents on one server don't clash) and notes in
+// folders they build themselves (servers/<host>/<lxc|vm>/<service>, repos/<repo>, ...). The agents use MCP tools;
+// this page shows everything and lets you write, fix and restore.
+async function memoryPage(main, rest) {
+  const tab = rest[0] === "notes" ? "notes" : "messages";
+  const tabs = el("div", { class: "tabs" },
+    el("button", { class: tab === "messages" ? "on" : "", onclick: () => { location.hash = "#/memory/messages"; } }, "Agent messages"),
+    el("button", { class: tab === "notes" ? "on" : "", onclick: () => { location.hash = "#/memory/notes"; } }, "Project notes"));
+  const body = el("div");
+  main.replaceChildren(el("h1", {}, "Shared memory"), tabs, body);
+  if (tab === "notes") return memoryNotes(body, rest.slice(1).map(decodeURIComponent).join("/"));
+  return memoryMessages(body);
+}
+
+function peerCard(a) {
+  return el("div", { class: "peer" },
+    el("div", { class: "row" }, el("span", { class: "dot" + (a.last_seen && Date.now() - Date.parse(a.last_seen) < 900000 ? " ok" : "") }),
+      el("strong", {}, a.name), a.key.startsWith("agent:") ? el("span", { class: "chip" }, "telerouter agent") : null),
+    el("div", { class: a.status ? "" : "hint" }, a.status || (a.name === "owner" ? "you" : "no status")),
+    el("div", { class: "hint" }, a.name === "owner" ? "" : "last seen " + (a.last_seen ? ago(Date.parse(a.last_seen) / 1000) : "never")
+      + (a.status_at ? " · status set " + ago(Date.parse(a.status_at) / 1000) : "")));
+}
+
+async function memoryMessages(box) {
+  let last = 0, agents = [];
+  const peers = el("div", { class: "peers" });
+  const log = el("div", { class: "chatlog" });
+  const to = el("select", { name: "to", "aria-label": "To" });
+  const project = el("input", { type: "text", name: "project", maxlength: 120, placeholder: "about (optional): servers/pve1/ct-118, repos/telerouter…" });
+  const text = el("textarea", { name: "text", rows: 2, maxlength: 4000, placeholder: "Write to your agents…", "aria-label": "Message" });
+  let replyTo = null;
+  const replying = el("div", { class: "hint hidden" });
+  const fillTo = () => {
+    const keep = to.value || "everyone";
+    to.replaceChildren(el("option", { value: "everyone" }, "everyone"),
+      ...agents.filter(a => a.name !== "owner").map(a => el("option", { value: a.name }, a.name)));
+    to.value = [...to.options].some(o => o.value === keep) ? keep : "everyone";
+  };
+  const bubble = m => el("div", { class: "msg " + (m.from_key === "owner" ? "mine" : "theirs") },
+    el("div", { class: "meta" }, `#${m.id} · ${m.from} → ${m.to}` + (m.project ? ` · ${m.project}` : "") + ` · ${when(m.at)}`
+      + (m.reply_to ? ` · reply to #${m.reply_to}` : "")),
+    el("div", { class: "txt" }, m.text),
+    el("div", { class: "foot row" }, el("span", {}, m.read_by.length ? "read by " + m.read_by.join(", ") : "not read yet"),
+      el("span", { class: "spacer" }),
+      el("button", { class: "small", onclick: () => {
+        replyTo = m.id; to.value = m.from_key === "owner" ? to.value : (agents.some(a => a.name === m.from) ? m.from : "everyone");
+        project.value = m.project || ""; replying.textContent = `Replying to #${m.id} (${m.from})`; replying.classList.remove("hidden"); text.focus();
+      } }, "Reply")));
+  const add = msgs => {
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 40;
+    for (const m of msgs) { if (m.id > last) { log.append(bubble(m)); last = m.id; } }
+    if (stick) log.scrollTop = log.scrollHeight;
+  };
+  const load = async () => {
+    const r = await api("GET", "/api/memory/messages?after=" + last);
+    agents = r.agents;
+    peers.replaceChildren(...agents.map(peerCard));
+    if (document.activeElement !== to) fillTo();
+    add(r.messages);
+  };
+  const send = async () => {
+    const t = text.value.trim();
+    if (!t) return;
+    await act(() => api("POST", "/api/memory/messages", { to: to.value, text: t, project: project.value.trim(), reply_to: replyTo }));
+    text.value = ""; replyTo = null; replying.classList.add("hidden");
+    await load();
+  };
+  text.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send().catch(() => {}); } });
+  box.replaceChildren(
+    el("div", { class: "card" }, el("h2", {}, "Agents"),
+      el("p", { class: "hint" }, "Every agent that shares this memory and what it says it is working on. telerouter's own agents are in automatically; give any other agent (e.g. Claude Code or Hermes on another machine) an MCP token with “shared memory” under MCP access."),
+      peers),
+    el("div", { class: "card" }, el("h2", {}, "Messages between agents"),
+      el("p", { class: "hint" }, "Agents write here before touching something another agent works on (send_agent_message) and read their new messages with read_agent_messages. You see every message and who has read it; yours go to the agents the same way."),
+      log, replying,
+      el("div", { class: "row" }, el("span", {}, "To"), to, project),
+      el("div", { class: "composer" }, text, el("button", { class: "primary", onclick: () => send().catch(() => {}) }, "Send"))));
+  await load();
+  log.scrollTop = log.scrollHeight;
+  poll(load, 4000);
+}
+
+async function memoryNotes(box, path) {
+  const [st, folder] = await Promise.all([api("GET", "/api/memory"), path ? api("GET", "/api/memory/folder?path=" + encodeURIComponent(path)).catch(() => null) : api("GET", "/api/memory/folder")]);
+  if (path && !folder) { location.hash = "#/memory/notes"; return; }
+  const go = p => { location.hash = "#/memory/notes" + (p ? "/" + p.split("/").map(encodeURIComponent).join("/") : ""); };
+  const view = el("div");
+
+  // folder tree (all folders, indented; the open folder's parents are highlighted)
+  const tree = el("div", { class: "tree" },
+    el("a", { href: "#/memory/notes", class: path === "" ? "on" : "" }, "/ (top level)"),
+    st.folders.map(f => {
+      const depth = f.path.split("/").length - 1;
+      return el("a", { href: "#/memory/notes/" + f.path.split("/").map(encodeURIComponent).join("/"), class: "d" + Math.min(depth, 6) + (f.path === path ? " on" : path.startsWith(f.path + "/") ? " up" : ""), title: f.description || f.path },
+        f.path.split("/").pop(), f.notes ? el("span", { class: "muted" }, " · " + f.notes) : null);
+    }));
+
+  const q = el("input", { type: "search", name: "q", placeholder: "Search notes…", "aria-label": "Search notes" });
+  q.addEventListener("keydown", async e => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (!q.value.trim()) { showFolder(); return; }
+    const r = await act(() => api("GET", "/api/memory/search?q=" + encodeURIComponent(q.value) + "&folder=" + encodeURIComponent(path)));
+    view.replaceChildren(el("div", { class: "card" }, el("h2", {}, `Search: ${q.value}` + (path ? ` in ${path}` : "")),
+      r.notes.length ? r.notes.map(n => el("div", { class: "note-row", onclick: () => showNote(n.id) },
+        el("strong", {}, n.title), el("span", { class: "muted" }, " · " + n.folder), el("div", { class: "hint" }, n.snippet)))
+        : el("p", { class: "hint" }, "Nothing found."),
+      el("button", { onclick: showFolder }, "Back")));
+  });
+
+  const crumbs = () => {
+    const parts = path ? path.split("/") : [];
+    return el("div", { class: "crumbs" }, el("a", { href: "#/memory/notes" }, "top"),
+      parts.map((p, i) => [" / ", el("a", { href: "#/memory/notes/" + parts.slice(0, i + 1).map(encodeURIComponent).join("/") }, p)]));
+  };
+
+  const newFolder = () => {
+    const f = el("form", {}, field("Folder path", inp("path", path ? path + "/" : "", { required: true }), "Sub-folders with /, e.g. servers/pve1/ct-118-telerouter/telerouter. Missing parents are created."),
+      field("Description", el("textarea", { name: "description", rows: 2, maxlength: 2000 })),
+      el("button", { class: "primary", type: "submit" }, "Create"));
+    const close = modal("New folder", f);
+    f.addEventListener("submit", async e => { e.preventDefault(); const d = formData(f); const r = await act(() => api("POST", "/api/memory/folders", d), "Created"); close(); go(r.path); });
+  };
+  const editFolder = () => {
+    const f = el("form", {}, field("Folder path", inp("new_path", path, { required: true }), "Change it to rename or move the folder with everything in it."),
+      field("Description", el("textarea", { name: "description", rows: 3, maxlength: 2000, value: folder.description })),
+      el("div", { class: "row" }, el("button", { class: "primary", type: "submit" }, "Save"), el("span", { class: "spacer" }),
+        el("button", { class: "danger", type: "button", onclick: async () => {
+          if (!confirm(`Delete ${path} and everything in it? Its notes go to the trash.`)) return;
+          await act(() => api("POST", "/api/memory/folders/delete", { path }), "Deleted"); close(); go(path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+        } }, "Delete folder")));
+    const close = modal("Folder", f);
+    f.addEventListener("submit", async e => { e.preventDefault(); const d = formData(f); const r = await act(() => api("PUT", "/api/memory/folders", { path, new_path: d.new_path, description: d.description }), "Saved"); close(); go(r.path); });
+  };
+  const editNote = n => {
+    const isNew = !n;
+    n = n || { folder: path, title: "", body: "" };
+    const f = el("form", {}, el("div", { class: "form2" }, field("Title", inp("title", n.title, { required: true, maxlength: 120, placeholder: "e.g. architecture, changelog" })),
+      field("Folder", inp("folder", n.folder))),
+      field("Text (markdown)", el("textarea", { name: "body", class: "note-edit", maxlength: 100000, value: n.body })),
+      el("button", { class: "primary", type: "submit" }, isNew ? "Create" : "Save"));
+    const close = modal(isNew ? "New note" : "Edit note", f);
+    f.addEventListener("submit", async e => {
+      e.preventDefault();
+      const d = formData(f);
+      const r = isNew ? await act(() => api("POST", "/api/memory/notes", d), "Created")
+        : await act(() => api("PUT", `/api/memory/notes/${n.id}`, { ...d, version: n.version }), "Saved");
+      close();
+      if (r.folder !== path) go(r.folder); else { await refreshFolder(); showNote(r.id); }
+    });
+  };
+
+  let cur = folder;
+  const refreshFolder = async () => { cur = await api("GET", "/api/memory/folder?path=" + encodeURIComponent(path)); };
+  function showFolder() {
+    const f = cur;
+    view.replaceChildren(el("div", { class: "card" },
+      el("div", { class: "row" }, crumbs(), el("span", { class: "spacer" }),
+        path ? el("button", { class: "small", onclick: editFolder }, "Edit folder") : null,
+        el("button", { class: "small", onclick: newFolder }, "New folder"),
+        el("button", { class: "small primary", onclick: () => editNote(null) }, "New note")),
+      f.description ? el("p", { class: "desc" }, f.description) : null,
+      f.folders.length ? el("div", { class: "subfolders" }, f.folders.map(s => el("a", { class: "button small", href: "#/memory/notes/" + s.path.split("/").map(encodeURIComponent).join("/") },
+        "📁 " + s.path.split("/").pop() + (s.notes_inside ? ` (${s.notes_inside})` : "")))) : null,
+      f.notes.length ? f.notes.map(n => el("div", { class: "note-row", onclick: () => showNote(n.id) },
+        el("strong", {}, n.title), el("span", { class: "muted" }, ` · v${n.version} · ${n.updated_by} · ${ago(n.updated)}`)))
+        : el("p", { class: "hint" }, path ? "No notes in this folder yet." : "Notes live in folders: open or create one. Agents create their own too.")));
+  }
+  async function showNote(id) {
+    const n = await act(() => api("GET", `/api/memory/notes/${id}`));
+    const hist = el("div", { class: "hidden" }, el("h3", {}, "Earlier versions"),
+      n.revisions.length ? n.revisions.map(r => el("div", { class: "note-row", onclick: async () => {
+        const old = await act(() => api("GET", `/api/memory/notes/${id}/revisions/${r.version}`));
+        modal(`${old.title} · version ${old.version}`, el("div", {}, el("p", { class: "hint" }, `${old.by} · ${when(old.at)} · in ${old.folder || "top level"}`),
+          el("pre", { class: "note-body" }, old.body),
+          el("button", { onclick: async () => {
+            if (!confirm(`Put version ${old.version} back? The current text is kept as an earlier version.`)) return;
+            await act(() => api("PUT", `/api/memory/notes/${id}`, { body: old.body, version: n.version }), "Restored");
+            document.querySelector(".modal-bg")?.remove(); showNote(id);
+          } }, "Restore this version")));
+      } }, `v${r.version} · ${r.by} · ${when(r.at)} · ${r.size} characters`))
+        : el("p", { class: "hint" }, "No earlier versions."));
+    view.replaceChildren(el("div", { class: "card" },
+      el("div", { class: "row" }, crumbs(), el("span", { class: "spacer" }), el("button", { class: "small", onclick: showFolder }, "Back")),
+      el("h2", { class: "note-title" }, n.title),
+      el("p", { class: "hint" }, `version ${n.version} · changed by ${n.updated_by} ${ago(n.updated)} · created by ${n.created_by} ${ago(n.created)}`),
+      el("pre", { class: "note-body" }, n.body || "(empty)"),
+      el("div", { class: "row" },
+        el("button", { class: "primary", onclick: () => editNote(n) }, "Edit"),
+        el("button", { onclick: () => hist.classList.toggle("hidden") }, `History (${n.revisions.length})`),
+        el("span", { class: "spacer" }),
+        el("button", { class: "danger", onclick: async () => {
+          if (!confirm(`Delete “${n.title}”? It stays in the trash for 30 days.`)) return;
+          await act(() => api("DELETE", `/api/memory/notes/${id}`), "Moved to the trash"); await refreshFolder(); showFolder();
+        } }, "Delete")),
+      hist));
+  }
+  const showTrash = async () => {
+    const r = await act(() => api("GET", "/api/memory/trash"));
+    view.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Trash"),
+      el("p", { class: "hint" }, "Deleted notes stay here for 30 days."),
+      r.notes.length ? r.notes.map(n => el("div", { class: "row note-row" }, el("strong", {}, n.title),
+        el("span", { class: "muted" }, `${n.folder || "top level"} · deleted by ${n.deleted_by} ${ago(n.deleted)}`), el("span", { class: "spacer" }),
+        el("button", { class: "small", onclick: async () => { const x = await act(() => api("POST", `/api/memory/notes/${n.id}/restore`), "Restored"); go(x.folder); } }, "Restore")))
+        : el("p", { class: "hint" }, "Empty."),
+      el("button", { onclick: showFolder }, "Back")));
+  };
+
+  box.replaceChildren(el("div", { class: "notes-layout" },
+    el("div", { class: "card notes-side" }, q, tree,
+      el("div", { class: "row" }, el("button", { class: "small", onclick: newFolder }, "New folder"), el("button", { class: "small", onclick: showTrash }, `Trash (${st.stats.trash})`)),
+      el("p", { class: "hint" }, `${st.stats.notes} notes in ${st.stats.folders} folders`)),
+    view));
+  showFolder();
+}
+
 // ---------------------------------------------------------------------------------------------- scheduled tasks
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -1077,7 +1294,7 @@ async function voice(main) {
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
   const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
-  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"]];
+  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"]];
   const f = el("form", {}, el("div", { class: "form2" }, field("Name", inp("name", "", { placeholder: "e.g. claude on my laptop", required: true }))),
     el("div", {}, SC.map(([k, t]) => chk("s_" + k, true, t))),
     field("Contacts it may use", sel("contacts_mode", "*", [["*", "all visible contacts"], ["pick", "only these…"]])),
@@ -1111,7 +1328,12 @@ async function mcp(main) {
         data.tokens.map(t => el("tr", {}, el("td", {}, t.name, t.agent_id ? el("span", { class: "chip" }, "agent") : ""), el("td", {}, t.scopes.join(", ")),
           el("td", {}, t.contacts.includes("*") ? "all" : `${t.contacts.length}`), el("td", {}, t.clients.includes("*") ? "all" : `${t.clients.length}`),
           el("td", {}, ago(t.last_used)),
-          el("td", {}, t.agent_id ? "" : el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))),
+          el("td", {}, t.agent_id ? "" : el("div", { class: "row" },
+            el("button", { class: "small", onclick: async () => {
+              const scopes = t.scopes.includes("memory") ? t.scopes.filter(x => x !== "memory") : [...t.scopes, "memory"];
+              await act(() => api("PUT", `/api/mcp-tokens/${t.id}`, { scopes }), t.scopes.includes("memory") ? "Shared memory off" : "Shared memory on"); route();
+            } }, t.scopes.includes("memory") ? "No shared memory" : "Allow shared memory"),
+            el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke"))))))),
     el("div", { class: "card" }, el("h2", {}, "New token"), f));
 }
 
