@@ -138,14 +138,19 @@ class MachineRuntime:
         res = await asyncio.wait_for(self.conn.run(cmd, input=input, check=False), timeout)
         return str(res.stdout or "")
 
-    async def _poll(self, cmd: str, timeout: float = 30) -> str:
+    async def _poll(self, cmd: str, timeout: float = 30) -> str | None:
         """One poll of a wait loop: a command that hangs on a busy host is skipped, not fatal (only the
-        caller's own deadline ends the wait). A bare TimeoutError used to fail whole scheduled runs."""
+        caller's own deadline ends the wait). A bare TimeoutError used to fail whole scheduled runs.
+        None = this poll saw nothing (hung, or the connection is being re-made): don't conclude anything
+        from it. A backup in suspend mode freezes the whole container for a minute or more."""
         try:
             return await self._sh(cmd, timeout=timeout)
         except asyncio.TimeoutError:
             log.info("[%s] a poll took over %d s (busy host?) - trying again", self.machine.name, timeout)
-            return ""
+        except (asyncssh.Error, OSError, AgentError) as e:
+            log.info("[%s] a poll failed (%s) - trying again", self.machine.name, _short(e))
+            await asyncio.sleep(3)                    # give _run time to reconnect
+        return None
 
     def _tmux(self, *args: str) -> str:
         return f"{_paths()}; tmux " + " ".join(ssh.q(x) for x in args)
@@ -490,7 +495,7 @@ class MachineRuntime:
     async def _answer_dialog(self, session: str) -> bool:
         """Answer a Claude Code dialog showing in `session` (one we know), so a prompt isn't typed into it."""
         pane = f"={session}:"
-        screen = await self._poll(self._tmux("capture-pane", "-p", "-t", pane), timeout=15)
+        screen = await self._poll(self._tmux("capture-pane", "-p", "-t", pane), timeout=15) or ""
         tail = "\n".join([ln for ln in screen.splitlines() if ln.strip()][-14:])
         keys = claude_dialog_keys(tail) if tail else None
         if not keys:
@@ -514,6 +519,8 @@ class MachineRuntime:
         while time.monotonic() < deadline:
             await asyncio.sleep(2)
             out = await self._poll(f"tail -n +{start + 1} {ssh.q(path)} 2>/dev/null | head -c 4000000")
+            if out is None:
+                continue                              # saw nothing: not a sign the prompt was lost
             reply = turn_end_without_stop(out, nonce)
             if reply is not None:
                 return reply or "Done."
@@ -525,7 +532,10 @@ class MachineRuntime:
                     continue
             if f"#{nonce}" not in out and time.monotonic() > deadline - timeout + 30:
                 # never accepted (e.g. the session was cleared and the file changed): look again once
-                newer = await self.claude_transcript(session)
+                try:
+                    newer = await self.claude_transcript(session)
+                except (asyncio.TimeoutError, asyncssh.Error, OSError, AgentError):
+                    continue                          # the host froze between two polls: look next time
                 if newer and newer != path:
                     path, start = newer, 0
         raise AgentError(f"the {session} session is still working; I stopped waiting")
@@ -547,7 +557,7 @@ class MachineRuntime:
                 f"F={start}; S=$(wc -c < {ssh.q(path)} 2>/dev/null || echo 0); "
                 f"[ \"${{S:-0}}\" -lt \"$F\" ] && F=0; "
                 f"tail -c +$((F + 1)) {ssh.q(path)} 2>/dev/null | python3 {ssh.q(reader)} {ssh.q(nonce)}")
-            line = out.strip().splitlines()[-1].strip() if out.strip() else ""
+            line = out.strip().splitlines()[-1].strip() if out and out.strip() else ""
             if not line:
                 continue
             try:

@@ -149,6 +149,15 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   "Teach auto mode about your environment?" on its own in an idle task session; the run's prompt was typed into
   it and never reached Claude. `claude_dialog_keys` dismisses it with Escape, `_ask_claude` answers known
   dialogs before typing and, if the prompt is not in the transcript after 15 s, once more and retypes it.
+- **Scheduled runs failed every 4 hours at about :12 local time (0.14.1)**: the owner's Proxmox backup job (every 4 h, all
+  guests) cannot snapshot `dir`-storage containers, so it falls back to **suspend mode** and freezes each CT for its
+  final sync (the agent host's LXC for 76 s on 2026-11-04, about 12 min into the job). The SSH keepalive (20 s x 3) dropped every
+  connection to the frozen host, and `_ask_claude`'s "prompt never accepted? look again" step ran
+  `claude_transcript` with a plain `_sh`, whose timeout failed the Compatibility run while Claude kept working.
+  Now `_poll` also survives a lost or reconnecting connection and returns None ("saw nothing", never "prompt
+  lost"), the look-again tolerates a hang, and `ssh.KEEPALIVE_COUNT_MAX = 9` (3 min). Clue for next time: on
+  the agent host, `journalctl` shows `server_input_global_request: send reply: ... Broken pipe` from
+  telerouter's address at the same time every 4 h; `/var/log/vzdump/lxc-<id>.log` on the Proxmox host shows "suspending guest".
 - **Hermes clear/context (0.13.4)**: Hermes has no `/clear` that keeps the session name (its `/clear` is
   "clear screen + new session", same as `/new`). The agent's clear types `/new telerouter-<id> #<unix time>`:
   the gateway's `/new <title>` creates the session and then renames it, and `hermes chat -c telerouter-<id>`
@@ -283,12 +292,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.14.0, 2026-11-02)
+## Status (v0.14.1, 2026-11-04)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.14.1 (2026-11-04, owner: "scheduled task compatibility gave this error the machine did not answer an SSH command
+in time"): cause was a 4-hourly suspend-mode Proxmox backup freezing the agent host (see gotchas). 2 new tests (a 75 s
+freeze with hung polls, a dropped connection and a hung look-again; keepalive >= 150 s); the freeze test fails on
+0.14.0. 247 tests pass.
 0.14 shared memory (owner: "an shared memory tab ... agent to agent messages ... so they dont crash into each
 others work ... project notes ... folders ... repos ... servers/<physical server>/<lxc/vm>/<service> ... agents
 should be able to create their own folders"): 20 tests (paths, versions/conflicts, revisions cap, trash + purge,

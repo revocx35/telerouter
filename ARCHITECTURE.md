@@ -294,7 +294,9 @@ A **Machine** (`models.Machine`) is an SSH target with a pinned host key and the
 sessions run. Agents run on a machine (their SSH fields are copied from it; 0.3 configs are migrated, with a
 backup of config.json). `agents/machine.py` keeps one SSH connection per machine, lists `tmux list-sessions`
 every 60 s (except telerouter's own `telerouter-*`), and the engine merges them into connections of kind
-`tmux` (missing ones are marked gone).
+`tmux` (missing ones are marked gone). Keepalive is 20 s x 9: a Proxmox backup in suspend mode freezes the whole
+container for a minute or more, and wait loops (`_poll`) treat a hung or lost connection during that time as
+"saw nothing" while `_run` reconnects; only the task's own timeout ends a wait.
 
 Talking to a session telerouter did not start (no hooks of its own there): Claude Code writes
 `~/.claude/sessions/<pid>.json` for the claude process in the pane, naming the live session id and so its

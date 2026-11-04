@@ -352,6 +352,69 @@ async def test_claude_dialog_is_closed_before_the_prompt_and_a_slow_poll_is_not_
     assert any("send-keys" in c and "Escape" in c for c in sent)
 
 
+async def test_a_frozen_host_and_a_dropped_connection_do_not_fail_the_run():
+    """2026-11-04: the 4-hourly Proxmox backup froze the agent host's LXC for 76 s (suspend mode). Polls hung, the SSH
+    connection dropped, and the "was the prompt ever accepted?" look-again (a plain _sh) raised TimeoutError,
+    failing the Compatibility run while Claude kept working. Now nothing seen during the freeze counts."""
+    import asyncio
+    import asyncssh
+    from telerouter.agents import machine as mod
+    rt = MachineRuntime(_Eng(), Machine(name="claude", host="h", username="u"))
+    rt.state = "ready"
+    clock = {"t": 1000.0}
+    box = {"tail": 0, "looks": 0}
+    path = "/root/.claude/projects/-root/26e646fc-fdd6-4f2f-ab9d-ff9e40dbc292.jsonl\n"
+
+    async def fake_sh(cmd, input=None, timeout=30):
+        frozen = 1 <= box["tail"] <= 25
+        if "sessions/$c.json" in cmd:
+            if frozen:
+                box["looks"] += 1
+                raise asyncio.TimeoutError()             # the look-again while frozen
+            return json.dumps({"sessionId": "26e646fc-fdd6-4f2f-ab9d-ff9e40dbc292"})
+        if cmd.startswith("ls -t"):
+            return path
+        if cmd.startswith("wc -l"):
+            return "120\n"
+        if "capture-pane" in cmd:
+            if frozen:
+                raise asyncio.TimeoutError()
+            return "❯ \n"
+        if "set-buffer" in cmd:
+            box["n"] = cmd.split("#", 1)[1][:6]
+            return ""
+        if cmd.startswith("tail -n +121"):
+            box["tail"] += 1
+            clock["t"] += 3                                # each poll is a few seconds of wall time
+            if box["tail"] <= 10:
+                raise asyncio.TimeoutError()              # hung polls
+            if box["tail"] <= 20:
+                raise asyncssh.ConnectionLost("connection lost")   # keepalive gave up, reconnecting
+            if box["tail"] <= 25:
+                return ""                                 # answers, but the transcript lookup still hangs
+            return "\n".join([
+                json.dumps({"type": "user", "message": {"content": f"[telerouter #{box['n']} · task] check"}}),
+                json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "All fine."}]}}),
+                json.dumps({"type": "system", "subtype": "turn_duration"})])
+        return ""
+    rt._sh = fake_sh
+    orig, fast = _fast_sleep()
+    orig_mono = mod.time.monotonic
+    asyncio.sleep = fast
+    mod.time.monotonic = lambda: clock["t"]
+    try:
+        reply = await rt.ask("compatibility", "check", "", header='scheduled task "Compatibility"', timeout=3600)
+    finally:
+        asyncio.sleep = orig
+        mod.time.monotonic = orig_mono
+    assert reply == "All fine." and box["tail"] == 26 and box["looks"] >= 1
+
+
+def test_ssh_keepalive_outlasts_a_backup_freeze():
+    from telerouter.agents import ssh
+    assert 20 * ssh.KEEPALIVE_COUNT_MAX >= 150
+
+
 def test_teach_auto_mode_offer_is_dismissed():
     from telerouter.agents.drivers import claude_dialog_keys
     assert claude_dialog_keys(TEACH) == ["Escape"]

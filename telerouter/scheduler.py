@@ -55,7 +55,7 @@ _COMPACT_RE = re.compile(r"^\W*TELEROUTER_COMPACT\b[:\s]*(.*)$", re.M)
 def _why(e: BaseException) -> str:
     """A readable error: asyncio's TimeoutError has no message (the run page used to say just "TimeoutError")."""
     if isinstance(e, asyncio.TimeoutError):
-        return "the machine did not answer an SSH command in time (busy or unreachable)"
+        return "the machine did not answer an SSH command in time (busy, frozen by a backup, or unreachable)"
     return str(e) or e.__class__.__name__
 
 

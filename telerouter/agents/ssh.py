@@ -14,6 +14,9 @@ from ..store import write_private
 log = logging.getLogger("telerouter.ssh")
 
 CONNECT_TIMEOUT = 15
+# 20 s x 9 = 3 min without an answer before a connection counts as dead: a Proxmox backup in suspend mode
+# freezes the whole container (76 s on 2026-11-04), and with 3 every connection dropped then.
+KEEPALIVE_COUNT_MAX = 9
 
 
 class SshKeys:
@@ -54,7 +57,7 @@ async def connect(host: str, port: int, username: str, keys: SshKeys, host_key: 
     return await asyncssh.connect(
         host, port, username=username, client_keys=[keys.key], known_hosts=([trusted], [], []),
         agent_path=None, password=None, kbdint_auth=False, connect_timeout=CONNECT_TIMEOUT,
-        keepalive_interval=20, keepalive_count_max=3)
+        keepalive_interval=20, keepalive_count_max=KEEPALIVE_COUNT_MAX)
 
 
 def q(s: str) -> str:
