@@ -21,8 +21,9 @@ jobs:
       - run: python -m pytest -q
 
   client-py39:
-    # macOS ships Python 3.9 with the Command Line Tools: the client must keep working there
-    runs-on: ubuntu-latest
+    # macOS ships Python 3.9 with the Command Line Tools: the client must keep working there.
+    # ubuntu-24.04, not -latest: setup-python has no 3.9 build for Ubuntu 26.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
