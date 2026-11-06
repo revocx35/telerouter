@@ -165,8 +165,11 @@ The page keeps each run's answer, how long it took and the session it ran in, wi
 Sessions use the machine's new-session model and permission mode. Nobody can answer a permission prompt
 during a run, so use `auto` or another mode that doesn't ask. *Calls about a run* sets who decides whether
 the agent phones you afterwards: its own rules (an agent told in its CLAUDE.md to call when a scheduled check is
-done will call after every run), or only the task. Tasks run during quiet hours too, but quiet hours
-still block their calls.
+done will call after every run), or only the task. *Telegram messages about a run* works the same way for
+messages to your paired Telegram chats (the agent's own rules, or only when the task asks, e.g. "send me the
+result on Telegram"), plus **Always send the result**: telerouter sends each run's summary, or why it failed,
+itself, so it works even for an agent that has no `send_message` tool. Tasks run during quiet hours too, but
+quiet hours still block their calls.
 
 ## Messages (web chat and Telegram)
 

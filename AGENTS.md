@@ -236,6 +236,12 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   a result"**: a test run of a scheduled-task prompt in a scratch session phoned the owner twice (unanswered).
   That's why the task setting `calls` exists ("task" = told not to phone unless the task asks). Test
   scheduled-task prompts with `calls: "task"` wording, or on a machine without that CLAUDE.md.
+- **Telegram per task (0.15)**: `messages` is separate from `calls` ("agent" / "task" / "always"). Before 0.15
+  `calls: "task"` also forbade messages, so a task saved without `messages` and with `calls: "task"` loads as
+  `messages: "task"` (`ScheduledTask._old_calls`). "always" = the scheduler itself calls `messaging.notify` after an
+  ok or failed run (not on "stopped") and the agent is told not to send the summary too; a send error is recorded
+  as the exception's class name only (a Telegram error can carry the bot token in its URL). An agent run by a
+  machine session sends only if the MCP token in its own config has the `messaging` scope.
 - Real Claude Code 2.1.303 answered the context reminder with exactly `TELEROUTER_CLEAR` in a session with
   nothing in progress; after `/clear`, `~/.claude/sessions/<pid>.json` names the new session id at once.
 - **Claude Code honours `NODE_EXTRA_CA_CERTS` for HTTP MCP servers** (2.1.303, a Bun binary): a server signed by a
@@ -292,12 +298,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.14.1, 2026-11-04)
+## Status (v0.15.0, 2026-11-06)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.15.0 (2026-11-06, owner: "in the scheduled tasks section ... calls ... only if task asks for it and global rules.
+can you do the same for telegram messages so an scheduled task can send messages to me on telegram"): per-task
+*Telegram messages about a run* (agent's rules / only if the task asks / always send the result), split from
+*Calls about a run*. 3 new tests. 250 tests pass.
 0.14.1 (2026-11-04, owner: "scheduled task compatibility gave this error the machine did not answer an SSH command
 in time"): cause was a 4-hourly suspend-mode Proxmox backup freezing the agent host (see gotchas). 2 new tests (a 75 s
 freeze with hung polls, a dropped connection and a hung look-again; keepalive >= 150 s); the freeze test fails on

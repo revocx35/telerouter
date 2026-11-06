@@ -605,8 +605,19 @@ class ScheduledTask(BaseModel):
     timezone: str = Field(default_factory=lambda: os.environ.get("TZ") or "UTC")
     timeout_minutes: int = Field(default=60, ge=1, le=24 * 60)
     # "agent": the agent's own rules decide whether it phones you about a run (e.g. your CLAUDE.md);
-    # "task": it is told not to phone, message or announce anything unless the task asks for it
+    # "task": it is told not to phone or announce anything unless the task asks for it
     calls: Literal["agent", "task"] = "agent"
+    # Telegram messages (send_message) about a run: "agent" / "task" as above; "always": telerouter itself
+    # sends the run's summary (or its error) to the paired Telegram chats and the agent is told not to
+    messages: Literal["agent", "task", "always"] = "agent"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _old_calls(cls, data):
+        # before 0.15 `calls: "task"` also meant "no messages": keep that for tasks saved without `messages`
+        if isinstance(data, dict) and "messages" not in data and data.get("calls") == "task":
+            data = {**data, "messages": "task"}
+        return data
 
     @field_validator("name")
     @classmethod

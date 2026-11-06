@@ -201,6 +201,27 @@ class Scheduler:
         finally:
             run["ended"] = time.time()
             self._save()
+        if t.messages == "always" and run.get("status") in ("ok", "error"):
+            await self._send_result(t, run)
+
+    async def _send_result(self, t: ScheduledTask, run: dict) -> None:
+        """messages: "always": the run's summary (or why it failed) to the owner's Telegram."""
+        messaging = getattr(self.engine, "messaging", None)
+        if not messaging:
+            return
+        if run["status"] == "ok":
+            text = run.get("reply", "").strip() or "(the run ended without a summary)"
+        else:
+            text = f"The run failed: {run.get('error') or 'unknown error'}"
+        try:
+            n = await messaging.notify(f"Scheduled task \"{t.name}\":\n{text}",
+                                       f"— scheduled task · {self.where(t)}")
+            run["messaged"] = n
+            log.info("task %s: result sent to %d Telegram chat(s)", t.name, n)
+        except Exception as ex:                     # never fail the run because the message could not go out
+            run["messaged_error"] = ex.__class__.__name__   # never str(ex): a bot token can be in its URL
+            log.warning("task %s: result not sent: %s", t.name, ex.__class__.__name__)
+        self._save()
 
     def where(self, t: ScheduledTask) -> str:
         store = self.engine.store
@@ -217,9 +238,8 @@ class Scheduler:
         at = dt.datetime.fromtimestamp(run["started"], ZoneInfo(t.timezone)).strftime("%Y-%m-%d %H:%M")
         text = (f"scheduled task \"{t.name}\" ({at}): an automatic run nobody is watching. Do the task, then "
                 f"end with a short summary of the result (telerouter keeps it)")
-        if t.calls == "task":
-            text += ". Don't phone, message or announce anything about this run unless the task asks you to"
-        return text
+        rules = _rules(t)
+        return text + (". " + ". ".join(rules) if rules else "")
 
     async def _execute(self, t: ScheduledTask, run: dict) -> str:
         e = self.engine
@@ -230,9 +250,9 @@ class Scheduler:
             if not rt:
                 raise AgentError("the agent is not running")
             text = t.prompt
-            if t.calls == "task":
-                text += ("\n\n(Don't phone, message or announce anything about this run unless the task above asks "
-                         "you to.)")
+            rules = _rules(t, above=True)
+            if rules:
+                text += "\n\n(" + ". ".join(rules) + ".)"
             return await rt.ask(text, Source("schedule", f"scheduled task \"{t.name}\""), timeout=timeout)
         mrt = e.machine_rts.get(t.machine_id)
         if not mrt:
@@ -339,6 +359,22 @@ class Scheduler:
         return {"next": s["next"], "next_local": _local(s["next"], t) if s["next"] else "",
                 "running": t.id in self.running, "schedule_text": describe(t),
                 "where": self.where(t), "sessions": list(s["sessions"]), "runs": list(reversed(s["runs"][-10:]))}
+
+
+def _rules(t: ScheduledTask, above: bool = False) -> list[str]:
+    """What the agent is told about phoning and messaging the owner after a run."""
+    task = "the task above" if above else "the task"
+    out = []
+    if t.calls == "task" and t.messages == "task":
+        out.append(f"Don't phone, message or announce anything about this run unless {task} asks you to")
+    elif t.calls == "task":
+        out.append(f"Don't phone or announce anything about this run unless {task} asks you to")
+    elif t.messages == "task":
+        out.append(f"Don't send Telegram messages about this run unless {task} asks you to")
+    if t.messages == "always":
+        out.append("telerouter sends your summary to the owner's Telegram itself, so don't send it with "
+                   "send_message")
+    return out
 
 
 def _local(ts: float, t: ScheduledTask) -> str:

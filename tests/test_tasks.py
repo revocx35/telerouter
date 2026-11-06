@@ -350,6 +350,61 @@ async def test_calls_about_a_run_only_when_the_task_asks(tmp_path):
     assert "phone" not in own[2]                                   # the agent's own rules decide
 
 
+async def test_telegram_messages_about_a_run(tmp_path):
+    e = _Eng(tmp_path)
+    m = e.store.config.machines[0]
+    sent = []
+
+    class _Msg:
+        async def notify(self, text, footer):
+            sent.append((text, footer))
+            return 1
+    e.messaging = _Msg()
+    sch = Scheduler(e)
+    for t in (task(messages="task"), task(name="c", target="new_session", machine_id=m.id, calls="task", messages="agent"),
+              task(name="always", target="new_session", machine_id=m.id, messages="always")):
+        e.store.config.tasks.append(t)
+        sch.run_now(t)
+        await _settle(sch)
+    assert e.jarvis.asked[0][0].endswith("(Don't send Telegram messages about this run unless the task above asks "
+                                         "you to.)")
+    calls_only, always = e.machine_rts[m.id].asked
+    assert calls_only[2].endswith("Don't phone or announce anything about this run unless the task asks you to")
+    assert "message" not in calls_only[2]
+    assert always[2].endswith("telerouter sends your summary to the owner's Telegram itself, so don't send it with "
+                              "send_message")
+    assert len(sent) == 1 and sent[0][0].startswith('Scheduled task "always":\n') and "scheduled task" in sent[0][1]
+    assert sch.st(e.store.config.tasks[-1].id)["runs"][-1]["messaged"] == 1
+
+
+async def test_always_message_reports_a_failed_run(tmp_path):
+    e = _Eng(tmp_path)
+    sent = []
+
+    class _Msg:
+        async def notify(self, text, footer):
+            sent.append(text)
+            raise RuntimeError("https://api.telegram.org/botSECRET/sendMessage")
+
+    async def broken(text, source, on_note=None, timeout=None):
+        raise AgentError("the agent is not running")
+    e.messaging, e.jarvis.ask = _Msg(), broken
+    t = task(messages="always")
+    e.store.config.tasks.append(t)
+    sch = Scheduler(e)
+    sch.run_now(t)
+    await _settle(sch)
+    run = sch.st(t.id)["runs"][-1]
+    assert sent == ['Scheduled task "Mail summary":\nThe run failed: the agent is not running']
+    assert run["status"] == "error" and run["messaged_error"] == "RuntimeError"      # never the URL with the token
+
+
+def test_old_calls_task_setting_keeps_messages_quiet():
+    assert task(calls="task").messages == "task"                  # saved before the setting existed
+    assert task(calls="task", messages="agent").messages == "agent"
+    assert task().messages == "agent"
+
+
 async def test_overlap_once_and_restart(tmp_path):
     e = _Eng(tmp_path)
     gate = asyncio.Event()

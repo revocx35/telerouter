@@ -954,13 +954,15 @@ async function tasksPage(main) {
           el("td", {}, r.ended ? `${Math.max(1, Math.round((r.ended - r.started) / 60))} min` : ""),
           el("td", {}, r.error ? el("span", { class: "err" }, r.error) : "",
             r.reply ? (r.reply.length > 200 ? el("details", {}, el("summary", {}, r.reply.slice(0, 200) + "…"), el("pre", { class: "screen" }, r.reply)) : r.reply) : "",
-            r.context_note ? el("div", { class: "muted" }, r.context_note) : "")))) : null);
+            r.context_note ? el("div", { class: "muted" }, r.context_note) : "",
+            r.messaged !== undefined ? el("div", { class: "muted" }, r.messaged ? `sent to Telegram (${r.messaged} chat${r.messaged > 1 ? "s" : ""})` : "no Telegram chat online; kept on the Messages page") : "",
+            r.messaged_error ? el("div", { class: "muted" }, `Telegram message failed: ${r.messaged_error}`) : "")))) : null);
   }
   function taskForm(t) {
     const isNew = !t;
     t = t || { name: "", prompt: "", enabled: true, target: "agent", agent_id: "", machine_id: (data.machines[0] || {}).id || "", folder: "~",
       session_name: "", keep_sessions: 3, context_limit_k: 300, schedule: "daily", times: ["09:00"], days: [], every_minutes: 60, at: "", cron: "",
-      timezone: data.timezone, timeout_minutes: 60, calls: "agent" };
+      timezone: data.timezone, timeout_minutes: 60, calls: "agent", messages: "agent" };
     const box = (...kids) => el("div", {}, ...kids);
     const agentBox = box(data.agents.length > 1 ? field("Agent", sel("agent_id", t.agent_id || data.default_agent_id, data.agents.map(a => [a.id, a.name]))) : "",
       el("p", { class: "hint" }, "Typed into the agent's ongoing conversation: it remembers earlier runs and everything else you talked about. While a run is going on, voice requests to it get \"busy with the scheduled task\"."));
@@ -999,7 +1001,9 @@ async function tasksPage(main) {
       dailyBox, intervalBox, onceBox, cronBox,
       el("div", { class: "form2" }, field("Stop waiting after (minutes)", num("timeout_minutes", t.timeout_minutes, { min: 1 })),
         field("Calls about a run", sel("calls", t.calls, [["agent", "The agent's own rules decide"], ["task", "Only if the task asks for it"]]),
-          "With its own rules, an agent that is told to call you when a scheduled check is done (e.g. in your CLAUDE.md) phones you after every run.")),
+          "With its own rules, an agent that is told to call you when a scheduled check is done (e.g. in your CLAUDE.md) phones you after every run."),
+        field("Telegram messages about a run", sel("messages", t.messages, [["agent", "The agent's own rules decide"], ["task", "Only if the task asks for it"], ["always", "Always send the result"]]),
+          "Messages go to your paired Telegram chats (Messages page). The agent sends them with send_message, which a session on a machine has only if its MCP token has the messaging scope. \"Always\" needs no token: telerouter sends the run's summary, or why it failed, itself.")),
       el("div", { class: "row" }, chk("enabled", t.enabled, "On")));
     target.addEventListener("change", sync); kind.addEventListener("change", sync);
     $("[name=machine_id]", sessBox).addEventListener("change", sync);

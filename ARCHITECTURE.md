@@ -343,8 +343,12 @@ skipped.
 
 Prompts are headed `[telerouter #nonce · scheduled task "X" (date time): an automatic run nobody is
 watching. Do the task, then end with a short summary of the result (telerouter keeps it)]`, not as spoken
-requests. With `calls: "task"` the header (or, for an agent, a line after the prompt) adds "Don't phone,
-message or announce anything about this run unless the task asks you to". MCP `_source()` treats a
+requests. With `calls: "task"` the header (or, for an agent, a line after the prompt) adds "Don't phone or
+announce anything about this run unless the task asks you to"; with `messages: "task"` "Don't send Telegram
+messages ..." (both: "Don't phone, message or announce ..."). With `messages: "always"` the agent is told that
+telerouter sends its summary, and after an ok or failed run the scheduler calls `Messaging.notify` with the reply
+(or the error) and a `— scheduled task · <where>` footer; the run records `messaged` (chats reached) or
+`messaged_error` (exception class only). Tasks saved before 0.15 with `calls: "task"` load as `messages: "task"`. MCP `_source()` treats a
 scheduled run like the agent acting on its own (no requesting speaker, quiet hours apply).
 
 **Context reminder** (`task_session`, Claude Code or Hermes, `context_limit_k` > 0): after the run telerouter
