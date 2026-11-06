@@ -7,18 +7,25 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
 <client token>` when a reverse proxy in front uses the Authorization header itself):
 
   client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool, "transcript": bool,
-                            "speech": bool}   speech false = show answers as text only, don't speak them
+                            "speech": bool, "stt": "device"}   speech false = show answers as text only, don't
+                           speak them (the phone reads them itself, or shows text only); stt "device" = the
+                           phone recognises speech itself and sends utterances instead of listening audio
                     binary 16 kHz mono PCM16 LE microphone audio (any size up to 64 KiB, usually 20 ms)
                     text   {"type": "pong"} / {"type": "button", "action": "talk"|"cancel", "cue": bool}
                            talk with "cue": false = the device played its own start sound (on-device wake
                            word): listening starts at once, audio sent right after the message counts
+                    text   {"type": "utterance", "text"}   what the person said, recognised on the device
+                           (stt "device"): answers a listen (follow-up, ask_speaker) or, when idle, starts a
+                           turn; "" = nothing was said. Sent while busy it is dropped (cancel, wait for idle)
                     text   {"type": "assistant", "open": bool}   its assistant sheet opened/closed, so an
                            agent that is still working knows the person stopped listening (and can call)
   server -> client  binary 16 kHz mono PCM16 LE audio to play
                     text   {"type": "state", "state": "idle|listening|thinking|speaking|ringing|call"}
                            {"type": "flush"}   drop everything queued for playback now
-                           {"type": "ping"}    {"type": "config", "volume": 100, "server_version", "client_id", "name"}
-                           {"type": "transcript", "role": "user"|"assistant", "text"}  (hello transcript: true)
+                           {"type": "ping"}    {"type": "config", "volume": 100, "server_version", "client_id", "name",
+                                                "language", "features": ["utterance"]}
+                           {"type": "transcript", "role": "user"|"assistant", "text", "say"}  (hello transcript:
+                           true; "say" = the answer as a voice reads it: no markdown, code or links)
 """
 
 from __future__ import annotations
@@ -62,6 +69,7 @@ class ClientConn:
         self.mic_level = -120.0
         self.wants_text = False             # hello "transcript": true (a device with a screen)
         self.speech = True                  # hello "speech": false = answers as text only (with wants_text)
+        self.device_stt = False             # hello "stt": "device" = sends utterances (text), not listening audio
 
     @property
     def name(self) -> str:
@@ -87,8 +95,11 @@ class ClientConn:
         except Exception:
             pass
 
-    def send_text(self, role: str, text: str) -> None:
-        asyncio.create_task(self.send_json({"type": "transcript", "role": role, "text": text[:4000]}))
+    def send_text(self, role: str, text: str, say: str = "") -> None:
+        msg = {"type": "transcript", "role": role, "text": text[:4000]}
+        if say:
+            msg["say"] = say[:4000]
+        asyncio.create_task(self.send_json(msg))
 
     # -- microphone ------------------------------------------------------------------------------
     def mic(self, data: bytes) -> None:

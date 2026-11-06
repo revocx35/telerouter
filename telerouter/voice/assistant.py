@@ -64,6 +64,9 @@ def sentences(text: str) -> list[str]:
 
 # a phone and a speaker that heard the same "Hey Jarvis" start their turns within this many seconds
 SAME_WAKE_S = 4.0
+# a phone with its own speech recognition may still be reading the answer aloud when telerouter listens again
+DEVICE_GRACE_S = 120.0
+MAX_UTTERANCE_CHARS = 2000
 
 
 class VoiceAssistant:
@@ -76,6 +79,8 @@ class VoiceAssistant:
         # same phrase stand down (see _phone_wins)
         self._wake_turns: dict[str, float] = {}       # speaker id -> when its wake word started a turn
         self._device_wake: tuple[float, str] = (0.0, "")
+        # phones that recognise speech themselves (hello "stt": "device") answer a listen with an utterance
+        self._utterances: dict[str, asyncio.Future] = {}
 
     # -- speaker lifecycle -------------------------------------------------------------------------------
     def attach(self, conn: VirtualSpeaker) -> None:
@@ -92,6 +97,9 @@ class VoiceAssistant:
             del self.wake[conn.id]
             asyncio.create_task(ws.stop())
         self._listeners.pop(conn.id, None)
+        fut = self._utterances.pop(conn.id, None)
+        if fut and not fut.done():
+            fut.cancel()
 
     def wake_words(self, conn: VirtualSpeaker) -> list[str]:
         return conn.cfg.wake_words or self.engine.store.config.voice.wake_words
@@ -163,11 +171,16 @@ class VoiceAssistant:
             return False
         return any(s.state != "ended" and s.client_id != conn.id for s in self.engine.calls.active())
 
-    def start_turn(self, conn: VirtualSpeaker, cue: bool = True) -> None:
+    def start_turn(self, conn: VirtualSpeaker, cue: bool = True, text: str | None = None) -> None:
         """Start a voice turn. cue=False: the device already played its own start sound (the phone app after
         its on-device wake word) and streams what was said right after it, so listening starts at once and
-        no audio is lost waiting for the task to run."""
+        no audio is lost waiting for the task to run. text: the device recognised the words itself
+        (an utterance), so the turn starts with the agent."""
         if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):
+            return
+        if text is not None:
+            self._phone_wins(conn)
+            conn.busy_task = asyncio.create_task(self._turn(conn, False, first_text=text))
             return
         if not cue:
             self._phone_wins(conn)
@@ -196,14 +209,31 @@ class VoiceAssistant:
         return vs.name if vs else sid
 
     # -- one conversation turn ------------------------------------------------------------------------------
-    async def _turn(self, conn: VirtualSpeaker, cue: bool = True) -> None:
+    def utterance(self, conn: VirtualSpeaker, text: str) -> bool:
+        """What a phone recognised itself (on-device speech recognition). It answers the listen that is waiting
+        for it (a follow-up, an agent's question), or starts a turn when the speaker is idle. "" = nothing
+        was said. False: nothing to answer and the speaker is busy (the phone cancels first)."""
+        fut = self._utterances.get(conn.id)
+        if fut is not None and not fut.done():
+            fut.set_result(text)
+            return True
+        if not text or conn.state != "idle" or (conn.busy_task and not conn.busy_task.done()):
+            return False
+        log.info("[%s] utterance from the device", conn.name)
+        self.start_turn(conn, text=text)
+        return True
+
+    async def _turn(self, conn: VirtualSpeaker, cue: bool = True, first_text: str | None = None) -> None:
         e = self.engine
         try:
             follow = True
             first = True
             while follow:
                 follow = False
-                text = await self.listen(conn, None if first else 5.0, cue=cue or not first)
+                if first and first_text is not None:
+                    text = self._heard(conn, first_text)
+                else:
+                    text = await self.listen(conn, None if first else 5.0, cue=cue or not first)
                 first = False
                 if text is None:
                     return
@@ -237,6 +267,9 @@ class VoiceAssistant:
         set up the endpointer (the device played its own start sound)."""
         e = self.engine
         v = e.store.config.voice
+        if conn.device_stt and (cue or conn.id not in self._listeners):
+            # (a talk with cue false still streams audio: the phone's recogniser wasn't usable this time)
+            return await self._listen_device(conn, start_timeout)
         conn.prepare()                 # a Cast output launches its receiver while the person talks
         first = self._listeners.get(conn.id) if not cue else None
         if first is None:
@@ -294,6 +327,37 @@ class VoiceAssistant:
         conn.transcript("user", text)
         return text
 
+    def _heard(self, conn: VirtualSpeaker, text: str) -> str:
+        text = " ".join(text.split())[:MAX_UTTERANCE_CHARS]
+        conn.set_state("thinking")
+        log.info("[%s] heard (on the device): %s", conn.name, text)
+        conn.last_text = text
+        conn.transcript("user", text)
+        return text
+
+    async def _listen_device(self, conn: VirtualSpeaker, start_timeout: float | None) -> str | None:
+        """The phone listens with its own speech recognition: it plays its own start sound, may still be
+        reading the last answer aloud, and sends the words (or "" for nothing). The wait is long for that."""
+        v = self.engine.store.config.voice
+        fut = asyncio.get_running_loop().create_future()
+        old = self._utterances.get(conn.id)
+        if old is not None and not old.done():
+            old.cancel()
+        self._utterances[conn.id] = fut
+        conn.flush()
+        conn.set_state("listening")
+        try:
+            text = await asyncio.wait_for(fut, (start_timeout or v.listen_timeout) + v.max_utterance + DEVICE_GRACE_S)
+        except TimeoutError:
+            text = ""
+        finally:
+            if self._utterances.get(conn.id) is fut:
+                del self._utterances[conn.id]
+        if not text.strip():
+            conn.set_state("idle")
+            return None
+        return self._heard(conn, text)
+
     async def _ask_agent(self, conn: VirtualSpeaker, text: str) -> str | None:
         e = self.engine
         agent = e.store.agent_for_speaker(conn.cfg)
@@ -322,8 +386,11 @@ class VoiceAssistant:
         ticker = asyncio.create_task(self._think_ticks(conn))
 
         async def note(msg: str) -> None:
-            conn.play(await e.speech.synthesize_all(speakable(f"{agent.name} needs you at the terminal: {msg}"),
-                                                    e.store.config.voice.tts_voice))
+            line = f"{agent.name} needs you at the terminal: {msg}"
+            if not conn.speaks_answers:          # a phone that reads answers itself (or shows text only)
+                conn.transcript("assistant", line)
+                return
+            conn.play(await e.speech.synthesize_all(speakable(line), e.store.config.voice.tts_voice))
         try:
             src = Source("speaker", f"{conn.name} speaker" + (f" in {conn.cfg.room}" if conn.cfg.room else ""),
                          speaker_id=conn.id)
@@ -371,7 +438,7 @@ class VoiceAssistant:
         text = speakable(text)
         if not text:
             return
-        conn.transcript("assistant", shown)
+        conn.transcript("assistant", shown, say=text)
         conn.set_state("speaking")
         try:
             for part in (sentences(text) if conn.speaks_answers else []):

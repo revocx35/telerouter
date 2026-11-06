@@ -298,12 +298,17 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.15.0, 2026-11-06)
+## Status (v0.16.0, 2026-11-06)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.16.0 (2026-11-06, owner: "The telerouter mobile app uses the servers whisper/piper which is slow ... especially if
+there are noises in background, can you make it run on the client side on the android"): speaker protocol
+`hello.stt = "device"` + `utterance` message + `transcript.say` + `config.features/language` (ARCHITECTURE §3.4);
+the phone app 0.3 recognises and speaks on the device. 5 new tests (utterance turn without Whisper, empty/busy
+utterances, follow-up waiting for the phone, ask_speaker, audio fallback). 258 tests pass.
 0.15.0 (2026-11-06, owner: "in the scheduled tasks section ... calls ... only if task asks for it and global rules.
 can you do the same for telegram messages so an scheduled task can send messages to me on telegram"): per-task
 *Telegram messages about a run* (agent's rules / only if the task asks / always send the result), split from

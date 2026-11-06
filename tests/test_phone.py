@@ -156,7 +156,8 @@ async def test_a_phone_that_wants_text_only_gets_no_speech():
         await va.speak(vs, "The lights are on.")
         await asyncio.sleep(0.05)
         await dev.close()
-        assert {"type": "transcript", "role": "assistant", "text": "The lights are on."} in texts
+        assert {"type": "transcript", "role": "assistant", "text": "The lights are on.",
+                "say": "The lights are on."} in texts
         assert bool(played) is expect_audio
         assert vs.state == "idle"
 
@@ -178,8 +179,9 @@ def test_phone_connects_with_the_token_header_behind_a_proxy(settings):
                                                         "Authorization": "Bearer proxy-session"}) as ws:
             cfg = json.loads(ws.receive_text())
             assert cfg["type"] == "config" and cfg["client_id"] == got["client_id"] and cfg["name"] == "Zfold"
+            assert "utterance" in cfg["features"] and cfg["language"] == "en"
             ws.send_text(json.dumps({"type": "hello", "version": "0.2.0", "platform": "android", "aec": False,
-                                     "transcript": True, "speech": False}))
+                                     "transcript": True, "speech": False, "stt": "device"}))
             ws.send_text(json.dumps({"type": "pong"}))
             conn = None
             for _ in range(50):
@@ -188,4 +190,117 @@ def test_phone_connects_with_the_token_header_behind_a_proxy(settings):
                     break
                 import time
                 time.sleep(0.02)
-            assert conn is not None and conn.wants_text and conn.speech is False
+            assert conn is not None and conn.wants_text and conn.speech is False and conn.device_stt
+
+
+# -- speech recognised on the phone (hello "stt": "device", utterance messages) ------------------------------------
+
+def _no_whisper(va):
+    async def transcribe(audio, language, names):
+        raise AssertionError("Whisper must not run for a phone that recognises speech itself")
+    va.engine.speech.transcribe = transcribe
+
+
+async def test_an_utterance_from_the_phone_starts_a_turn_without_whisper():
+    vs, dev, texts, played = phone()
+    dev.device_stt = True
+    va, _ = assistant()
+    _no_whisper(va)
+    asked, spoken = [], []
+
+    async def ask(conn, text):
+        asked.append(text)
+        return "Done, the light is on."
+
+    async def speak(conn, text):
+        spoken.append(text)
+    va._ask_agent, va.speak = ask, speak
+    assert va.utterance(vs, "  Turn on\nthe light. ")
+    await asyncio.wait_for(vs.busy_task, 5)
+    assert asked == ["Turn on the light."] and spoken == ["Done, the light is on."]
+    assert {"type": "transcript", "role": "user", "text": "Turn on the light."} in texts
+    assert not played                                     # no server beeps: the phone plays its own sounds
+    assert vs.state == "idle"
+
+
+async def test_an_empty_or_busy_utterance_does_nothing():
+    vs, dev, texts, _ = phone()
+    dev.device_stt = True
+    va, _ = assistant()
+    assert not va.utterance(vs, "")                        # nothing said, nothing waiting
+    assert vs.busy_task is None
+    vs.state = "thinking"
+    assert not va.utterance(vs, "Hello")                   # busy: the phone cancels and waits for idle first
+    assert vs.busy_task is None
+
+
+async def test_a_follow_up_waits_for_the_phone_to_finish_reading_and_listen():
+    vs, dev, texts, played = phone()
+    dev.device_stt = True
+    va, _ = assistant()
+    _no_whisper(va)
+    va.engine.store.config.voice.follow_up = True
+    va.engine.store.config.voice.listen_timeout = 2.0
+    asked = []
+
+    async def ask(conn, text):
+        asked.append(text)
+        return "Sure."
+
+    async def speak(conn, text):
+        conn.set_state("idle")
+    va._ask_agent, va.speak = ask, speak
+    va.utterance(vs, "Turn on the light.")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if vs.state == "listening":
+            break
+    assert vs.state == "listening"                         # follow-up: telerouter waits for the phone
+    await asyncio.sleep(2.5)                               # longer than listen_timeout: the phone may still be reading
+    assert not vs.busy_task.done()
+    assert va.utterance(vs, "And the fan.")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if len(asked) == 2:
+            break
+    assert asked == ["Turn on the light.", "And the fan."]
+    assert va.utterance(vs, "")                            # nothing said after that: the turn ends
+    await asyncio.wait_for(vs.busy_task, 5)
+    assert vs.state == "idle" and not played
+
+
+async def test_ask_speaker_on_a_phone_gets_the_recognised_answer():
+    vs, dev, texts, _ = phone()
+    dev.device_stt = True
+    va, _ = assistant()
+    _no_whisper(va)
+
+    async def speak(conn, text):
+        pass
+    va.speak = speak
+    task = asyncio.create_task(va.ask_speaker(vs, "Which room?", 10))
+    await asyncio.sleep(0.02)
+    assert vs.state == "listening"
+    va.utterance(vs, "The kitchen.")
+    assert await asyncio.wait_for(task, 5) == "The kitchen."
+
+
+async def test_a_phone_whose_recogniser_failed_can_still_send_audio():
+    vs, dev, texts, _ = phone()
+    dev.device_stt = True
+    va, transcribe = assistant()
+
+    async def ask(conn, text):
+        return "Ok."
+
+    async def speak(conn, text):
+        pass
+    va._ask_agent, va.speak = ask, speak
+    va.start_turn(vs, cue=False)                           # talk + audio, as before: Whisper hears it
+    with wave.open(str(FIXTURES / "speech.wav")) as w:
+        speech = w.readframes(w.getnframes())
+    for i in range(0, len(speech) + 48000, 640):
+        va.mic(vs, speech[i:i + 640] or bytes(640))
+    await asyncio.wait_for(vs.busy_task, 10)
+    assert len(transcribe.audio) > 32000
+

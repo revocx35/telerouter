@@ -129,13 +129,14 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 | direction | frame | meaning |
 |---|---|---|
 | client -> server | binary | microphone, 16 kHz mono PCM16 LE, 20 ms blocks |
-| client -> server | `{"type":"hello","version","platform","aec","transcript","speech"}` | after connecting; `speech: false` = answers as text only |
+| client -> server | `{"type":"hello","version","platform","aec","transcript","speech","stt"}` | after connecting; `speech: false` = answers as text only; `stt: "device"` = the client recognises speech itself |
+| client -> server | `{"type":"utterance","text"}` | (`stt: "device"`) what the person said, recognised on the device: answers a waiting listen, or starts a turn when idle; `""` = nothing said |
 | client -> server | `{"type":"button","action":"talk"\|"cancel"}` | optional push-to-talk |
 | client -> server | `{"type":"assistant","open":true\|false}` | the app's voice assistant sheet opened or closed (kept on the device as `assistant_open` / `assistant_changed`) |
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
 | server -> client | `{"type":"state","state":...}` | idle, listening, thinking, speaking, ringing, call |
 | server -> client | `{"type":"flush"}` | drop queued playback now (barge-in, call ended) |
-| server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name"}` | keep-alive, settings, which device this is |
+| server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name","language","features"}` | keep-alive, settings, which device this is; `features: ["utterance"]` since 0.16 |
 
 The server paces playback (≤250 ms ahead of real time), so it always knows when the client has
 finished playing (`ClientConn.drained()`): blips end before listening starts, and wake-word detection is
@@ -218,6 +219,17 @@ Protocol extensions the phone uses (all opt-in, old clients unaffected):
   "Hey Jarvis", buffered while the connection opened) reaches the endpointer instead of the wake word stream.
   This was verified end to end with real Whisper: "Call my mom please." sent right behind `talk` was
   transcribed whole.
+- **Speech on the phone** (0.16, app 0.3): `hello` with `"stt": "device"` and `"speech": false`. The phone runs
+  Android's on-device speech recognition and text-to-speech, so Whisper, Silero and Piper are skipped for it
+  (faster, and the phone's recogniser copes with background noise far better than the server's VAD endpointing).
+  It sends `{"type":"utterance","text"}`: when idle `VoiceAssistant.utterance` starts a turn with that text
+  (`_turn(first_text=...)`, straight to the agent); when a listen is waiting (follow-up, `ask_speaker`)
+  `_listen_device` gets it. That listen plays no server beeps and waits `listen_timeout + max_utterance + 120 s`,
+  because the phone may still be reading the last answer aloud; `""` (or the timeout) means nothing was said.
+  Answers come as `transcript` with `"say"`: the `speakable()` text the phone reads. Agent notes ("needs you at
+  the terminal") also go as text to such phones. A phone whose recogniser fails mid-turn falls back to
+  `talk{cue:false}` + audio: a turn started that way still uses Whisper. `config.features` contains
+  `"utterance"` so the phone knows the server understands it; `config.language` is Whisper's language setting.
 
 **One "Hey Jarvis", two devices**: the speakers' wake word runs on the server and reacts first, while the phone
 first has to connect. When a phone starts a turn with `cue: false`, any speaker that a wake word put into

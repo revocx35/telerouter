@@ -1665,7 +1665,8 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         engine.attach_client(conn)
         log.info("speaker '%s' connected from %s", client.name, ip)
         await conn.send_json({"type": "config", "volume": 100, "server_version": settings.version,
-                              "client_id": client.id, "name": client.name})
+                              "client_id": client.id, "name": client.name,
+                              "language": store.config.voice.language, "features": ["utterance"]})
         bucket, bucket_t = 0, time.monotonic()
 
         async def pinger():
@@ -1709,6 +1710,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                     conn.aec = bool(obj.get("aec"))
                     conn.wants_text = obj.get("transcript") is True
                     conn.speech = obj.get("speech") is not False
+                    conn.device_stt = obj.get("stt") == "device"
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()
@@ -1718,6 +1720,11 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                         client.assistant_changed = time.time()
                         store.save()
                         log.info("speaker '%s' assistant %s", client.name, "open" if obj["open"] else "closed")
+                elif t == "utterance":            # the phone recognised what was said itself
+                    vs = engine.speaker_for_mic(client.id)
+                    words = obj.get("text")
+                    if vs and isinstance(words, str) and conn.device_stt:
+                        engine.voice.utterance(vs, words[:4000])
                 elif t == "button":               # the device's buttons act on the speaker using its mic
                     vs = engine.speaker_for_mic(client.id)
                     if vs and obj.get("action") == "talk" and vs.state == "idle":

@@ -125,13 +125,19 @@ class VirtualSpeaker:
         o = self.out
         return not (isinstance(o, ClientConn) and o.wants_text and not o.speech)
 
-    def transcript(self, role: str, text: str) -> None:
-        """What was heard ("user") or answered ("assistant"), for devices with a screen (the phone app)."""
+    @property
+    def device_stt(self) -> bool:
+        """The mic device recognises speech itself (hello "stt": "device") and sends what was said as text."""
+        return isinstance(self.mic_dev, ClientConn) and self.mic_dev.device_stt
+
+    def transcript(self, role: str, text: str, say: str = "") -> None:
+        """What was heard ("user") or answered ("assistant"), for devices with a screen (the phone app).
+        say: the answer as a voice should read it (for a phone that speaks answers itself)."""
         seen = []
         for d in (self.mic_dev, self.out):
             if isinstance(d, ClientConn) and d.wants_text and all(d is not x for x in seen):
                 seen.append(d)
-                d.send_text(role, text)
+                d.send_text(role, text, say)
 
     async def close(self) -> None:
         self.closed.set()

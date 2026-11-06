@@ -7,6 +7,8 @@ telerouter, through MCP, to call him on WhatsApp, and the call is connected to t
 
 - **Speakers**: tiny clients for **Linux and macOS** stream their microphone and play what the server
   sends. Wake word (openWakeWord), speech-to-text (Whisper) and text-to-speech (Piper) run on the server.
+  The Android app can instead recognise and speak on the phone (Android's on-device speech services) and send
+  only the words: faster, and better with background noise.
   A speaker is virtual: it takes its **microphone** from one device and its **output** from the same or
   another one, including **Google Cast speakers** (Nest, Mi Smart Speaker, any Chromecast built-in). Use a
   laptop's microphone with the good loudspeaker of a Cast speaker in the same room.
