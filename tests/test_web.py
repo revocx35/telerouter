@@ -173,6 +173,24 @@ def test_mcp_tokens_shown_once_and_revocable(c):
     assert c.post("/mcp", json=rpc, headers={"Authorization": f"Bearer {tok}"}).status_code == 401
 
 
+def test_mcp_token_edit_keeps_secret_and_changes_tools(c):
+    """The UI's Edit dialog PUTs name/scopes/contacts/clients: the same secret keeps working with the new scopes."""
+    csrf = setup_admin(c)
+    h = {"X-CSRF-Token": csrf}
+    r = c.post("/api/mcp-tokens", json={"name": "alerts", "scopes": ["contacts"], "contacts": ["abc"]}, headers=h).json()
+    auth = {"Authorization": f"Bearer {r['token']}"}
+    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    body = {"name": "alerts 2", "scopes": ["contacts", "messaging"], "contacts": ["abc"], "clients": ["*"]}
+    assert c.put(f"/api/mcp-tokens/{r['id']}", json=body).status_code == 403          # CSRF still required
+    e = c.put(f"/api/mcp-tokens/{r['id']}", json={**body, "token_hash": "x", "agent_id": "y"}, headers=h).json()
+    assert e["name"] == "alerts 2" and e["scopes"] == ["contacts", "messaging"] and e["contacts"] == ["abc"]
+    assert not e["agent_id"] and not e["token_hash"]                      # write-only in the API
+    names = [t["name"] for t in c.post("/mcp", json=rpc, headers=auth).json()["result"]["tools"]]
+    assert "send_message" in names and "list_contacts" in names
+    bad = c.put(f"/api/mcp-tokens/{r['id']}", json={**body, "scopes": ["root"]}, headers=h)
+    assert bad.status_code in (400, 422)
+
+
 def test_password_change_logs_out_other_sessions(app, c):
     setup_admin(c)
     first = c.cookies.get(security.COOKIE)

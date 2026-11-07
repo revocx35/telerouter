@@ -298,11 +298,17 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.16.1, 2026-11-07)
+## Status (v0.16.2, 2026-11-07)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
+
+0.16.2 (2026-11-07, owner: "can you add and edit button"): *MCP access* had no way to change an existing token
+except the shared-memory toggle, so adding `messaging` to an existing Claude Code token needed the browser console. The
+toggle is now an **Edit** dialog (same fields as *New token*: name, scopes, contacts, speakers) that PUTs
+`/api/mcp-tokens/{id}`; the secret is unchanged, and a connected client sees new tools after it reconnects. The tokens
+table scrolls inside its card on phones (it overflowed the 390 px viewport). 1 new test; 256 tests pass.
 
 0.16.1 (2026-11-07, owner: "when i say hey jarvis and both my phone and speaker pick it up only the phone picks it up
 but the new update broke it. also after listening it doesn't go to thinking"): a device-stt phone's words arrive

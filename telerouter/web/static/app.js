@@ -1299,19 +1299,37 @@ async function voice(main) {
 async function mcp(main) {
   const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
   const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"]];
-  const f = el("form", {}, el("div", { class: "form2" }, field("Name", inp("name", "", { placeholder: "e.g. claude on my laptop", required: true }))),
-    el("div", {}, SC.map(([k, t]) => chk("s_" + k, true, t))),
-    field("Contacts it may use", sel("contacts_mode", "*", [["*", "all visible contacts"], ["pick", "only these…"]])),
-    el("div", { class: "row", id: "pick" }, contactsD.contacts.filter(c => c.enabled).map(c => chk("c_" + c.id, false, c.alias || c.name))),
-    field("Speakers it may use", sel("clients_mode", "*", [["*", "all"], ["pick", "only these…"]])),
-    el("div", { class: "row" }, spD.speakers.map(c => chk("k_" + c.id, false, c.name))),
-    el("button", { class: "primary", type: "submit" }, "Create token"));
-  f.addEventListener("submit", async e => {
-    e.preventDefault();
-    const d = formData(f);
-    const body = { name: d.name, scopes: SC.map(s => s[0]).filter(k => d["s_" + k]),
+  // The same fields for a new token and for editing one (t = the token, or null for a new one).
+  const tokenFields = t => {
+    const all = l => !t || l.includes("*");
+    // An edited token also lists the disabled contacts it holds, so saving does not drop them silently.
+    const contacts = contactsD.contacts.filter(c => c.enabled || (t && t.contacts.includes(c.id)));
+    return [el("div", { class: "form2" }, field("Name", inp("name", t ? t.name : "", { placeholder: "e.g. claude on my laptop", required: true }))),
+      el("div", {}, SC.map(([k, label]) => chk("s_" + k, t ? t.scopes.includes(k) : true, label))),
+      field("Contacts it may use", sel("contacts_mode", all(t && t.contacts) ? "*" : "pick", [["*", "all visible contacts"], ["pick", "only these…"]])),
+      el("div", { class: "row" }, contacts.map(c => chk("c_" + c.id, !!t && t.contacts.includes(c.id), c.alias || c.name))),
+      field("Speakers it may use", sel("clients_mode", all(t && t.clients) ? "*" : "pick", [["*", "all"], ["pick", "only these…"]])),
+      el("div", { class: "row" }, spD.speakers.map(c => chk("k_" + c.id, !!t && t.clients.includes(c.id), c.name)))];
+  };
+  const tokenBody = root => {
+    const d = formData(root);
+    return { name: d.name, scopes: SC.map(s => s[0]).filter(k => d["s_" + k]),
       contacts: d.contacts_mode === "*" ? ["*"] : Object.keys(d).filter(k => k.startsWith("c_") && d[k]).map(k => k.slice(2)),
       clients: d.clients_mode === "*" ? ["*"] : Object.keys(d).filter(k => k.startsWith("k_") && d[k]).map(k => k.slice(2)) };
+  };
+  const editToken = t => {
+    const ef = el("form", {}, ...tokenFields(t),
+      el("p", { class: "hint" }, "The token itself stays the same. A connected agent sees added or removed tools after it reconnects."));
+    ef.addEventListener("submit", e => e.preventDefault());
+    modal(`Edit ${t.name}`, ef, close => [el("button", { class: "primary", onclick: async () => {
+      if (!ef.reportValidity()) return;
+      await act(() => api("PUT", `/api/mcp-tokens/${t.id}`, tokenBody(ef)), "Saved"); close(); route();
+    } }, "Save")]);
+  };
+  const f = el("form", {}, ...tokenFields(null), el("button", { class: "primary", type: "submit" }, "Create token"));
+  f.addEventListener("submit", async e => {
+    e.preventDefault();
+    const body = tokenBody(f);
     const r = await act(() => api("POST", "/api/mcp-tokens", body));
     const caFile = "~/.config/telerouter/ca.pem";
     modal("Token created", el("div", {}, el("p", {}, "Copy it now: it is shown only once."), copyBox(r.token),
@@ -1327,17 +1345,14 @@ async function mcp(main) {
   main.replaceChildren(el("h1", {}, "MCP access"),
     el("div", { class: "card" }, el("h2", {}, "telerouter as an MCP server"),
       el("p", { class: "hint" }, `Any agent can use telerouter's tools (contacts, calls, speakers) at ${data.url} with a token. Agents that telerouter runs itself get their own token automatically.`)),
-    el("div", { class: "card" }, el("h2", {}, "Tokens"),
+    el("div", { class: "card" }, el("h2", {}, "Tokens"), el("div", { class: "table-wrap" },
       el("table", {}, el("tr", {}, ["Name", "Scopes", "Contacts", "Speakers", "Last used", ""].map(t => el("th", {}, t))),
         data.tokens.map(t => el("tr", {}, el("td", {}, t.name, t.agent_id ? el("span", { class: "chip" }, "agent") : ""), el("td", {}, t.scopes.join(", ")),
           el("td", {}, t.contacts.includes("*") ? "all" : `${t.contacts.length}`), el("td", {}, t.clients.includes("*") ? "all" : `${t.clients.length}`),
           el("td", {}, ago(t.last_used)),
           el("td", {}, t.agent_id ? "" : el("div", { class: "row" },
-            el("button", { class: "small", onclick: async () => {
-              const scopes = t.scopes.includes("memory") ? t.scopes.filter(x => x !== "memory") : [...t.scopes, "memory"];
-              await act(() => api("PUT", `/api/mcp-tokens/${t.id}`, { scopes }), t.scopes.includes("memory") ? "Shared memory off" : "Shared memory on"); route();
-            } }, t.scopes.includes("memory") ? "No shared memory" : "Allow shared memory"),
-            el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke"))))))),
+            el("button", { class: "small", onclick: () => editToken(t) }, "Edit"),
+            el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))))),
     el("div", { class: "card" }, el("h2", {}, "New token"), f));
 }
 

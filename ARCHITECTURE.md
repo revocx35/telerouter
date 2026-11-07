@@ -466,8 +466,8 @@ shared memory is where they meet. Two halves, one SQLite file `/data/memory.db` 
 **Identity** = the MCP token: `agent:<agent id>` (name = the agent's name) for telerouter's own agents,
 `token:<token id>` (name = the token's name) for others, `owner` for the web UI. All sessions that share one token
 (e.g. every Claude Code on one host with the user-scope MCP server) are one identity with one inbox. Who may
-use it: telerouter's agents implicitly; other tokens need the `memory` scope (*MCP access*: tick it, or "Allow
-shared memory" on an existing token). The MCP `initialize` instructions get a paragraph telling the agent when to
+use it: telerouter's agents implicitly; other tokens need the `memory` scope (*MCP access*: tick it, or *Edit* an
+existing token: name, scopes, contacts, speakers via `PUT /api/mcp-tokens/{id}`; the secret stays the same). The MCP `initialize` instructions get a paragraph telling the agent when to
 read/write (before changing a server: messages, peers, that folder's notes; after: append to `changelog`);
 telerouter's own agents get the same in their system prompt (`drivers.voice_instructions`).
 

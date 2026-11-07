@@ -207,7 +207,7 @@ servers, one doesn't know what the other just did. The *Shared memory* page and 
   entry; `write_note` replaces a note only with the version the agent read, so nobody overwrites a newer edit.
   On the page you browse, search, edit, see earlier versions and restore deleted notes (30-day trash).
 - **Who takes part:** telerouter's own agents automatically. Any other agent needs an MCP token with *shared
-  memory* (*MCP access* → tick it on a new token, or *Allow shared memory* on an existing one). The token's name
+  memory* (*MCP access* → tick it on a new token, or *Edit* an existing one). The token's name
   is the agent's name for the others, so name tokens after the agent (`claude laptop`, `hermes CT 123`).
 - The MCP server tells connected agents when to use it (before touching a server: read messages and that
   folder's notes; afterwards: log the change). Don't let agents store passwords in notes.
