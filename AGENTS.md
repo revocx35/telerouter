@@ -298,12 +298,19 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.16.0, 2026-11-06)
+## Status (v0.16.1, 2026-11-07)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.16.1 (2026-11-07, owner: "when i say hey jarvis and both my phone and speaker pick it up only the phone picks it up
+but the new update broke it. also after listening it doesn't go to thinking"): a device-stt phone's words arrive
+seconds after the wake word, past `SAME_WAKE_S`; the stand-down now runs at its `hello`/`wake` (`phone_woke`). Prod
+logs showed no on-device utterance ever arrived: Android's on-device recogniser on piped audio never sent its final
+result, so app 0.3.1 sat on "Listening…" until its 30 s give-up and then fell back to Whisper. App 0.3.2 takes the
+last partial words 0.8 s after asking for the result and sends `wake`. 2 new tests; 255 tests pass (0.16.0 had 253,
+not 258).
 0.16.0 (2026-11-06, owner: "The telerouter mobile app uses the servers whisper/piper which is slow ... especially if
 there are noises in background, can you make it run on the client side on the android"): speaker protocol
 `hello.stt = "device"` + `utterance` message + `transcript.say` + `config.features/language` (ARCHITECTURE §3.4);

@@ -131,6 +131,7 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 | client -> server | binary | microphone, 16 kHz mono PCM16 LE, 20 ms blocks |
 | client -> server | `{"type":"hello","version","platform","aec","transcript","speech","stt"}` | after connecting; `speech: false` = answers as text only; `stt: "device"` = the client recognises speech itself |
 | client -> server | `{"type":"utterance","text"}` | (`stt: "device"`) what the person said, recognised on the device: answers a waiting listen, or starts a turn when idle; `""` = nothing said |
+| client -> server | `{"type":"wake"}` | (`stt: "device"`, 0.16.1) the phone started listening itself on an open connection (wake word, tap): speakers the same "Hey Jarvis" woke stand down |
 | client -> server | `{"type":"button","action":"talk"\|"cancel"}` | optional push-to-talk |
 | client -> server | `{"type":"assistant","open":true\|false}` | the app's voice assistant sheet opened or closed (kept on the device as `assistant_open` / `assistant_changed`) |
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
@@ -235,6 +236,10 @@ Protocol extensions the phone uses (all opt-in, old clients unaffected):
 first has to connect. When a phone starts a turn with `cue: false`, any speaker that a wake word put into
 listening within `SAME_WAKE_S` (4 s) stops (its turn is cancelled, its start beep cut off), and speaker wake
 words in the 4 s after a phone's are ignored. The phone answers, as chosen by the owner.
+A phone with its own speech recognition sends its words only once they are recognised, seconds after the wake
+word, when the speaker is past that window (0.16.0 let both answer). Its `hello` (it connects the moment it hears
+"Hey Jarvis") and its `wake` message (listening again on an open connection) call `VoiceAssistant.phone_woke`,
+which runs the same stand-down at the wake word itself (0.16.1).
 
 App 0.1.x (setup links with a pinned LAN CA, `TELEROUTER_PUBLIC_URL`) still works: `/api/clients/enroll` still
 returns `app_link`, and `Authorization: Bearer` still works on `/ws/client`.

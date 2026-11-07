@@ -1714,6 +1714,13 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
                     store.save()
+                    vs = engine.speaker_for_mic(client.id)
+                    if vs and conn.device_stt:    # the phone connects the moment it hears "Hey Jarvis"
+                        engine.voice.phone_woke(vs)
+                elif t == "wake":                 # the phone started listening itself on an open connection
+                    vs = engine.speaker_for_mic(client.id)
+                    if vs and conn.device_stt:
+                        engine.voice.phone_woke(vs)
                 elif t == "assistant":            # the app's assistant sheet opened/closed (it says so itself)
                     if isinstance(obj.get("open"), bool):
                         client.assistant_open = obj["open"]

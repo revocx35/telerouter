@@ -17,6 +17,9 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
                     text   {"type": "utterance", "text"}   what the person said, recognised on the device
                            (stt "device"): answers a listen (follow-up, ask_speaker) or, when idle, starts a
                            turn; "" = nothing was said. Sent while busy it is dropped (cancel, wait for idle)
+                    text   {"type": "wake"}   (stt "device") the phone started listening itself on an open
+                           connection (wake word, tap); its hello counts the same. A speaker that the same
+                           "Hey Jarvis" woke a moment earlier stands down, so only the phone answers
                     text   {"type": "assistant", "open": bool}   its assistant sheet opened/closed, so an
                            agent that is still working knows the person stopped listening (and can call)
   server -> client  binary 16 kHz mono PCM16 LE audio to play

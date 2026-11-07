@@ -189,6 +189,14 @@ class VoiceAssistant:
             self._listeners[conn.id] = Endpointer(self._endpoint_cfg(None))
         conn.busy_task = asyncio.create_task(self._turn(conn, cue))
 
+    def phone_woke(self, phone: VirtualSpeaker) -> None:
+        """A phone that recognises speech itself started listening on its own (its wake word or a tap): it opens
+        its connection (hello) or sends "wake" at that moment, while its words reach telerouter only once they
+        are recognised, seconds later. A speaker that the same "Hey Jarvis" woke stands down now, while it is
+        still listening, so only the phone answers."""
+        if phone.has_mic and phone.state in ("idle", "speaking", "listening"):
+            self._phone_wins(phone)
+
     def _phone_wins(self, phone: VirtualSpeaker) -> None:
         """The phone heard "Hey Jarvis" itself: a speaker that the same phrase woke (it reacts first, the phone
         still has to connect) stops listening, so only the phone answers."""

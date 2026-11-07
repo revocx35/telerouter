@@ -143,6 +143,75 @@ async def test_one_hey_jarvis_two_devices_the_phone_answers():
         t.cancel()
 
 
+async def test_a_phone_with_its_own_recognition_wins_when_it_connects_not_when_its_words_arrive():
+    # 0.16.0: such a phone sends its words seconds after "Hey Jarvis" (it recognises them first); the speaker that
+    # heard the same phrase was past the stand-down window by then and both answered. The phone connects (hello)
+    # or says "wake" at the wake word itself, which is when the speaker must stand down.
+    va, phone_vs, spk = _two_devices()
+    phone_vs.mic_dev.device_stt = True
+    va._on_wake(spk, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    assert spk.state == "listening"
+    va.phone_woke(phone_vs)
+    await asyncio.sleep(0.05)
+    assert spk.busy_task.done() and spk.state == "idle"          # the speaker stood down
+    assert phone_vs.state == "idle"                               # the phone's turn starts with its words
+    # its words arrive later and start the phone's turn; the speaker stays quiet
+    va._ask_agent = lambda conn, text: asyncio.sleep(0, "Done.")
+
+    async def speak(conn, text):
+        pass
+    va.speak = speak
+    assert va.utterance(phone_vs, "Turn on the light.")
+    await asyncio.wait_for(phone_vs.busy_task, 5)
+    assert spk.state == "idle"
+    # the phone first: the speaker's wake word right after the phone connected is ignored
+    va2, phone2, spk2 = _two_devices()
+    va2.phone_woke(phone2)
+    va2._on_wake(spk2, "hey_jarvis")
+    assert spk2.busy_task is None and spk2.state == "idle"
+
+
+def test_the_phone_says_hello_and_wake_and_the_speaker_stands_down(settings):
+    from fastapi.testclient import TestClient
+
+    from telerouter import tls
+    from telerouter.web.app import create_app
+
+    from .test_web import setup_admin
+    public, _ = create_app(settings, tls.ensure(settings.data_dir, []))
+    with TestClient(public, base_url="https://testserver") as c:
+        h = {"X-CSRF-Token": setup_admin(c)}
+        code = c.post("/api/clients/enroll", json={"name": "Zfold"}, headers=h).json()["code"]
+        got = c.post("/api/client/enroll", json={"code": code, "platform": "android"}).json()
+        va = c.app.state.engine.voice
+        woke = []
+        va.phone_woke = lambda vs: woke.append(vs.id)
+        with c.websocket_connect("/ws/client", headers={"X-Telerouter-Token": got["token"]}) as ws:
+            json.loads(ws.receive_text())
+            ws.send_text(json.dumps({"type": "hello", "version": "0.3.2", "platform": "android",
+                                     "transcript": True, "speech": False, "stt": "device"}))
+            ws.send_text(json.dumps({"type": "wake"}))
+            ws.send_text(json.dumps({"type": "pong"}))
+            import time
+            for _ in range(50):
+                if len(woke) == 2:
+                    break
+                time.sleep(0.02)
+            assert len(woke) == 2
+        # a speaker client (no on-device recognition) connecting is no wake word
+        woke.clear()
+        code = c.post("/api/clients/enroll", json={"name": "Desk"}, headers=h).json()["code"]
+        got = c.post("/api/client/enroll", json={"code": code, "platform": "linux"}).json()
+        with c.websocket_connect("/ws/client", headers={"X-Telerouter-Token": got["token"]}) as ws:
+            json.loads(ws.receive_text())
+            ws.send_text(json.dumps({"type": "hello", "version": "0.16.1", "platform": "linux"}))
+            ws.send_text(json.dumps({"type": "wake"}))
+            ws.send_text(json.dumps({"type": "pong"}))
+            time.sleep(0.2)
+        assert woke == []
+
+
 async def test_a_phone_that_wants_text_only_gets_no_speech():
     async def synthesize(text, voice):
         yield b"\x01\x00" * 1600
