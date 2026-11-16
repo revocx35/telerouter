@@ -52,6 +52,7 @@ telerouter/
   messaging.py         written chat: web page + Telegram bots (pairing, /session, footers), send_message; /data/messages.json
   memory.py            shared memory between agents: messages, status, notes in folders; SQLite /data/memory.db
   scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
+  apisessions.py       Sessions API (/v1): apps start agent sessions with a task; /data/api_sessions.json
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
   voice/
@@ -417,6 +418,31 @@ once; the Agents page owns those. Everything goes over the machine's existing as
 is no extra port and nothing to install on the host. The pane keeps its own size (the browser scrolls
 horizontally); the page never resizes an agent's TUI, which would corrupt a running Claude Code/Hermes layout.
 
+### 4.3.1 Sessions API (`apisessions.py`, `/v1/*`)
+
+Other apps (first: ADM, the agentic download manager) start agent sessions over HTTPS. Credential: an MCP token
+with the `sessions` scope (hashed, revocable, edited on the MCP access page); target: machines with
+`allow_api_sessions` (off by default, separate from the agents' `allow_new_sessions`). The routes live outside
+`/api/` - no cookie, no CSRF; the bearer header is the whole credential, and bad tokens are throttled per IP
+with the login throttle (`v1:<ip>`).
+
+`POST /v1/sessions` validates and records the session (`s_<12 hex>`, state `starting`) and answers 202; a background
+task then (1) writes the session's MCP files when `mcp_servers` are given - `~/.telerouter/api/<name>/` with
+`settings.json` (`permissions.allow: mcp__<name>`: nobody answers prompts), `mcp.json` (bearer tokens) and
+`extra-ca.pem`, all 0600 via `_write_remote` (stdin, never argv) - (2) runs `MachineRuntime.new_session(...,
+by_api=True, files_dir=...)`, whose launch line adds `--settings`/`--mcp-config` and exports `NODE_EXTRA_CA_CERTS`,
+and answers Claude Code's start-up dialogs like every new session, and (3) types the prompt with `ask()` and the
+header `task from the app "<token name>" (telerouter Sessions API): nobody is watching ...`, waiting up to
+`timeout` (default the machine's reply timeout, max 24 h). The answer is read like any foreign tmux session's
+(transcript / Hermes hook event) and stored as `reply`, `turns` += 1, state `idle`. Follow-ups
+(`/messages`) do the same; a session that is `starting`/`working` refuses them (409).
+
+Ownership: every record carries the token id; another token gets 404 for it (not 403, so ids don't leak). Max
+10 open sessions per token. State is persisted in `/data/api_sessions.json` (no secrets); a turn cut off by a restart
+comes back as `lost` (the agent may still be working - apps decide). Closing kills the tmux session and removes
+the per-session folder; revoking a token only detaches its sessions (they keep running for the owner to inspect).
+Hermes keeps MCP servers in its global config, so `mcp_servers` needs a Claude Code machine (400 otherwise).
+
 ### 4.4 Messaging (`messaging.py`)
 
 A **chat** is the web page (`web`) or one paired Telegram chat (`tg:<bot id>:<chat id>`). Every chat has a
@@ -543,6 +569,7 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | announce, ask_speaker | speak | talk/ask through a speaker |
 | context_status, reset_context | (agents telerouter runs) | own context size; compact/clear after the current reply |
 | new_session | (agents telerouter runs) | new tmux session with a fresh agent on a machine that allows it; connects the requester |
+| — | sessions | no MCP tools: the scope unlocks the Sessions API (`/v1`, §4.3.1) for apps |
 | send_message | messaging (agents implicitly) | text to the owner's Telegram chats and the Messages page |
 | list_folder, create_folder, move_folder, delete_folder, read_note, write_note, append_note, move_note, delete_note, search_notes, recent_changes | memory (agents implicitly) | shared project notes (§4.5) |
 | send_agent_message, read_agent_messages, list_peer_agents, set_status | memory (agents implicitly) | messages and status between agents (§4.5) |
@@ -572,6 +599,7 @@ integration tokens, SSH key).
 | A voice request makes the agent do harm | the agent runs with the permission mode you choose (default `auto`); permission prompts are announced, never auto-approved; the agent instructions forbid calling anyone not asked for; MCP tokens can be limited to contacts/speakers |
 | Voice reaches your coding sessions | tmux sessions are only reachable when visible (ticked) under Connections and allowed by the token; callers who may talk to the agent can also be routed there, so keep inbound "talk to agent" for trusted callers (+PIN) |
 | Voice starts new agents on a machine | `new_session` only for telerouter's own agents (not for MCP tokens), only on machines where the admin enabled it (off by default), with the admin's model/permission mode; name and folder are validated and shell-quoted; the agent runs as that machine's SSH user, like the sessions you start yourself |
+| An app with a `sessions` token runs agent tasks | the scope is off on new tokens and the machine switch `allow_api_sessions` is off by default; the token only reaches `/v1` (no admin API, no MCP tools); an app sees and closes only its own sessions (others are 404), max 10 open; prompts are headed with the app's token name so the agent and the owner see who asked; sessions run as the machine's SSH user with its new-session permission mode, like sessions you start (whoever holds the token can make that agent run commands - give it only to apps you trust, revoke it to cut them off); session names/folders validated and shell-quoted; MCP server URLs https-only (http only on loopback), tokens printable, CAs parsed; their secrets go to 0600 files over stdin and are removed on close; bad tokens are throttled per IP |
 | Scheduled tasks run prompts unattended | only the admin creates them (UI/API with session + CSRF; no MCP tool); sessions start as the machine's SSH user with the machine's new-session model/permission mode (`by_admin` skips only the agents' `allow_new_sessions` switch); session names and folders validated and shell-quoted; only sessions the task started are closed; quiet hours still gate the calls they make; a run has a timeout |
 | Single sign-on lets someone else in | off by default; the admin lists allowed user names/e-mails (verified e-mails only)/groups; code flow with PKCE, a random `state` bound to a `SameSite=Lax` cookie in the browser that started it (login CSRF), single-use, 10 min; `nonce`; the code is traded with the provider over verified TLS and the ID token's issuer, audience, expiry and nonce are checked (signature not needed for a token received directly from the token endpoint, OIDC Core 3.1.3.7); failures throttle the IP and only "failed" reaches the browser; changing the SSO settings needs the admin password (a stolen session can't add its own provider); the client secret is write-only. The provider's login (and its 2FA) replaces telerouter's for that sign-in |
 | Phone app behind a sign-in proxy | the WebView loads only https, never skips certificate errors, has no JavaScript bridge; links to other sites from telerouter's pages open the browser (sign-in redirects stay in the app); `telerouter-app://` links work only from telerouter's origin; the device token is Keystore-sealed and sent in its own header; the app adds itself only with a logged-in admin session, and *Sign out* deletes its device (token revoked) |

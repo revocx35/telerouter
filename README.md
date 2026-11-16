@@ -279,6 +279,38 @@ called pokerbot in projects/pokerbot"* starts a fresh Claude Code (or Hermes) in
 machine and connects you to it. Allow it per machine (*Agents & machines → edit → New sessions*; off by
 default), with the model and permission mode new sessions get.
 
+## Sessions API (let other apps run agent tasks)
+
+Apps can start agent sessions on a machine, hand them a task and read the outcome over HTTPS — for example
+**ADM**, the agentic download manager, which starts one session per media request. Turn it on in two places:
+
+1. *Agents & machines → edit the machine → "Apps may start agent sessions here"* (off by default).
+2. *MCP access → New token* with the scope **start agent sessions**; give the token to the app.
+
+```bash
+H="Authorization: Bearer trm_..."
+curl --cacert ca.pem -H "$H" https://<host>:8443/v1/machines
+curl --cacert ca.pem -H "$H" -H 'Content-Type: application/json' https://<host>:8443/v1/sessions \
+  -d '{"name": "job-1", "folder": "~/jobs/job-1", "prompt": "Summarise README.md",
+       "mcp_servers": [{"name": "myapp", "url": "https://myapp.lan/mcp", "token": "...", "tls_ca": "-----BEGIN..."}]}'
+curl --cacert ca.pem -H "$H" https://<host>:8443/v1/sessions/s_0123456789ab          # state, reply, turns
+```
+
+| Endpoint | |
+|---|---|
+| `GET /v1/machines` | machines that allow API sessions |
+| `POST /v1/sessions` | `{machine?, name?, folder?, prompt?, timeout?, mcp_servers?}` → 202 with the session (`starting`) |
+| `GET /v1/sessions[/{id}]` | this token's sessions: `state` (`starting`, `working`, `idle`, `lost`, `failed`, `closed`), `reply` (last answer), `turns`, `error` |
+| `GET /v1/sessions/{id}/screen?history=N` | the pane as plain text |
+| `POST /v1/sessions/{id}/messages` | `{text, timeout?}`: the next task (409 while it is working) |
+| `DELETE /v1/sessions/{id}` | close the tmux session and remove its MCP files |
+
+A session is an ordinary tmux session (watch it on the *tmux sessions* page), running the machine's agent with its
+new-session model and permission mode. `mcp_servers` (Claude Code machines only) gives just this session's agent
+extra MCP servers; their tokens are written to a 0600 file on the machine, never put on a command line. An app sees
+and controls only the sessions it started, at most 10 open at once. Revoking the token detaches its sessions (close
+them on the tmux page).
+
 ## Calls you ask for
 
 *"Hey Jarvis, call my mom"* on a speaker plays the call on that speaker. *Voice & calls → Calls → Ring me

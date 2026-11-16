@@ -75,6 +75,8 @@ class Engine:
         self.messaging = Messaging(self)
         from .memory import SharedMemory
         self.memory = SharedMemory(store.dir / "memory.db")
+        from .apisessions import ApiSessions
+        self.api_sessions = ApiSessions(self, store.dir / "api_sessions.json")
 
     # small facades used by other modules
     @property

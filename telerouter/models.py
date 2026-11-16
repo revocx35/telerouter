@@ -315,6 +315,8 @@ class Machine(BaseModel):
     allow_new_sessions: bool = False
     new_session_model: str = ""        # "" = the agent's own default
     new_session_permission_mode: Literal["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"] = "auto"
+    # apps with an MCP token that has the "sessions" scope may start agent sessions here (Sessions API, /v1)
+    allow_api_sessions: bool = False
 
     @field_validator("new_session_model")
     @classmethod
@@ -430,7 +432,7 @@ class Agent(BaseModel):
         return self.tmux_session or f"telerouter-{self.id}"
 
 
-McpScope = Literal["contacts", "calls", "speak", "clients", "messaging", "memory"]
+McpScope = Literal["contacts", "calls", "speak", "clients", "messaging", "memory", "sessions"]
 
 
 class McpToken(BaseModel):

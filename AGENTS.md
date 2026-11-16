@@ -298,12 +298,25 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
-## Status (v0.16.2, 2026-11-07)
+- **Sessions API (0.17, `apisessions.py`)**: `/v1/*` is outside `/api/` on purpose (bearer token, no cookie/CSRF), so
+  never add a `/v1` route without `api_token()`. A `sessions` token sees only its own sessions (404 for others). Per-session
+  MCP files go through `_write_remote` (stdin) into `~/.telerouter/api/<name>/` and are passed as `--settings`/`--mcp-config`;
+  never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
+  not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
+
+## Status (v0.17.0, 2026-11-16)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.17.0 (2026-11-16, owner: "make an new app named agentic download manager ... ADM connects to telerouter via an api (i want
+you to add api support to telerouter) and creates an new tmux session"): **Sessions API** (`/v1`, ARCHITECTURE §4.3.1):
+MCP-token scope `sessions`, machine switch *Apps may start agent sessions here*, per-session MCP servers for the agent
+(Claude Code). 13 new tests (auth/scope/throttle, machine opt-in, the whole session flow with the MCP files and their
+removal, ownership 404s, busy 409, validation, the open-session cap, token revocation, restart → `lost`, launch line);
+269 tests pass. The ADM side was run end to end with a real Claude Code 2.1.325 using the same `--settings`/`--mcp-config`/
+`NODE_EXTRA_CA_CERTS` launch (`claude -p`, not through tmux). Not yet run against a real machine through telerouter's tmux path.
 0.16.2 (2026-11-07, owner: "can you add and edit button"): *MCP access* had no way to change an existing token
 except the shared-memory toggle, so adding `messaging` to an existing Claude Code token needed the browser console. The
 toggle is now an **Edit** dialog (same fields as *New token*: name, scopes, contacts, speakers) that PUTs

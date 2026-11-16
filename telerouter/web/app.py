@@ -323,7 +323,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             h["Strict-Transport-Security"] = "max-age=31536000"
             h["Cross-Origin-Opener-Policy"] = "same-origin"
             h["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-            if path.startswith("/api/") or path == "/":
+            if path.startswith(("/api/", "/v1/")) or path == "/":
                 h["Cache-Control"] = "no-store"
             elif path.startswith("/static/"):
                 h["Cache-Control"] = "no-cache"      # revalidate (ETag): a WebView otherwise keeps an old app.js for days
@@ -1610,8 +1610,91 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             raise HTTPException(409, "this token belongs to an agent; it is replaced whenever the agent restarts")
         cfg.mcp_tokens.remove(t)
         store.save()
+        engine.api_sessions.revoke_token(t.id)
         log.info("MCP token '%s' revoked", t.name)
         return {"ok": True}
+
+    # -- Sessions API (/v1): apps with a "sessions" MCP token start agent sessions -----------------------------------
+    # Outside /api/ (no cookie, no CSRF): a bearer token in the header is the whole credential. Bad tokens are
+    # throttled per IP like logins; only the sessions this token started are visible to it.
+    from ..apisessions import ApiError, NewSession, SendText, parse as api_parse
+
+    def api_token(request: Request) -> McpToken:
+        ip = client_ip(request)
+        try:
+            throttle.check(f"v1:{ip}")
+        except security.Locked as e:
+            raise HTTPException(429, "too many attempts, try again later",
+                                headers={"Retry-After": str(int(e.retry_after) + 1)}) from e
+        tok = engine.mcp.authenticate(request)
+        if not tok or "sessions" not in tok.scopes:
+            try:
+                throttle.begin(f"v1:{ip}")
+            except security.Locked:
+                pass
+            raise HTTPException(401, "a token with the sessions scope is required",
+                                headers={"WWW-Authenticate": 'Bearer realm="telerouter"'})
+        return tok
+
+    async def api_body(request: Request, limit: int = 300_000) -> dict:
+        raw = await request.body()
+        if len(raw) > limit:
+            raise HTTPException(413, "request too large")
+        try:
+            data = json.loads(raw or b"{}")
+        except ValueError as e:
+            raise HTTPException(400, "invalid JSON") from e
+        if not isinstance(data, dict):
+            raise HTTPException(400, "a JSON object is expected")
+        return data
+
+    async def api_call(coro):
+        try:
+            return await coro
+        except ApiError as e:
+            raise HTTPException(e.status, e.detail) from e
+
+    @app.get("/v1/machines")
+    async def v1_machines(request: Request):
+        api_token(request)
+        return {"machines": engine.api_sessions.machines()}
+
+    @app.get("/v1/sessions")
+    async def v1_sessions(request: Request):
+        return {"sessions": engine.api_sessions.list(api_token(request))}
+
+    @app.post("/v1/sessions", status_code=202)
+    async def v1_new_session(request: Request):
+        tok = api_token(request)
+        async def go():
+            body = api_parse(NewSession, await api_body(request))
+            return await engine.api_sessions.create(tok, body)
+        return await api_call(go())
+
+    @app.get("/v1/sessions/{sid}")
+    async def v1_session(sid: str, request: Request):
+        tok = api_token(request)
+        async def go():
+            return engine.api_sessions.get(tok, sid)
+        return await api_call(go())
+
+    @app.get("/v1/sessions/{sid}/screen")
+    async def v1_screen(sid: str, request: Request, history: int = 0):
+        tok = api_token(request)
+        return {"screen": (await api_call(engine.api_sessions.screen(tok, sid, history)))[-200_000:]}
+
+    @app.post("/v1/sessions/{sid}/messages", status_code=202)
+    async def v1_send(sid: str, request: Request):
+        tok = api_token(request)
+        async def go():
+            body = api_parse(SendText, await api_body(request))
+            return await engine.api_sessions.send(tok, sid, body)
+        return await api_call(go())
+
+    @app.delete("/v1/sessions/{sid}")
+    async def v1_close(sid: str, request: Request):
+        tok = api_token(request)
+        return await api_call(engine.api_sessions.close(tok, sid))
 
     # -- MCP --------------------------------------------------------------------------------------------------------
     @app.api_route("/mcp", methods=["GET", "POST", "DELETE"])

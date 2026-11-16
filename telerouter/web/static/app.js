@@ -542,7 +542,7 @@ function cfgId(a) { return el("span", { class: "muted mono" }, a.id); }
 function machineForm(m, mdata) {
   const isNew = !m;
   m = m || { name: "", host: "", port: 22, username: "root", host_key: "", enabled: true, agent_kind: "claude", list_tmux: true, reply_timeout: 600,
-    allow_new_sessions: false, new_session_model: "", new_session_permission_mode: "auto" };
+    allow_new_sessions: false, allow_api_sessions: false, new_session_model: "", new_session_permission_mode: "auto" };
   let hostKey = m.host_key;
   const fp = el("div", { class: "hint" }, m.host_key ? `Host key confirmed: ${m.host_key_fingerprint}` : "Host key not confirmed yet.");
   const f = el("div", {},
@@ -556,6 +556,7 @@ function machineForm(m, mdata) {
     el("div", { class: "row" }, chk("enabled", m.enabled, "Enabled"), chk("list_tmux", m.list_tmux, "List its tmux sessions under Connections")),
     el("h3", {}, "New sessions"),
     el("div", { class: "row" }, chk("allow_new_sessions", m.allow_new_sessions, "Agents may start new tmux sessions here (\"start a new Claude session called pokerbot\")")),
+    el("div", { class: "row" }, chk("allow_api_sessions", m.allow_api_sessions, "Apps may start agent sessions here (Sessions API: MCP tokens with the \"start agent sessions\" scope)")),
     el("div", { class: "form2" },
       field("Model of new sessions", inp("new_session_model", m.new_session_model, { placeholder: "agent default" })),
       field("Permission mode of new sessions", sel("new_session_permission_mode", m.new_session_permission_mode, PERMS))),
@@ -1298,7 +1299,7 @@ async function voice(main) {
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
   const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
-  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"]];
+  const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"], ["sessions", "start agent sessions (Sessions API /v1, for apps like ADM)"]];
   // The same fields for a new token and for editing one (t = the token, or null for a new one).
   const tokenFields = t => {
     const all = l => !t || l.includes("*");
