@@ -304,12 +304,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.17.0, 2026-11-16)
+## Status (v0.18.0, 2026-11-17)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.18.0 (2026-11-17, owner: "... model selection so i can select which model to use" for ADM): `model` in `POST /v1/sessions`
+(MODEL_RE-validated, shown in the session record) replaces the machine's new-session model; Hermes machines get
+`hermes --model` only when a model is asked for (their stored new-session model was always Claude's and stays unused).
+2 new tests; 271 tests pass.
 0.17.0 (2026-11-16, owner: "make an new app named agentic download manager ... ADM connects to telerouter via an api (i want
 you to add api support to telerouter) and creates an new tmux session"): **Sessions API** (`/v1`, ARCHITECTURE §4.3.1):
 MCP-token scope `sessions`, machine switch *Apps may start agent sessions here*, per-session MCP servers for the agent

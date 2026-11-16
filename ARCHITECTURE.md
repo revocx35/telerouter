@@ -431,7 +431,8 @@ task then (1) writes the session's MCP files when `mcp_servers` are given - `~/.
 `settings.json` (`permissions.allow: mcp__<name>`: nobody answers prompts), `mcp.json` (bearer tokens) and
 `extra-ca.pem`, all 0600 via `_write_remote` (stdin, never argv) - (2) runs `MachineRuntime.new_session(...,
 by_api=True, files_dir=...)`, whose launch line adds `--settings`/`--mcp-config` and exports `NODE_EXTRA_CA_CERTS`,
-and answers Claude Code's start-up dialogs like every new session, and (3) types the prompt with `ask()` and the
+and answers Claude Code's start-up dialogs like every new session (an optional `model` replaces the machine's
+new-session model; on Hermes machines only an explicit `model` is passed, as `hermes --model`), and (3) types the prompt with `ask()` and the
 header `task from the app "<token name>" (telerouter Sessions API): nobody is watching ...`, waiting up to
 `timeout` (default the machine's reply timeout, max 24 h). The answer is read like any foreign tmux session's
 (transcript / Hermes hook event) and stored as `reply`, `turns` += 1, state `idle`. Follow-ups

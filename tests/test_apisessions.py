@@ -40,11 +40,12 @@ class FakeRT:
         self.written[path] = content
         return True
 
-    async def new_session(self, name, workdir="~", by_admin=False, by_api=False, files_dir=""):
+    async def new_session(self, name, workdir="~", by_admin=False, by_api=False, files_dir="", model=""):
         assert by_api
         if not self.machine.allow_api_sessions:
             raise AgentError("not allowed")
         self.started.append((name, workdir, files_dir))
+        self.model = model
         return {"name": name, "path": "/home/u/" + workdir.lstrip("~/")}
 
     async def ask(self, session, text, label, on_wait=None, header="", timeout=None):
@@ -265,3 +266,22 @@ async def test_new_session_by_api_needs_the_machine_switch():
     rt.state = "ready"
     with pytest.raises(AgentError, match="API sessions are not allowed"):
         await rt.new_session("x", "~", by_api=True)
+
+
+def test_model_per_session(env):
+    c, eng, rt, token, h = env
+    good, _ = token(["sessions"])
+    assert c.post("/v1/sessions", json={"model": "x; rm -rf /"}, headers=auth(good)).status_code == 422
+    sid = c.post("/v1/sessions", json={"model": "claude-opus-5-5"}, headers=auth(good)).json()["id"]
+    assert wait_for(lambda: c.get(f"/v1/sessions/{sid}", headers=auth(good)).json()["state"] == "idle")
+    assert rt.model == "claude-opus-5-5"
+    assert c.get(f"/v1/sessions/{sid}", headers=auth(good)).json()["model"] == "claude-opus-5-5"
+
+
+def test_launch_command_model_override():
+    rt = MachineRuntime(object(), Machine(name="m", host="h", username="u", new_session_model="claude-sonnet-5-5"))
+    assert "--model claude-opus-5-5" in rt.launch_command("x", "", "claude-opus-5-5")
+    assert "--model claude-sonnet-5-5" in rt.launch_command("x")
+    rt.machine.agent_kind = "hermes"
+    assert rt.launch_command("x", "", "anthropic/claude-opus-5-5") == "hermes --model anthropic/claude-opus-5-5"
+    assert rt.launch_command("x") == "hermes"               # the machine's (Claude) model is not passed to Hermes

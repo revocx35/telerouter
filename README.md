@@ -299,7 +299,7 @@ curl --cacert ca.pem -H "$H" https://<host>:8443/v1/sessions/s_0123456789ab     
 | Endpoint | |
 |---|---|
 | `GET /v1/machines` | machines that allow API sessions |
-| `POST /v1/sessions` | `{machine?, name?, folder?, prompt?, timeout?, mcp_servers?}` → 202 with the session (`starting`) |
+| `POST /v1/sessions` | `{machine?, name?, folder?, prompt?, timeout?, model?, mcp_servers?}` → 202 with the session (`starting`); `model` overrides the machine's new-session model (Hermes machines: passed as `hermes --model`) |
 | `GET /v1/sessions[/{id}]` | this token's sessions: `state` (`starting`, `working`, `idle`, `lost`, `failed`, `closed`), `reply` (last answer), `turns`, `error` |
 | `GET /v1/sessions/{id}/screen?history=N` | the pane as plain text |
 | `POST /v1/sessions/{id}/messages` | `{text, timeout?}`: the next task (409 while it is working) |

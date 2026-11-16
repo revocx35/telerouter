@@ -309,17 +309,19 @@ class MachineRuntime:
         self.refresh()
 
     # -- starting a session ---------------------------------------------------------------------------
-    def launch_command(self, name: str, files_dir: str = "") -> str:
+    def launch_command(self, name: str, files_dir: str = "", model: str = "") -> str:
         """The agent's command line. `files_dir` (Sessions API): a folder on the machine holding settings.json,
-        mcp.json and extra-ca.pem for this session only (Claude Code)."""
+        mcp.json and extra-ca.pem for this session only (Claude Code). `model` (Sessions API) overrides the
+        machine's new-session model."""
         m = self.machine
-        if m.agent_kind == "hermes":
-            return "hermes"
+        if m.agent_kind == "hermes":     # only an explicit request: the machine's model field has always been Claude's
+            return "hermes" + (f" --model {ssh.q(model)}" if model else "")
+        model = model or m.new_session_model
         args = ["claude", "-n", name]
         if files_dir:
             args += ["--settings", f"{files_dir}/settings.json", "--mcp-config", f"{files_dir}/mcp.json"]
-        if m.new_session_model:
-            args += ["--model", m.new_session_model]
+        if model:
+            args += ["--model", model]
         if m.new_session_permission_mode != "default":
             args += ["--permission-mode", m.new_session_permission_mode]
         cmd = " ".join(ssh.q(a) for a in args)
@@ -329,7 +331,7 @@ class MachineRuntime:
         return cmd
 
     async def new_session(self, name: str, workdir: str = "~", by_admin: bool = False, by_api: bool = False,
-                          files_dir: str = "") -> dict:
+                          files_dir: str = "", model: str = "") -> dict:
         """Start a tmux session `name` with a fresh agent in `workdir` (created if missing); returns its listing.
         Agents need the machine's allow_new_sessions; the admin's scheduled tasks (`by_admin`) do not; the
         Sessions API (`by_api`) needs allow_api_sessions instead."""
@@ -351,7 +353,7 @@ class MachineRuntime:
             raise AgentError(f"a session called {name} already exists on {m.name}")
         rest = workdir[1:].lstrip("/") if workdir.startswith("~") else ""
         target = ('"$HOME"' + (f"/{ssh.q(rest)}" if rest else "")) if workdir.startswith("~") else ssh.q(workdir)
-        inner = (f'{_paths()}; {self.launch_command(name, files_dir)}; echo; echo "the agent exited"; '
+        inner = (f'{_paths()}; {self.launch_command(name, files_dir, model)}; echo; echo "the agent exited"; '
                  f'exec "${{SHELL:-sh}}" -l')
         out = await self._sh(f'{_paths()}; D={target}; {{ mkdir -p "$D" && tmux new-session -d -s {ssh.q(name)} '
                              f'-c "$D" {ssh.q(inner)} && printf "ok %s" "$D"; }} 2>&1')

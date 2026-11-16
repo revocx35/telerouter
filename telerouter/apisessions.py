@@ -99,7 +99,18 @@ class NewSession(BaseModel):
     folder: str = Field(default="", max_length=200)
     prompt: str = Field(default="", max_length=60_000)
     timeout: int = Field(default=0, ge=0, le=86_400)          # seconds to wait for the task's turn; 0 = machine's
+    model: str = Field(default="", max_length=80)               # "" = the machine's new-session model
     mcp_servers: list[SessionMcpServer] = Field(default_factory=list, max_length=5)
+
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, v: str) -> str:
+        from .models import MODEL_RE
+        v = v.strip()
+        if not MODEL_RE.match(v):
+            raise ValueError("invalid model name")
+        return v
 
 
 class SendText(BaseModel):
@@ -182,7 +193,7 @@ class ApiSessions:
     @staticmethod
     def public(r: dict) -> dict:
         return {k: r.get(k) for k in ("id", "name", "machine", "machine_id", "folder", "state", "reply", "error",
-                                      "turns", "created", "updated", "mcp_servers")}
+                                      "turns", "created", "updated", "mcp_servers", "model")}
 
     def list(self, tok: "McpToken") -> list[dict]:
         return [self.public(r) for r in sorted(self.records.values(), key=lambda r: r.get("created", 0),
@@ -218,7 +229,7 @@ class ApiSessions:
         sid = "s_" + secrets.token_hex(6)
         r = {"id": sid, "token_id": tok.id, "app": tok.name, "machine_id": m.id, "machine": m.name, "name": name,
              "folder": folder, "state": "starting", "reply": "", "error": "", "turns": 0, "created": time.time(),
-             "updated": time.time(), "mcp_servers": names, "files_dir": ""}
+             "updated": time.time(), "mcp_servers": names, "files_dir": "", "model": body.model}
         self.records[sid] = r
         self._save()
         self._spawn(sid, self._start(r, rt, body, tok.name))
@@ -237,7 +248,7 @@ class ApiSessions:
                 for path, content in session_files(body.mcp_servers).items():
                     if not await rt._write_remote(f"{files_dir}/{path}", content):
                         raise AgentError(f"could not write the session's MCP settings on {rt.machine.name}")
-            info = await rt.new_session(r["name"], r["folder"], by_api=True, files_dir=files_dir)
+            info = await rt.new_session(r["name"], r["folder"], by_api=True, files_dir=files_dir, model=body.model)
             self._set(r, folder=info.get("path") or r["folder"], state="idle")
             if body.prompt.strip():
                 await self._turn(r, rt, body.prompt, body.timeout, app)
