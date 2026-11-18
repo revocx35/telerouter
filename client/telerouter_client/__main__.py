@@ -71,7 +71,16 @@ def cmd_run(a) -> None:
     use_files = bool(a.input_wav or a.output_wav)
     aec_wanted = cfg.get("aec", True) and not a.no_aec and not use_files
     echo = make_echo(aec_wanted, 60)
-    sess = Session(cfg, player, aec=echo is not None)
+    display = None
+    disp_spec = a.display if a.display is not None else cfg.get("display")
+    if disp_spec:
+        from .display import Display, parse_listen
+        try:
+            host, port = parse_listen(disp_spec)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        display = Display(host, port, a.display_on_listen or cfg.get("display_on_listen") or "")
+    sess = Session(cfg, player, aec=echo is not None, display=display)
     backend = a.backend or cfg.get("backend") or "auto"
     ind, outd = _device(a.input_device or cfg.get("input_device")), _device(a.output_device or cfg.get("output_device"))
     if use_files:
@@ -95,6 +104,8 @@ def cmd_run(a) -> None:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
+        if display is not None:
+            await display.start()
         task = asyncio.create_task(sess.run())
         io.start()
         log.info("telerouter-client %s running as '%s'", __version__, cfg.get("name", ""))
@@ -105,6 +116,8 @@ def cmd_run(a) -> None:
         await asyncio.wait(timers, return_when=asyncio.FIRST_COMPLETED)
         task.cancel()
         io.stop()
+        if display is not None:
+            await display.stop()
 
     asyncio.run(main())
 
@@ -125,6 +138,21 @@ def cmd_set(a) -> None:
         cfg["aec"] = a.aec == "on"
     if a.backend is not None:
         cfg["backend"] = a.backend
+    if a.display is not None:
+        if a.display in ("", "off"):
+            cfg.pop("display", None)
+        else:
+            from .display import parse_listen
+            try:
+                parse_listen(a.display)
+            except ValueError as e:
+                raise SystemExit(str(e)) from None
+            cfg["display"] = a.display
+    if a.display_on_listen is not None:
+        if a.display_on_listen:
+            cfg["display_on_listen"] = a.display_on_listen
+        else:
+            cfg.pop("display_on_listen", None)
     save_config(cfg)
     print("saved; restart the client (systemctl --user restart telerouter-client, or launchctl kickstart)")
 
@@ -173,6 +201,10 @@ def main() -> None:
     r.add_argument("--output-wav", help="test: record what would be played")
     r.add_argument("--start-delay", type=float, default=2.0, help="test: seconds before --input-wav starts")
     r.add_argument("--duration", type=float, default=0, help="stop after this many seconds (0 = run forever)")
+    r.add_argument("--display", metavar="[HOST:]PORT", help="smart display: serve a full-screen conversation page "
+                   "on this loopback port for a kiosk browser on this machine (e.g. 8770)")
+    r.add_argument("--display-on-listen", metavar="CMD", help="smart display: run this command when a request "
+                   "starts listening (e.g. switch the screen on)")
     r.set_defaults(fn=cmd_run)
     d = sub.add_parser("devices", help="list audio devices")
     d.set_defaults(fn=cmd_devices)
@@ -181,6 +213,8 @@ def main() -> None:
     s.add_argument("--output-device")
     s.add_argument("--aec", choices=["on", "off"])
     s.add_argument("--backend", choices=["auto", "portaudio", "alsa"])
+    s.add_argument("--display", metavar="[HOST:]PORT|off", help="smart display page port (loopback only)")
+    s.add_argument("--display-on-listen", metavar="CMD", help="command run when a request starts ('' = none)")
     s.set_defaults(fn=cmd_set)
     t = sub.add_parser("test-audio", help="record and play back a few seconds")
     t.add_argument("--seconds", type=float, default=4)

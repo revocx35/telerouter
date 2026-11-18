@@ -249,6 +249,7 @@ def test_phone_connects_with_the_token_header_behind_a_proxy(settings):
             cfg = json.loads(ws.receive_text())
             assert cfg["type"] == "config" and cfg["client_id"] == got["client_id"] and cfg["name"] == "Zfold"
             assert "utterance" in cfg["features"] and cfg["language"] == "en"
+            assert cfg["assistant"] == ""            # no agent yet; a smart display labels answers with it
             ws.send_text(json.dumps({"type": "hello", "version": "0.2.0", "platform": "android", "aec": False,
                                      "transcript": True, "speech": False, "stt": "device"}))
             ws.send_text(json.dumps({"type": "pong"}))

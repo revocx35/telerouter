@@ -102,6 +102,25 @@ With a Cast speaker as output:
   HTTP** (`TELEROUTER_CAST_PORT`, default 8480): each sentence gets a random single-use link that only that
   speaker's address may fetch, for at most 60 s. Keep it on your LAN.
 
+## Smart display (a screen that shows the conversation)
+
+A speaker with a screen next to it (a wall-mounted laptop, an old iMac, a Raspberry Pi with a monitor) can show
+what you said after "Hey Jarvis" and what the agent answered, with listening / thinking / speaking animations and
+a clock while idle - like the Android app's assistant sheet, but full screen. The page is served by the speaker
+client itself, on the same machine, so it needs nothing on the server:
+
+```bash
+telerouter-client set --display 8770          # remembered; 'off' turns it off again
+telerouter-client set --display-on-listen "sudo -n /usr/local/bin/panel-screen on"   # optional: wake the screen
+systemctl --user restart telerouter-client    # (or the system unit that runs it)
+chromium --kiosk http://127.0.0.1:8770/       # the kiosk browser on that machine
+```
+
+The client then asks the server for transcripts (`hello` `"transcript": true`) and shows them; the answers are
+still spoken. The page listens on loopback only (transcripts are private) and refuses requests that don't name
+that address as Host. `--display-on-listen` runs a command (no shell) when a request starts, e.g. to switch the
+panel on when it was turned off.
+
 ## Android app (dashboard and assistant)
 
 The [telerouter Android app](https://github.com/revocx35/telerouter-android) is telerouter on your phone:

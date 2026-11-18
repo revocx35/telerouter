@@ -84,8 +84,9 @@ def _connect(url: str, token: str, ctx: ssl.SSLContext):
 class Session:
     """Keeps the connection up; mic blocks go up, playback audio comes down."""
 
-    def __init__(self, cfg: dict, player: Player, aec: bool):
+    def __init__(self, cfg: dict, player: Player, aec: bool, display=None):
         self.cfg = cfg
+        self.display = display                   # display.Display: the smart display page, or None
         self.player = player
         self.aec = aec
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -119,11 +120,16 @@ class Session:
             try:
                 async with _connect(url, self.cfg["token"], ctx) as ws:
                     log.info("connected to %s", server)
-                    await ws.send(json.dumps({"type": "hello", "version": __version__, "aec": self.aec,
-                                              "platform": f"{platform.system()} {platform.machine()}"}))
+                    hello = {"type": "hello", "version": __version__, "aec": self.aec,
+                             "platform": f"{platform.system()} {platform.machine()}"}
+                    if self.display is not None:
+                        hello["transcript"] = True       # a screen: show what was heard and answered
+                    await ws.send(json.dumps(hello))
                     while not self.mic_q.empty():
                         self.mic_q.get_nowait()
                     self.connected = True
+                    if self.display is not None:
+                        self.display.set_connected(True)
                     await self._session(ws)
             except asyncio.CancelledError:
                 raise
@@ -137,6 +143,8 @@ class Session:
             finally:
                 self.connected = False
                 self.player.flush()
+                if self.display is not None:
+                    self.display.set_connected(False)
             if time.monotonic() - t0 > 30:
                 backoff = 1.0
             await asyncio.sleep(backoff)
@@ -164,10 +172,17 @@ class Session:
                 elif t == "state":
                     self.state = str(obj.get("state"))
                     log.info("state: %s", self.state)
+                    if self.display is not None:
+                        self.display.set_state(self.state)
+                elif t == "transcript":
+                    if self.display is not None:
+                        self.display.add_transcript(str(obj.get("role")), str(obj.get("text") or ""))
                 elif t == "config":
                     vol = obj.get("volume")
                     if isinstance(vol, (int, float)):
                         self.player.volume = 1.0       # the server applies the volume; keep local at 100 %
+                    if self.display is not None:
+                        self.display.set_name(str(obj.get("name") or ""), str(obj.get("assistant") or ""))
                 elif t == "ping":
                     await ws.send(json.dumps({"type": "pong"}))
         finally:

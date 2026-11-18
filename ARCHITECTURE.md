@@ -73,7 +73,8 @@ telerouter/
   sip/, media/         SIP stack + RTP/G.711/DTMF shared with wa2sip and cam2sip (MIT, same author)
   web/app.py           FastAPI: auth, admin API, /ws/client, client installer, /mcp
   web/static/          vanilla JS SPA (no build step, no inline script/style: strict CSP)
-client/                telerouter-client (Python >= 3.9): enroll, run, devices, test-audio; install.sh
+client/                telerouter-client (Python >= 3.9): enroll, run, devices, test-audio; install.sh;
+                       display.py = the smart display page (loopback HTTP + Server-Sent Events)
 tests/                 pytest (auth paths, MCP, agents, SIP, TLS, voice, client)
 tools/                 sip_phone.py (scriptable SIP phone), fake-agent/ (sshd + fake claude for tests)
 ```
@@ -138,7 +139,7 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
 | server -> client | `{"type":"state","state":...}` | idle, listening, thinking, speaking, ringing, call |
 | server -> client | `{"type":"flush"}` | drop queued playback now (barge-in, call ended) |
-| server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name","language","features"}` | keep-alive, settings, which device this is; `features: ["utterance"]` since 0.16 |
+| server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name","assistant","language","features"}` | keep-alive, settings, which device this is; `features: ["utterance"]` since 0.16; `assistant` = the name of the agent that answers this speaker (0.19, for the smart display) |
 
 The server paces playback (≤250 ms ahead of real time), so it always knows when the client has
 finished playing (`ClientConn.drained()`): blips end before listening starts, and wake-word detection is
@@ -183,6 +184,15 @@ openWakeWord's window, fires again.
 resamples from their native rate; optional WebRTC echo cancellation + noise suppression (`livekit` APM,
 the `aec` extra), fed with what it plays as the reverse stream. With AEC the server allows barge-in
 (wake word while it speaks). `--input-wav/--output-wav` replace the devices for tests.
+
+**Smart display** (client 0.11, `display.py`): `run --display [HOST:]PORT` (or `set --display`) serves a
+full-screen page for a kiosk browser on the same machine: a clock while idle; during a turn the state
+(listening / thinking / speaking / call, from `state`), what was heard and what was answered (from `transcript`,
+which the client now asks for with hello `"transcript": true`; answers are still spoken because `speech` stays
+true). The page gets a snapshot and then changes as Server-Sent Events (`/events`); the last 6 turns are kept in
+memory only. The server adds `assistant` (the speaker's agent name) to `config` so the page labels answers.
+`--display-on-listen CMD` runs a command (argv, no shell, at most every 5 s) when a turn starts listening, e.g.
+to switch the panel on. No server state, no new server endpoint.
 
 Enrollment: the admin creates a one-time code (15 min); the install command pins the server's public
 key (`curl --pinnedpubkey`) and the CA fingerprint; the client downloads `/ca.pem`, checks its SHA-256,
@@ -592,6 +602,7 @@ integration tokens, SSH key).
 | XSS | strict CSP (`script-src 'self'`, no inline script/style), DOM built with `textContent` only |
 | Plain-text credentials on the wire | HTTPS only (self-signed CA; clients and the installer pin it); integrations over HTTPS with a pinned certificate; agent MCP inside SSH |
 | Stolen/leaked tokens | random 256-bit tokens, only SHA-256 stored, sent in headers, revocable (speaker removal, MCP token revoke, integration token rotation); agent MCP token rotates on every session start; secrets write-only in the API |
+| Someone reads the smart display's transcripts | the client's display listener binds to loopback only (non-loopback addresses are refused), checks that Host names that loopback address (DNS rebinding), serves GET/HEAD of three fixed assets + one event stream, caps the request head (8 KiB, 5 s) and connections (8, 4 streams); strict CSP, no inline script/style, DOM via `textContent`. Whoever can see the screen sees the conversation: that is the feature |
 | Rogue speaker client | needs an enrollment code (single use, 15 min, throttled); WebSocket frames size/rate capped; max clients |
 | Eavesdropping on Cast speaker audio | Cast receivers fetch media only over plain HTTP (no publicly trusted certificate on a LAN): what a Cast output plays (answers, announcements; never live calls or microphone audio) crosses the LAN unencrypted. Single-use 128-bit URLs, served only to that device's address, withdrawn after playback / 60 s; the listener runs only once a Cast output is used. The Cast control channel is TLS but unauthenticated (device certificates are self-signed and rotate; Cast device auth is not implemented), so a LAN attacker who impersonates the device can get those URLs too. Don't use Cast outputs for private answers on an untrusted network |
 | Rogue Cast device address | admin-only; telerouter only sends control messages and serves the offered WAV to it; mDNS updates the address only for the stored device id |

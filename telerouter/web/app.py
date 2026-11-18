@@ -1747,8 +1747,11 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         store.save()
         engine.attach_client(conn)
         log.info("speaker '%s' connected from %s", client.name, ip)
+        fed = next((s for s in store.config.speakers if s.mic == client.id), None)
+        agent = store.agent_for_speaker(fed) if fed else store.default_agent()
         await conn.send_json({"type": "config", "volume": 100, "server_version": settings.version,
                               "client_id": client.id, "name": client.name,
+                              "assistant": agent.name if agent else "",
                               "language": store.config.voice.language, "features": ["utterance"]})
         bucket, bucket_t = 0, time.monotonic()
 

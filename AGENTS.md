@@ -269,6 +269,9 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   Host anyway).
 - SSO login CSRF: the start sets a `SameSite=Lax` binding cookie (Strict would not come back with the provider's
   cross-site redirect). Verified in the Android WebView against a fake provider behind Caddy.
+- **Smart display page** (client `display.py`): no inline script/style either (CSP) and loopback only; keep the
+  page's JS in the `JS` string (no package data: `pyproject` ships only the module). Don't measure overflow with
+  `scrollHeight` there: the bubbles' entry animation (`transform`) counts as overflow and dropped the "You" bubble.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - **Messaging** (0.13, `messaging.py`): a chat's footer comes from the target, not from the agent's reply; a text
   message header must contain "text message" (drivers and the agent instructions key off it). Telegram allows one
@@ -304,12 +307,21 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.18.0, 2026-11-17)
+## Status (v0.19.0, 2026-11-18)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.19.0 (2026-11-18, owner: "make an new smart display feature to telerouter so that when i say hey jarvis and start
+speaking it is shown on the screen of the imac and the response the agent gives is also shown just like the telerouter
+mobile app"): **smart display** in the speaker client 0.11 (`client/telerouter_client/display.py`, ARCHITECTURE §3.3):
+`--display PORT` serves a loopback-only kiosk page (clock when idle, listening/thinking/speaking orb, "You"/agent
+bubbles) fed by the session's `state`/`transcript` frames; `--display-on-listen CMD` wakes the panel. Server: `config`
+carries `assistant` (agent name). 5 new tests (loopback-only parsing, CSP/Host/method/size refusals, the event stream
+with state + transcripts + the wake command, the stream cap, the session feeding the display); layout checked in
+Chromium at 1920x1080 (Playwright screenshots); 276 tests pass. Running on a real iMac16,1 kiosk (ALSA backend; its
+internal speakers only sound when all 4 channels are fed: an ALSA `plug` with a 1->4 `ttable` + `snd-hda-intel model=mbp11`).
 0.18.0 (2026-11-17, owner: "... model selection so i can select which model to use" for ADM): `model` in `POST /v1/sessions`
 (MODEL_RE-validated, shown in the session record) replaces the machine's new-session model; Hermes machines get
 `hermes --model` only when a model is asked for (their stored new-session model was always Claude's and stays unused).
