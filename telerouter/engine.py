@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from .agents.machine import MachineRuntime
 from .agents.runtime import AgentRuntime
 from .agents.ssh import SshKeys
+from .gateway import Gateway
 from .media.rtp import PortAllocator
 from .models import Agent, CastDevice, Contact, Integration, Machine
 from .router.calls import CallManager, digits
@@ -69,6 +70,7 @@ class Engine:
         self._sync_now = asyncio.Event()
         from .mcp import McpServer
         self.mcp = McpServer(self)
+        self.gateway = Gateway(self)
         from .scheduler import Scheduler
         self.scheduler = Scheduler(self)
         from .messaging import Messaging
@@ -106,6 +108,7 @@ class Engine:
         await self.ua.start()
         await self.apply_config()
         self._spawn(self._sync_loop())
+        self._spawn(self.gateway.loop())
         self.scheduler.resume()
         self._spawn(self.scheduler.loop())
 
@@ -114,6 +117,7 @@ class Engine:
             t.cancel()
         self.scheduler.stop()
         await self.messaging.stop()
+        await self.gateway.close()
         for vs in list(self.speakers.values()):
             await vs.close()
         for conn in list(self.clients.values()):
@@ -147,6 +151,7 @@ class Engine:
         await self._apply_agents()
         await self._apply_integrations()
         await self.messaging.sync()
+        await self.gateway.sync()
         self.sync_speakers()
         self._sync_now.set()
 

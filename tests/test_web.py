@@ -251,3 +251,35 @@ def test_agents_need_a_machine(c):
     a = c.post("/api/agents", json={"name": "J", "machine_id": m["id"], "host": "evil", "host_key": "x"}, headers=h).json()
     assert a["host"] == "10.0.0.9" and a["machine_id"] == m["id"]              # SSH target only from the machine
     assert c.delete(f"/api/machines/{m['id']}", headers=h).status_code == 409
+
+
+def test_external_mcp_servers_api(c):
+    csrf = setup_admin(c)
+    h = {"X-CSRF-Token": csrf}
+    body = {"name": "ha", "url": "https://127.0.0.1:9/api/mcp", "token": "upstream-llat", "description": "lights"}
+    assert c.post("/api/external-mcp", json=body).status_code == 403                     # CSRF
+    r = c.post("/api/external-mcp", json=body, headers=h)
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["token"] == "" and s["token_set"] is True and s["tokens"] == ["*"]
+    assert s["status"] in ("error", "connecting")                                         # nothing listens there
+    assert "upstream-llat" not in json.dumps(c.get("/api/external-mcp").json())
+    assert c.post("/api/external-mcp", json=body, headers=h).status_code == 409           # same name
+    bad = c.post("/api/external-mcp", json={**body, "name": "x", "url": "http://ha.lan/mcp"}, headers=h)
+    assert bad.status_code == 422                                                         # plain http off-loopback
+    # the stored token is never sent to a new address unless it is typed again
+    r = c.put(f"/api/external-mcp/{s['id']}", json={"url": "https://127.0.0.2:9/mcp"}, headers=h)
+    assert r.status_code == 422
+    r = c.put(f"/api/external-mcp/{s['id']}", json={"url": "https://127.0.0.2:9/mcp", "token": "new-llat",
+                                                     "tokens": ["nope", "*"]}, headers=h)
+    assert r.status_code == 200 and r.json()["tokens"] == ["*"]
+    stored = c.app.state.store.config.external_mcp[0]
+    assert stored.token == "new-llat"
+    r = c.put(f"/api/external-mcp/{s['id']}", json={"description": "x"}, headers=h)
+    assert r.status_code == 200 and c.app.state.store.config.external_mcp[0].token == "new-llat"   # empty keeps it
+    r = c.put(f"/api/external-mcp/{s['id']}", json={"clear_token": True}, headers=h)
+    assert r.json()["token_set"] is False
+    assert c.delete(f"/api/external-mcp/{s['id']}", headers=h).status_code == 200
+    assert c.get("/api/external-mcp").json()["servers"] == []
+    c.cookies.clear()
+    assert c.get("/api/external-mcp").status_code == 401

@@ -296,6 +296,21 @@ class ExtraMcpServer(BaseModel):
         return v
 
 
+class ExternalMcpServer(ExtraMcpServer):
+    """An MCP server telerouter itself connects to and re-serves on its /mcp as '<name>__<tool>' tools, to every
+    MCP token it is shared with (gateway.py). `auto_approve` is unused here."""
+    id: str = Field(default_factory=new_id)
+    tokens: list[str] = Field(default_factory=lambda: ["*"], max_length=200)   # MCP token ids, "*" = all
+    hidden_tools: list[str] = Field(default_factory=list, max_length=300)      # upstream tool names not passed on
+
+    @field_validator("tokens", "hidden_tools")
+    @classmethod
+    def _names(cls, v: list[str]) -> list[str]:
+        if any(not isinstance(x, str) or not x or len(x) > 128 for x in v):
+            raise ValueError("invalid entry")
+        return list(dict.fromkeys(v))
+
+
 AgentKind = Literal["claude", "hermes"]
 
 
@@ -839,5 +854,6 @@ class Config(BaseModel):
     sso: SsoSettings = Field(default_factory=SsoSettings)
     tasks: list[ScheduledTask] = Field(default_factory=list)
     telegram_bots: list[TelegramBot] = Field(default_factory=list, max_length=5)
+    external_mcp: list[ExternalMcpServer] = Field(default_factory=list, max_length=20)   # MCP gateway
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

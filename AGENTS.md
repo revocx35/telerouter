@@ -54,6 +54,9 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
   middleware automatically; public endpoints are listed in `PUBLIC`.
 - MCP tools: add them in `McpServer._define()` with a scope; check contact/speaker allow-lists through
   `_find_contact`/`_find_speaker`; raise `ToolError` for user-facing errors.
+- External MCP servers (gateway, 0.20): telerouter's own tools win on a name clash, so external ones always carry
+  the `<name>__` prefix; never forward an upstream redirect or put its token in a log/error text; tool arguments
+  are logged by name only. Who sees them is `ExternalMcpServer.tokens`, not token scopes.
 - New agent kinds: a `Driver` subclass in `agents/drivers.py` (files, launch script, prompt text,
   start-up dialogs) and event matching in `AgentRuntime._on_event`.
 - When you change env vars, API or behaviour, update README.md, `.env.example`, `docker-compose.yml`,
@@ -63,7 +66,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 ## Where things live
 
 `telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
-mcp.py, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
+mcp.py, gateway.py = external MCP servers re-served on /mcp, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
 helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
 (telerouter-android) that shows this web UI.
 
@@ -301,18 +304,35 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - Never poll the prod API with a stored password in a loop: a stale password locked the admin account. The
   lockout is in memory (`docker compose restart telerouter` clears it). Check prod via `docker logs`.
 
+- **MCP gateway (0.20, `gateway.py`)**: two different "extra MCP" features exist. `Agent.mcp_servers` = one agent talks
+  to the server itself (written into its Claude/Hermes config). `Config.external_mcp` = telerouter is the client and
+  re-serves the tools to every token it is shared with. The official Python SDK server (mcp 1.x FastMCP,
+  streamable-http) answers with SSE and needs `Mcp-Session-Id`; both are handled and were checked against it.
+  Claude Code calls `mcp__telerouter__<name>__<tool>` fine (a `__` inside the tool name is OK, verified with a real
+  `claude -p`). Agents only see new external tools after reconnecting (we announce `listChanged: false`, stateless).
+  The python `mcp` 2.x renamed FastMCP to MCPServer; pin `mcp<2` for quick test servers.
+
 - **Sessions API (0.17, `apisessions.py`)**: `/v1/*` is outside `/api/` on purpose (bearer token, no cookie/CSRF), so
   never add a `/v1` route without `api_token()`. A `sessions` token sees only its own sessions (404 for others). Per-session
   MCP files go through `_write_remote` (stdin) into `~/.telerouter/api/<name>/` and are passed as `--settings`/`--mcp-config`;
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.19.0, 2026-11-18)
+## Status (v0.20.0, 2026-11-18)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.20.0 (2026-11-18, owner: "add external mcp support to telerouter so i can connect an external mcp to telerouter and it
+is available to all agents that already have the telerouter mcp"): **MCP gateway** (`gateway.py`, ARCHITECTURE §6.1):
+*MCP access → External MCP servers*; telerouter connects as an MCP client (Streamable HTTP, JSON or SSE, sessions,
+pinned CA) and re-serves the tools as `<name>__<tool>` to all tokens (or chosen ones), with per-tool hiding. API
+`/api/external-mcp`. 9 new tests (listing/calling for every token over JSON and SSE, sharing + hidden tools + off,
+bad upstream credentials, redirect refused, expired session re-initialized, oversized answer, removal ends the
+session, name cleaning, stateless servers, the admin API with CSRF/write-only token/URL change needs the token
+again); 285 tests pass. Checked against the official MCP Python SDK server (mcp 1.x, streamable-http) and Claude Code
+calling a `demo__add`-style tool. Not yet run in prod or with the UI in a browser.
 0.19.0 (2026-11-18, owner: "make an new smart display feature to telerouter so that when i say hey jarvis and start
 speaking it is shown on the screen of the imac and the response the agent gives is also shown just like the telerouter
 mobile app"): **smart display** in the speaker client 0.11 (`client/telerouter_client/display.py`, ARCHITECTURE §3.3):

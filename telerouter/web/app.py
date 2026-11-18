@@ -34,8 +34,8 @@ from ..agents.runtime import AgentError
 from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..memory import MemError, Who
-from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, Integration,
-                      Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
+from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, ExternalMcpServer,
+                      Integration, Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
                       VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_ca, fetch_certificate
@@ -1613,6 +1613,71 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         engine.api_sessions.revoke_token(t.id)
         log.info("MCP token '%s' revoked", t.name)
         return {"ok": True}
+
+    # -- external MCP servers (gateway): telerouter re-serves their tools to its MCP tokens ---------------------------
+    def ext_out(s: ExternalMcpServer) -> dict:
+        return {**redact(s), **engine.gateway.info(s.id)}
+
+    def check_ext(new: ExternalMcpServer, old: ExternalMcpServer | None, payload: dict) -> None:
+        if any(x.name == new.name and x.id != new.id for x in cfg.external_mcp):
+            raise HTTPException(409, f"another external MCP server is called '{new.name}'")
+        # never send a stored credential to a different address without the admin typing it again
+        if old and new.token and not payload.get("token") and new.url != old.url:
+            raise HTTPException(422, "enter the token again for the new URL (or clear it)")
+        known = {t.id for t in cfg.mcp_tokens}
+        new.tokens = [t for t in new.tokens if t == "*" or t in known]
+
+    async def ext_settle(sid: str) -> None:
+        up = engine.gateway.ups.get(sid)
+        if up and up.task and not up.task.done():
+            await asyncio.wait({up.task}, timeout=15)
+
+    @app.get("/api/external-mcp")
+    async def list_external():
+        return {"servers": [ext_out(s) for s in cfg.external_mcp],
+                "tokens": [{"id": t.id, "name": t.name, "agent": bool(t.agent_id)} for t in cfg.mcp_tokens]}
+
+    @app.post("/api/external-mcp")
+    async def create_external(payload: dict):
+        s = merge(ExternalMcpServer, None, payload, protected={"id", "auto_approve"})
+        check_ext(s, None, payload)
+        cfg.external_mcp.append(s)
+        store.save()
+        await engine.gateway.sync()
+        await ext_settle(s.id)
+        log.info("external MCP server '%s' added", s.name)
+        return ext_out(s)
+
+    @app.put("/api/external-mcp/{sid}")
+    async def update_external(sid: str, payload: dict):
+        old = find(cfg.external_mcp, sid)
+        new = merge(ExternalMcpServer, old, payload, protected={"id", "auto_approve"})
+        if payload.get("clear_token"):
+            new.token = ""
+        check_ext(new, old, payload)
+        replace(cfg.external_mcp, new)
+        store.save()
+        await engine.gateway.sync()
+        await ext_settle(sid)
+        return ext_out(new)
+
+    @app.delete("/api/external-mcp/{sid}")
+    async def delete_external(sid: str):
+        s = find(cfg.external_mcp, sid)
+        cfg.external_mcp.remove(s)
+        store.save()
+        await engine.gateway.sync()
+        log.info("external MCP server '%s' removed", s.name)
+        return {"ok": True}
+
+    @app.post("/api/external-mcp/{sid}/refresh")
+    async def refresh_external(sid: str):
+        s = find(cfg.external_mcp, sid)
+        up = engine.gateway.ups.get(sid)
+        if up:
+            up.status = "connecting" if s.enabled else "off"
+            await asyncio.wait({asyncio.ensure_future(engine.gateway.refresh(sid))}, timeout=40)
+        return ext_out(s)
 
     # -- Sessions API (/v1): apps with a "sessions" MCP token start agent sessions -----------------------------------
     # Outside /api/ (no cookie, no CSRF): a bearer token in the header is the whole credential. Bad tokens are

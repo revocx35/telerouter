@@ -641,7 +641,14 @@ class McpServer:
         text = INSTRUCTIONS
         if any(t.scope == "memory" for t in self._visible(tok)):
             text += " " + MEMORY_INSTRUCTIONS
+        gw = getattr(self.engine, "gateway", None)
+        if gw is not None and (extra := gw.instructions(tok)):
+            text += " " + extra
         return text
+
+    def _external(self, tok: McpToken) -> list[dict]:
+        gw = getattr(self.engine, "gateway", None)
+        return gw.tools_for(tok) if gw is not None else []
 
     def _session_machine(self, ref: str):
         rts = [rt for rt in self.engine.machine_rts.values() if rt.machine.allow_new_sessions]
@@ -730,12 +737,14 @@ class McpServer:
             return _ok(mid, {})
         if method == "tools/list":
             return _ok(mid, {"tools": [{"name": t.name, "description": t.description, "inputSchema": t.schema}
-                                       for t in self._visible(tok)]})
+                                       for t in self._visible(tok)] + self._external(tok)})
         if method == "tools/call":
             name = str(params.get("name") or "")
             args = params.get("arguments") or {}
             t = self.tools.get(name)
-            if not t or not self._allowed(t, tok):
+            if not t:
+                return await self._call_external(mid, tok, name, args)
+            if not self._allowed(t, tok):
                 return _err(mid, -32602, f"unknown tool: {name}")
             if not isinstance(args, dict) or set(args) - set(t.schema["properties"]):
                 return _err(mid, -32602, "invalid arguments")
@@ -758,6 +767,19 @@ class McpServer:
                 return _ok(mid, {"content": [{"type": "text", "text": f"failed: {ex.__class__.__name__}"}],
                                  "isError": True})
         return _err(mid, -32601, f"method not found: {method}")
+
+    async def _call_external(self, mid, tok: McpToken, name: str, args: Any) -> dict:
+        """A tool of an external MCP server (gateway.py), forwarded with its result unchanged."""
+        gw = getattr(self.engine, "gateway", None)
+        hit = gw.find(tok, name) if gw is not None else None
+        if not hit:
+            return _err(mid, -32602, f"unknown tool: {name}")
+        if not isinstance(args, dict):
+            return _err(mid, -32602, "invalid arguments")
+        up, upstream_name = hit
+        # argument values can be anything the upstream takes (texts, ids...): log only their names
+        log.info("MCP %s by '%s' -> %s (args: %s)", name, tok.name, up.srv.name, ", ".join(sorted(args))[:200])
+        return _ok(mid, await gw.call(up, upstream_name, args))
 
 
 def _ok(mid, result) -> dict:

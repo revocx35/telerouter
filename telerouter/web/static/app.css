@@ -181,3 +181,4 @@ p.desc { white-space: pre-wrap; margin: 10px 0; }
   .notes-layout { grid-template-columns: minmax(0, 1fr); }
   .tree { max-height: 30vh; }
 }
+.ext-tools { max-height: 40vh; overflow-y: auto; } .ext-url { word-break: break-all; }

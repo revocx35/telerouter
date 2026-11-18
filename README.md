@@ -298,6 +298,20 @@ called pokerbot in projects/pokerbot"* starts a fresh Claude Code (or Hermes) in
 machine and connects you to it. Allow it per machine (*Agents & machines → edit → New sessions*; off by
 default), with the model and permission mode new sessions get.
 
+## External MCP servers (one server for every agent)
+
+*MCP access → External MCP servers → Add*: give a short name (it becomes the tool prefix), the server's Streamable
+HTTP URL (`https://…`, plain `http://` only on 127.0.0.1), an optional token (sent as `Authorization: Bearer`) and,
+for a server with a private certificate, *Fetch & pin its certificate*. telerouter connects to it and passes its
+tools on to every MCP token (or only the ones you tick) as `<name>__<tool>`, e.g. `ha__HassTurnOn`. Agents that
+already use telerouter's MCP get them without any change; a running agent sees new tools after it reconnects
+(restart it, or `/mcp` → reconnect in Claude Code). The server's token stays in telerouter; untick single tools to
+keep them from the agents. The table shows whether the server is connected and how many tools it offers.
+
+API (admin session + CSRF): `GET/POST /api/external-mcp`, `PUT/DELETE /api/external-mcp/{id}`,
+`POST /api/external-mcp/{id}/refresh`. Fields: `name`, `url`, `token` (write-only; `clear_token: true` removes it),
+`description`, `enabled`, `tls_ca`, `tokens` (`["*"]` or token ids), `hidden_tools` (upstream tool names).
+
 ## Sessions API (let other apps run agent tasks)
 
 Apps can start agent sessions on a machine, hand them a task and read the outcome over HTTPS — for example

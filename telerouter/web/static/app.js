@@ -1298,7 +1298,7 @@ async function voice(main) {
 
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
-  const [data, contactsD, spD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers")]);
+  const [data, contactsD, spD, extD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers"), api("GET", "/api/external-mcp")]);
   const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"], ["sessions", "start agent sessions (Sessions API /v1, for apps like ADM)"]];
   // The same fields for a new token and for editing one (t = the token, or null for a new one).
   const tokenFields = t => {
@@ -1346,6 +1346,7 @@ async function mcp(main) {
   main.replaceChildren(el("h1", {}, "MCP access"),
     el("div", { class: "card" }, el("h2", {}, "telerouter as an MCP server"),
       el("p", { class: "hint" }, `Any agent can use telerouter's tools (contacts, calls, speakers) at ${data.url} with a token. Agents that telerouter runs itself get their own token automatically.`)),
+    externalCard(extD),
     el("div", { class: "card" }, el("h2", {}, "Tokens"), el("div", { class: "table-wrap" },
       el("table", {}, el("tr", {}, ["Name", "Scopes", "Contacts", "Speakers", "Last used", ""].map(t => el("th", {}, t))),
         data.tokens.map(t => el("tr", {}, el("td", {}, t.name, t.agent_id ? el("span", { class: "chip" }, "agent") : ""), el("td", {}, t.scopes.join(", ")),
@@ -1355,6 +1356,69 @@ async function mcp(main) {
             el("button", { class: "small", onclick: () => editToken(t) }, "Edit"),
             el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))))),
     el("div", { class: "card" }, el("h2", {}, "New token"), f));
+}
+
+// External MCP servers: telerouter connects to them and passes their tools on to its tokens ("<name>__<tool>").
+function externalCard(extD) {
+  const tokName = id => (extD.tokens.find(t => t.id === id) || { name: "(removed token)" }).name;
+  const shared = s => s.tokens.includes("*") ? "all tokens" : s.tokens.length ? s.tokens.map(tokName).join(", ") : "no token";
+  const rows = extD.servers.map(s => el("tr", {},
+    el("td", {}, stateDot(s.status === "off" ? "off" : s.status), " ", el("b", {}, s.name),
+      el("div", { class: "hint mono ext-url" }, s.url)),
+    el("td", {}, s.status === "error" ? el("span", { class: "err" }, s.error) : s.status === "connected" ?
+      `${s.tools.filter(t => !t.hidden).length} of ${s.tools.length} tools` : s.status),
+    el("td", {}, shared(s)),
+    el("td", {}, el("div", { class: "row" },
+      el("button", { class: "small", onclick: () => externalForm(s, extD) }, "Edit"),
+      el("button", { class: "small", onclick: async () => { await act(() => api("POST", `/api/external-mcp/${s.id}/refresh`), "Refreshed"); route(); } }, "Refresh"),
+      el("button", { class: "small danger", onclick: async () => { if (confirm(`Remove ${s.name}? Agents lose its tools.`)) { await act(() => api("DELETE", `/api/external-mcp/${s.id}`), "Removed"); route(); } } }, "Remove")))));
+  return el("div", { class: "card" }, el("h2", {}, "External MCP servers"),
+    el("p", { class: "hint" }, "telerouter connects to these servers and passes their tools on to the MCP tokens you choose, as name__tool. Agents that already use telerouter get them without any change; a running agent sees new tools after it reconnects (restart it, or /mcp → reconnect in Claude Code). The server's own token stays in telerouter."),
+    extD.servers.length ? el("div", { class: "table-wrap" }, el("table", {},
+      el("tr", {}, ["Server", "Tools", "Shared with", ""].map(t => el("th", {}, t))), rows)) : el("p", { class: "muted" }, "None yet."),
+    el("button", { class: "primary", onclick: () => externalForm(null, extD) }, "Add external MCP server"));
+}
+
+function externalForm(s, extD) {
+  const isNew = !s;
+  s = s || { name: "", url: "", description: "", enabled: true, tls_ca: "", tokens: ["*"], hidden_tools: [], tools: [], token_set: false };
+  let ca = s.tls_ca || "";
+  const caNote = el("span", { class: "hint" }, ca ? "Its own certificate is pinned." : "Public certificate (or none pinned).");
+  const f = el("form", {},
+    el("div", { class: "form2" },
+      field("Name (tool prefix)", inp("name", s.name, { placeholder: "e.g. ha", required: true }), "Short: tools are named name__tool"),
+      field("URL (Streamable HTTP)", inp("url", s.url, { placeholder: "https://host:port/mcp", required: true })),
+      field("Token (sent as Bearer)", pwd("token", s.token_set ? "(unchanged)" : "optional")),
+      field("What it is for (told to the agents)", inp("description", s.description, { placeholder: "e.g. lights, switches, sensors" }))),
+    el("div", { class: "row" }, chk("enabled", s.enabled, "Enabled"),
+      s.token_set ? chk("clear_token", false, "Remove the stored token") : null),
+    el("div", { class: "row" }, el("button", { type: "button", class: "small", onclick: async () => {
+      const url = f.querySelector("[name=url]").value.trim();
+      const r = await act(() => api("POST", "/api/agents/mcp-certificate", { url }));
+      if (confirm(`Trust this certificate for ${url}?\n\nSHA-256 ${r.fingerprint}\n\nCompare it with the fingerprint the server shows.`)) {
+        ca = r.pem; caNote.textContent = `Pinned: ${r.fingerprint.slice(0, 23)}… (saved when you press Save)`;
+      }
+    } }, "Fetch & pin its certificate"), ca ? el("button", { type: "button", class: "small", onclick: () => { ca = ""; caNote.textContent = "Pin removed (saved when you press Save)."; } }, "Remove pin") : null, caNote),
+    el("h3", {}, "Shared with"),
+    field("MCP tokens that get its tools", sel("tokens_mode", s.tokens.includes("*") ? "*" : "pick", [["*", "all tokens (every agent with telerouter's MCP)"], ["pick", "only these…"]])),
+    el("div", { class: "row" }, extD.tokens.map(t => chk("t_" + t.id, s.tokens.includes(t.id), t.name + (t.agent ? " (agent)" : "")))),
+    s.tools.length ? el("div", {}, el("h3", {}, "Tools passed on"),
+      el("p", { class: "hint" }, "Untick a tool to keep it from the agents."),
+      el("div", { class: "ext-tools" }, s.tools.map(t => el("div", {}, chk("x_" + t.name, !t.hidden, t.exposed),
+        el("div", { class: "hint" }, t.description))))) : null);
+  f.addEventListener("submit", e => e.preventDefault());
+  modal(isNew ? "Add external MCP server" : `Edit ${s.name}`, f, close => [el("button", { class: "primary", onclick: async () => {
+    if (!f.reportValidity()) return;
+    const d = formData(f);
+    const body = { name: d.name, url: d.url, description: d.description, enabled: d.enabled, tls_ca: ca,
+      tokens: d.tokens_mode === "*" ? ["*"] : extD.tokens.filter(t => d["t_" + t.id]).map(t => t.id),
+      hidden_tools: s.tools.filter(t => !d["x_" + t.name]).map(t => t.name) };
+    if (d.token) body.token = d.token;
+    if (d.clear_token) body.clear_token = true;
+    const r = await act(() => isNew ? api("POST", "/api/external-mcp", body) : api("PUT", `/api/external-mcp/${s.id}`, body));
+    toast(r.status === "connected" ? `Connected: ${r.tools.length} tools` : r.status === "error" ? `Saved, but: ${r.error}` : "Saved", r.status === "error");
+    close(); route();
+  } }, "Save")]);
 }
 
 // ---------------------------------------------------------------------------------------------- tmux

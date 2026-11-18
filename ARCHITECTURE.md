@@ -55,6 +55,7 @@ telerouter/
   apisessions.py       Sessions API (/v1): apps start agent sessions with a task; /data/api_sessions.json
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
+  gateway.py           MCP gateway: client of external MCP servers, re-serves their tools on /mcp as <name>__<tool>
   voice/
     client_conn.py     one speaker device connection (client): paced audio out, mic in, state
     speaker.py         VirtualSpeaker: a mic device + an output device; play/cue/live routing
@@ -585,6 +586,44 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | list_folder, create_folder, move_folder, delete_folder, read_note, write_note, append_note, move_note, delete_note, search_notes, recent_changes | memory (agents implicitly) | shared project notes (§4.5) |
 | send_agent_message, read_agent_messages, list_peer_agents, set_status | memory (agents implicitly) | messages and status between agents (§4.5) |
 
+### 6.1 MCP gateway: external MCP servers (`gateway.py`, 0.20)
+
+The admin adds an external MCP server under *MCP access → External MCP servers* (`Config.external_mcp`,
+`ExternalMcpServer` = an `ExtraMcpServer` plus `id`, `tokens`, `hidden_tools`). telerouter is then an MCP **client**
+of it and passes its tools on to its own tokens, so every agent that already has telerouter's MCP gets them with no
+change on the agent's side:
+
+```
+agent (Claude Code / Hermes / any client)                telerouter                         external MCP server
+  tools/list  ── Bearer trm_… ─────────────►  own tools + cached "<name>__<tool>"   ◄── tools/list (every 5 min)
+  tools/call ha__HassTurnOn {…} ───────────►  token shared? tool hidden? ──────────► tools/call HassTurnOn {…}
+                                ◄────────────  upstream result unchanged ◄──────────  (Bearer <its token>, pinned CA)
+```
+
+* **Client** (`McpClient`): Streamable HTTP; `initialize` + `notifications/initialized`, keeps `Mcp-Session-Id` and
+  `MCP-Protocol-Version`, reads JSON or `text/event-stream` answers (notifications in the stream are skipped), pages
+  `tools/list` (max 300 tools), re-initializes once when the server answers 404 for a forgotten session, ends the
+  session with `DELETE` on close. No redirects followed; answers capped at 4 MB; 8 calls in flight per server; 230 s
+  per call. https (public CAs or a pinned CA, host name checked) or plain http on loopback only.
+* **Manager** (`Gateway`): `sync()` follows the config (from `Engine.apply_config`): a change of name/URL/token/CA/
+  enabled reconnects, sharing/hidden tools/description apply at once. `loop()` re-lists connected servers every
+  5 min and retries failed ones every minute. Status per server (`connecting`/`connected`/`error`/`off`) is shown in
+  the UI.
+* **Re-serving** (`McpServer`): `tools/list` appends `Gateway.tools_for(tok)`; a `tools/call` for a name that is not a
+  telerouter tool goes to `_call_external` (unknown, unshared or hidden names → `-32602 unknown tool`). Names are
+  `<name>__<tool>` with characters outside `[A-Za-z0-9_-]` replaced by `_`, cut at 64 (keep the prefix short: Claude
+  Code shows them as `mcp__telerouter__<name>__<tool>`, verified with Claude Code to call fine). Descriptions get a
+  `[<name>]` prefix; a missing/invalid `inputSchema` becomes an empty object schema; schemas over 64 KB are dropped.
+  `initialize` instructions add one line per shared server. Arguments are logged by name only.
+* **Who sees what**: `tokens` = `["*"]` (default: every telerouter MCP token, agent tokens included, whatever their
+  scopes) or a list of token ids; `hidden_tools` = upstream names not passed on. The server's own token stays in
+  telerouter (write-only in the API).
+* telerouter announces `tools.listChanged: false` and is stateless, so a connected agent sees added/removed tools
+  after it reconnects (Claude Code: `/mcp` → reconnect, or restart the agent).
+
+The per-agent *Extra MCP servers* (`Agent.mcp_servers`, §4) still exist: they go straight into one agent's config
+and the agent talks to the server itself. The gateway is for "one server, every agent".
+
 The SDK's FastMCP API changed in mcp 2.x; the protocol surface needed here (initialize, ping,
 tools/list, tools/call, notifications) is small, so it is implemented directly and tested.
 
@@ -617,6 +656,7 @@ integration tokens, SSH key).
 | Phone app behind a sign-in proxy | the WebView loads only https, never skips certificate errors, has no JavaScript bridge; links to other sites from telerouter's pages open the browser (sign-in redirects stay in the app); `telerouter-app://` links work only from telerouter's origin; the device token is Keystore-sealed and sent in its own header; the app adds itself only with a logged-in admin session, and *Sign out* deletes its device (token revoked) |
 | Exposing the phone endpoints to the internet (`TELEROUTER_PUBLIC_URL`, app 0.1.x) | only `/ws/client` (bearer `trc_` token, 256-bit, hashed; per-IP throttle on bad tokens) and `/api/client/enroll` (one-time 15-min code, throttled) are meant to be proxied; the admin UI stays on the LAN; set `TELEROUTER_TRUSTED_PROXIES` so throttles see real client IPs; a lost phone is revoked by removing its device |
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
+| An external MCP server (gateway) misused or turned against agents | admin-only (session + CSRF); URL https-only (http only on loopback), no redirects followed, its token is write-only and is not sent to a changed URL unless typed again, its CA pinned after the admin compared the fingerprint (host name still checked); answers capped (4 MB, 300 tools, 64 KB schemas), 8 calls in flight, 230 s timeout; arguments logged by name only. The admin chooses which tokens get its tools (all by default) and can hide single tools. Its tool descriptions and results reach the agents unchanged: an external server is trusted like an MCP server added to the agent directly (a hostile one can try prompt injection), so add only servers you trust |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | An agent wipes or poisons the shared memory | only tokens the admin gave the `memory` scope (and telerouter's own agents); edits need the version read, every old text is kept (20 revisions), deletes go to a 30-day trash, agents can't delete non-empty folders; per-identity rate limits and size caps; the page shows who wrote what. Notes are readable by every memory token: the instructions tell agents never to store secrets there (say where a secret lives instead). A note is data, not an order: another agent's note can be wrong or written by a compromised agent |
