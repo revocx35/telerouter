@@ -22,7 +22,8 @@ USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\[\]-]{0,80}$")
 WAKE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
-SECRET_FIELDS = {"password", "token", "password_hash", "totp_secret", "token_hash", "code_hash", "client_secret"}
+SECRET_FIELDS = {"password", "token", "password_hash", "totp_secret", "token_hash", "code_hash", "client_secret",
+                 "refresh_token"}
 
 
 def _name(v: str) -> str:
@@ -448,6 +449,10 @@ class Agent(BaseModel):
 
 
 McpScope = Literal["contacts", "calls", "speak", "clients", "messaging", "memory", "sessions"]
+# What a token may do in a connected Gmail account (gmail.py): read mail, write drafts, send, labels/archive/read
+# state, move to the trash. Granted per account, so one agent can e.g. read work mail but send only from home.
+GmailPerm = Literal["read", "draft", "send", "organize", "trash"]
+GMAIL_PERMS: tuple[str, ...] = ("read", "draft", "send", "organize", "trash")
 
 
 class McpToken(BaseModel):
@@ -460,11 +465,22 @@ class McpToken(BaseModel):
     contacts: list[str] = Field(default_factory=lambda: ["*"])    # contact ids or "*"
     clients: list[str] = Field(default_factory=lambda: ["*"])     # speaker ids or "*"
     agent_id: str = ""               # set for the token telerouter made for one of its agents
+    gmail: dict[str, list[GmailPerm]] = Field(default_factory=dict)   # Gmail account id -> what it may do there
 
     @field_validator("name")
     @classmethod
     def check_name(cls, v: str) -> str:
         return _name(v)
+
+    @field_validator("gmail")
+    @classmethod
+    def _gmail(cls, v: dict[str, list[str]]) -> dict[str, list[str]]:
+        if len(v) > 20 or any(not re.match(r"^[A-Za-z0-9_-]{1,32}$", k) for k in v):
+            raise ValueError("invalid Gmail account ids")
+        return {k: [p for p in GMAIL_PERMS if p in perms] for k, perms in v.items() if perms}
+
+    def gmail_allows(self, account_id: str, perm: str) -> bool:
+        return perm in self.gmail.get(account_id, [])
 
     def allows_contact(self, cid: str) -> bool:
         return "*" in self.contacts or cid in self.contacts
@@ -796,6 +812,72 @@ class SsoSettings(BaseModel):
         return self
 
 
+GMAIL_ACCESS = ("full", "compose", "read")      # what telerouter asks Google for when an account is connected
+
+
+class GmailAccount(BaseModel):
+    """A Gmail mailbox connected with Google's OAuth consent; agents reach it through telerouter's MCP tools.
+    The refresh token is write-only (SECRET_FIELDS) and never leaves telerouter."""
+    id: str = Field(default_factory=new_id)
+    email: str
+    name: str = ""                    # optional label ("work", "home"), told to agents
+    access: Literal["full", "compose", "read"] = "full"
+    scopes: list[str] = Field(default_factory=list)      # what Google actually granted
+    refresh_token: str = ""
+    added: float = Field(default_factory=time.time)
+    last_used: float = 0.0
+    error: str = ""                   # set when Google refuses the stored sign-in ("reconnect")
+
+    @field_validator("name")
+    @classmethod
+    def _n(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if v and not NAME_RE.match(v):
+            raise ValueError("1-64 characters, no control characters or < >")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not re.match(r"^[^@\s<>\x00-\x1f]{1,64}@[A-Za-z0-9.-]{1,253}$", v):
+            raise ValueError("not an e-mail address")
+        return v
+
+
+class GmailSettings(BaseModel):
+    """The owner's own Google OAuth client (Google Cloud console, type "Web application") and the accounts."""
+    client_id: str = Field(default="", max_length=200)
+    client_secret: str = Field(default="", max_length=200)
+    redirect_uri: str = ""            # "" = this page's address + /api/gmail/callback
+    accounts: list[GmailAccount] = Field(default_factory=list, max_length=20)
+
+    @field_validator("client_id")
+    @classmethod
+    def _cid(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^[A-Za-z0-9._-]{1,180}\.apps\.googleusercontent\.com$", v):
+            raise ValueError("a Google client ID ends in .apps.googleusercontent.com")
+        return v
+
+    @field_validator("client_secret")
+    @classmethod
+    def _secret(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^[A-Za-z0-9_-]{8,120}$", v):
+            raise ValueError("that does not look like a Google client secret")
+        return v
+
+    @field_validator("redirect_uri")
+    @classmethod
+    def _redirect(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^(https://[A-Za-z0-9.\-\[\]:]+|http://(127\.0\.0\.1|localhost)(:\d{1,5})?)"
+                              r"(/[A-Za-z0-9._~/%-]*)?$", v):
+            raise ValueError("an https:// address (or http://127.0.0.1... for the copy-the-address way), no query")
+        return v
+
+
 BOT_TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,60}$")
 
 
@@ -855,5 +937,6 @@ class Config(BaseModel):
     tasks: list[ScheduledTask] = Field(default_factory=list)
     telegram_bots: list[TelegramBot] = Field(default_factory=list, max_length=5)
     external_mcp: list[ExternalMcpServer] = Field(default_factory=list, max_length=20)   # MCP gateway
+    gmail: GmailSettings = Field(default_factory=GmailSettings)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

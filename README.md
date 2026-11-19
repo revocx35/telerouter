@@ -312,6 +312,29 @@ API (admin session + CSRF): `GET/POST /api/external-mcp`, `PUT/DELETE /api/exter
 `POST /api/external-mcp/{id}/refresh`. Fields: `name`, `url`, `token` (write-only; `clear_token: true` removes it),
 `description`, `enabled`, `tls_ca`, `tokens` (`["*"]` or token ids), `hidden_tools` (upstream tool names).
 
+## Gmail (agents read and write your mail)
+
+*MCP access → Gmail*. Connect one or more Gmail accounts with Google's sign-in; agents then use them through
+telerouter's `gmail_*` tools: search (Gmail's search syntax), read messages and threads (HTML turned into text),
+download attachments, list labels, write/update/list/delete drafts, send (also as a reply in a thread), change labels
+(read/unread, archive, star, your own labels) and move to/from the trash. Nothing is ever deleted for good.
+
+1. **Your own Google OAuth client** (once): in the Google Cloud console create a project, enable the *Gmail API*,
+   set up the *OAuth consent screen* (External, add your addresses as test users, then *Publish app*: in *Testing*
+   Google ends the sign-in after 7 days; the "unverified app" warning is fine, it is your app), and create
+   *Credentials → OAuth client ID → Web application* with the redirect URI telerouter shows
+   (`https://<the address you use>/api/gmail/callback`). Paste the client ID and secret into telerouter. Google accepts
+   only domain names here: open telerouter by its domain, or set the redirect URI field to it. Without one, use a
+   *Desktop app* client with `http://127.0.0.1:1/` and paste the address the browser ends on back into telerouter.
+2. **Connect a Gmail account** (choose what telerouter asks for: read + drafts + send + labels + trash, read + drafts +
+   send, or read only) and sign in. Repeat for more accounts; *Rename* gives one a name the agents can use ("work").
+3. **Who may do what**: *Tokens → Edit → Gmail* has boxes per account: *read mail*, *write drafts*, *send mail*,
+   *labels, archive, read/unread*, *move to the trash*. Agent tokens (Jarvis) can be edited too. A connected agent
+   sees the new tools after it reconnects.
+
+Connecting needs a browser (Google blocks its sign-in inside apps such as the phone app). E-mail is written by other
+people: agents are told never to follow instructions in it, but give *send* only to agents that need it.
+
 ## Sessions API (let other apps run agent tasks)
 
 Apps can start agent sessions on a machine, hand them a task and read the outcome over HTTPS — for example

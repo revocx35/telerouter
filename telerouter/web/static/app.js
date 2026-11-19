@@ -1298,7 +1298,7 @@ async function voice(main) {
 
 // ---------------------------------------------------------------------------------------------- MCP
 async function mcp(main) {
-  const [data, contactsD, spD, extD] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers"), api("GET", "/api/external-mcp")]);
+  const [data, contactsD, spD, extD, gd] = await Promise.all([api("GET", "/api/mcp-tokens"), api("GET", "/api/contacts"), api("GET", "/api/speakers"), api("GET", "/api/external-mcp"), api("GET", "/api/gmail")]);
   const SC = [["contacts", "list contacts"], ["calls", "make calls"], ["speak", "talk on speakers"], ["clients", "list speakers"], ["messaging", "send text messages"], ["memory", "shared memory (notes + agent messages)"], ["sessions", "start agent sessions (Sessions API /v1, for apps like ADM)"]];
   // The same fields for a new token and for editing one (t = the token, or null for a new one).
   const tokenFields = t => {
@@ -1310,13 +1310,15 @@ async function mcp(main) {
       field("Contacts it may use", sel("contacts_mode", all(t && t.contacts) ? "*" : "pick", [["*", "all visible contacts"], ["pick", "only these…"]])),
       el("div", { class: "row" }, contacts.map(c => chk("c_" + c.id, !!t && t.contacts.includes(c.id), c.alias || c.name))),
       field("Speakers it may use", sel("clients_mode", all(t && t.clients) ? "*" : "pick", [["*", "all"], ["pick", "only these…"]])),
-      el("div", { class: "row" }, spD.speakers.map(c => chk("k_" + c.id, !!t && t.clients.includes(c.id), c.name)))];
+      el("div", { class: "row" }, spD.speakers.map(c => chk("k_" + c.id, !!t && t.clients.includes(c.id), c.name))),
+      gmailFields(gd, t)];
   };
   const tokenBody = root => {
     const d = formData(root);
     return { name: d.name, scopes: SC.map(s => s[0]).filter(k => d["s_" + k]),
       contacts: d.contacts_mode === "*" ? ["*"] : Object.keys(d).filter(k => k.startsWith("c_") && d[k]).map(k => k.slice(2)),
-      clients: d.clients_mode === "*" ? ["*"] : Object.keys(d).filter(k => k.startsWith("k_") && d[k]).map(k => k.slice(2)) };
+      clients: d.clients_mode === "*" ? ["*"] : Object.keys(d).filter(k => k.startsWith("k_") && d[k]).map(k => k.slice(2)),
+      gmail: Object.fromEntries(gd.accounts.map(a => [a.id, gd.perms.map(p => p.id).filter(p => d[`g_${a.id}_${p}`])]).filter(([, v]) => v.length)) };
   };
   const editToken = t => {
     const ef = el("form", {}, ...tokenFields(t),
@@ -1347,14 +1349,16 @@ async function mcp(main) {
     el("div", { class: "card" }, el("h2", {}, "telerouter as an MCP server"),
       el("p", { class: "hint" }, `Any agent can use telerouter's tools (contacts, calls, speakers) at ${data.url} with a token. Agents that telerouter runs itself get their own token automatically.`)),
     externalCard(extD),
+    gmailCard(gd),
     el("div", { class: "card" }, el("h2", {}, "Tokens"), el("div", { class: "table-wrap" },
-      el("table", {}, el("tr", {}, ["Name", "Scopes", "Contacts", "Speakers", "Last used", ""].map(t => el("th", {}, t))),
+      el("table", {}, el("tr", {}, ["Name", "Scopes", "Contacts", "Speakers", "Gmail", "Last used", ""].map(t => el("th", {}, t))),
         data.tokens.map(t => el("tr", {}, el("td", {}, t.name, t.agent_id ? el("span", { class: "chip" }, "agent") : ""), el("td", {}, t.scopes.join(", ")),
           el("td", {}, t.contacts.includes("*") ? "all" : `${t.contacts.length}`), el("td", {}, t.clients.includes("*") ? "all" : `${t.clients.length}`),
+          el("td", {}, gmailSummary(gd, t)),
           el("td", {}, ago(t.last_used)),
-          el("td", {}, t.agent_id ? "" : el("div", { class: "row" },
+          el("td", {}, el("div", { class: "row" },
             el("button", { class: "small", onclick: () => editToken(t) }, "Edit"),
-            el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))))),
+            t.agent_id ? null : el("button", { class: "small danger", onclick: async () => { if (confirm(`Revoke ${t.name}?`)) { await act(() => api("DELETE", `/api/mcp-tokens/${t.id}`), "Revoked"); route(); } } }, "Revoke")))))))),
     el("div", { class: "card" }, el("h2", {}, "New token"), f));
 }
 
@@ -1419,6 +1423,84 @@ function externalForm(s, extD) {
     toast(r.status === "connected" ? `Connected: ${r.tools.length} tools` : r.status === "error" ? `Saved, but: ${r.error}` : "Saved", r.status === "error");
     close(); route();
   } }, "Save")]);
+}
+
+// Gmail: the owner connects accounts (Google OAuth with their own client); tokens get boxes per account.
+function gmailSummary(gd, t) {
+  const g = t.gmail || {};
+  const parts = gd.accounts.filter(a => (g[a.id] || []).length).map(a => `${a.name || a.email}: ${g[a.id].join(", ")}`);
+  return parts.length ? parts.join("; ") : el("span", { class: "muted" }, "none");
+}
+
+function gmailFields(gd, t) {
+  if (!gd.accounts.length) return null;
+  const mine = t && t.gmail ? t.gmail : {};
+  return el("div", { class: "gmail-perms" }, el("h3", {}, "Gmail"),
+    el("p", { class: "hint" }, "What this token may do in each connected account. Nothing ticked = no Gmail tools."),
+    gd.accounts.map(a => el("div", { class: "gmail-acc" }, el("div", {}, el("b", {}, a.email), a.name ? ` (${a.name})` : ""),
+      el("div", { class: "row" }, gd.perms.map(p => {
+        const can = a.perms.includes(p.id);
+        const box = el("input", { type: "checkbox", name: `g_${a.id}_${p.id}`, checked: (mine[a.id] || []).includes(p.id) && can, disabled: !can });
+        return el("label", { class: "chk" + (can ? "" : " muted"), title: can ? "" : "Not granted when the account was connected: reconnect it with more access" },
+          box, p.label);
+      })))));
+}
+
+function gmailCard(gd) {
+  const ready = gd.client_id && gd.client_secret_set;
+  const ipRedirect = /^https:\/\/(\d{1,3}\.){3}\d{1,3}(:|\/)|^https:\/\/\[/.test(gd.effective_redirect_uri);
+  const client = el("form", {},
+    el("ol", { class: "hint steps" },
+      el("li", {}, "In the Google Cloud console (console.cloud.google.com) create a project and enable the Gmail API."),
+      el("li", {}, "OAuth consent screen: External, add your Gmail addresses as test users, then press Publish app (in Testing mode Google ends the sign-in after 7 days). Google warns that the app is unverified: that is your own app, continue."),
+      el("li", {}, "Credentials → Create credentials → OAuth client ID → Web application. Authorized redirect URI:")),
+    copyBox(gd.effective_redirect_uri),
+    ipRedirect ? el("p", { class: "err" }, "Google accepts only a domain name here, not an IP address. Open telerouter by its domain name, or enter the redirect URI below (e.g. https://telerouter.example.com/api/gmail/callback, or http://127.0.0.1:1/ with a Desktop app client: you then copy the address the browser ends on back into telerouter).") : null,
+    el("div", { class: "form2" },
+      field("Client ID", inp("client_id", gd.client_id, { placeholder: "….apps.googleusercontent.com" })),
+      field("Client secret", pwd("client_secret", gd.client_secret_set ? "(unchanged)" : "GOCSPX-…")),
+      field("Redirect URI (optional)", inp("redirect_uri", gd.redirect_uri, { placeholder: gd.suggested_redirect_uri }), "Empty = this page's address")),
+    el("button", { class: "primary", type: "submit" }, "Save client"));
+  client.addEventListener("submit", async e => {
+    e.preventDefault();
+    const d = formData(client);
+    const body = { client_id: d.client_id.trim(), redirect_uri: d.redirect_uri.trim() };
+    if (d.client_secret) body.client_secret = d.client_secret;
+    await act(() => api("PUT", "/api/gmail/client", body), "Saved"); route();
+  });
+  const connect = async (access, accountId) => {
+    if (APP) { toast("Google does not allow its sign-in inside apps: open telerouter in a browser to connect an account.", true); return; }
+    const r = await act(() => api("POST", "/api/gmail/connect", { access, account_id: accountId || "" }));
+    if (!r.paste) { location.href = r.url; return; }
+    window.open(r.url, "_blank", "noopener");
+    const f = el("form", {}, el("p", {}, "Sign in with Google in the new tab. The browser then ends on a page that does not load (127.0.0.1): copy that whole address from the address bar and paste it here."),
+      field("Address", inp("url", "", { placeholder: "http://127.0.0.1…?state=…&code=…", required: true })));
+    f.addEventListener("submit", e => e.preventDefault());
+    modal("Connect a Gmail account", f, close => [el("button", { class: "primary", onclick: async () => {
+      if (!f.reportValidity()) return;
+      const a = await act(() => api("POST", "/api/gmail/finish", { url: formData(f).url }));
+      toast(`${a.email} connected`); close(); route();
+    } }, "Finish")]);
+  };
+  const access = sel("access", "full", gd.access_levels.map(a => [a.id, a.label]));
+  const rows = gd.accounts.map(a => el("tr", {},
+    el("td", {}, stateDot(a.connected ? "connected" : "error"), " ", el("b", {}, a.email), a.name ? el("div", { class: "hint" }, a.name) : null),
+    el("td", {}, a.access_label),
+    el("td", {}, a.error ? el("span", { class: "err" }, a.error) : "connected"),
+    el("td", {}, ago(a.last_used)),
+    el("td", {}, el("div", { class: "row" },
+      el("button", { class: "small", onclick: async () => { const r = await act(() => api("POST", `/api/gmail/accounts/${a.id}/check`)); toast(`${r.email}: works (${r.messages_total} messages)`); } }, "Check"),
+      el("button", { class: "small", onclick: async () => { const n = prompt("Name for this account (e.g. work, home), told to the agents:", a.name || ""); if (n !== null) { await act(() => api("PUT", `/api/gmail/accounts/${a.id}`, { name: n }), "Saved"); route(); } } }, "Rename"),
+      el("button", { class: "small", onclick: () => connect(access.value, a.id) }, "Reconnect"),
+      el("button", { class: "small danger", onclick: async () => { if (confirm(`Remove ${a.email}? telerouter forgets the sign-in and asks Google to revoke it; agents lose access.`)) { await act(() => api("DELETE", `/api/gmail/accounts/${a.id}`), "Removed"); route(); } } }, "Remove")))));
+  return el("div", { class: "card" }, el("h2", {}, "Gmail"),
+    el("p", { class: "hint" }, "Connect Gmail accounts with Google's sign-in; agents then use them through telerouter's gmail_* tools (search, read, drafts, send, labels, trash). Which agent may do what in which account is set per token: Tokens → Edit → Gmail. The Google sign-in stays in telerouter."),
+    el("details", { open: !ready }, el("summary", {}, ready ? "Google OAuth client (set)" : "1. Set up your Google OAuth client"), client),
+    gd.accounts.length ? el("div", { class: "table-wrap" }, el("table", {},
+      el("tr", {}, ["Account", "Access", "Status", "Last used", ""].map(t => el("th", {}, t))), rows)) : el("p", { class: "muted" }, "No account connected yet."),
+    ready ? el("div", { class: "row" }, field("Access telerouter asks Google for", access),
+      el("button", { class: "primary", onclick: () => connect(access.value, "") }, "Connect a Gmail account")) : null,
+    APP ? el("p", { class: "hint" }, "Connecting needs a browser (Google blocks its sign-in inside apps); everything else works here.") : null);
 }
 
 // ---------------------------------------------------------------------------------------------- tmux

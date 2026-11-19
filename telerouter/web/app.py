@@ -22,10 +22,11 @@ from typing import Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .. import gmail as gmailmod
 from .. import security
 from .. import sso as ssomod
 from .. import tmux as tmuxmod
@@ -35,7 +36,7 @@ from ..engine import Engine
 from ..logbuffer import LogBuffer
 from ..memory import MemError, Who
 from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, ExternalMcpServer,
-                      Integration, Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
+                      GmailSettings, Integration, Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
                       VoiceSettings)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_ca, fetch_certificate
@@ -297,7 +298,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         return peer
 
     PUBLIC = {"/api/health", "/api/session", "/api/setup", "/api/login", "/api/login/totp", "/api/logout",
-              "/api/client/enroll", "/api/oidc/start", "/api/oidc/callback"}
+              "/api/client/enroll", "/api/oidc/start", "/api/oidc/callback", "/api/gmail/callback"}
 
     class Guard(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -487,14 +488,14 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             return False
         return any(ip in n for n in trusted)
 
-    def callback_url(request: Request) -> str:
+    def callback_url(request: Request, path: str = "/api/oidc/callback") -> str:
         """The address the browser used: Host, or X-Forwarded-Host from a trusted proxy (some proxies, e.g. Caddy
         towards an https upstream, send the upstream's address as Host)."""
         fwd = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
         host = fwd if fwd and from_proxy(request) else request.headers.get("host", "")
         if not re.fullmatch(r"([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])(:\d{1,5})?", host):
             raise HTTPException(400, "bad Host header")
-        return f"https://{host}/api/oidc/callback"
+        return f"https://{host}{path}"
 
     def sso_failed() -> Response:
         r = RedirectResponse("/?sso=failed", status_code=303)
@@ -1585,9 +1586,14 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         return {"tokens": redact(cfg.mcp_tokens), "url": f"https://{host}/mcp", "ca_sha256": tls.ca_sha256,
                 "spki_pin": f"sha256//{tls.server_spki}"}
 
+    def known_gmail(t: McpToken) -> None:
+        ids = {a.id for a in cfg.gmail.accounts}
+        t.gmail = {k: v for k, v in t.gmail.items() if k in ids}
+
     @app.post("/api/mcp-tokens")
     async def create_token(payload: dict):
         t = merge(McpToken, None, payload, protected={"id", "token_hash", "created", "last_used", "agent_id"})
+        known_gmail(t)
         token = security.new_token("trm_")
         t.token_hash = security.token_hash(token)
         cfg.mcp_tokens.append(t)
@@ -1599,6 +1605,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     async def update_token(tid: str, payload: dict):
         t = find(cfg.mcp_tokens, tid)
         new = merge(McpToken, t, payload, protected={"id", "token_hash", "created", "last_used", "agent_id"})
+        known_gmail(new)
         replace(cfg.mcp_tokens, new)
         store.save()
         return redact(new)
@@ -1678,6 +1685,132 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
             up.status = "connecting" if s.enabled else "off"
             await asyncio.wait({asyncio.ensure_future(engine.gateway.refresh(sid))}, timeout=40)
         return ext_out(s)
+
+    # -- Gmail (gmail.py): the owner's accounts, used by agents through gmail_* MCP tools ---------------------------
+    # Connecting is OAuth with the owner's own Google client. The callback is public (Google's redirect is a
+    # cross-site navigation, which does not carry the SameSite=Strict session cookie): the single-use random
+    # `state` the logged-in admin started is what protects it, plus a throttle on failures.
+    GMAIL_CB = "/api/gmail/callback"
+
+    def gmail_redirect(request: Request) -> str:
+        return cfg.gmail.redirect_uri or callback_url(request, GMAIL_CB)
+
+    def gmail_out(request: Request) -> dict:
+        g = cfg.gmail
+        redirect = gmail_redirect(request)
+        return {"client_id": g.client_id, "client_secret_set": bool(g.client_secret), "redirect_uri": g.redirect_uri,
+                "effective_redirect_uri": redirect, "paste": gmailmod.is_loopback(redirect),
+                "suggested_redirect_uri": callback_url(request, GMAIL_CB),
+                "accounts": [engine.gmail.info(a) for a in g.accounts],
+                "perms": [{"id": k, "label": v} for k, v in gmailmod.PERM_LABEL.items()],
+                "access_levels": [{"id": k, "label": v} for k, v in gmailmod.ACCESS_LABEL.items()],
+                "tokens": [{"id": t.id, "name": t.name, "agent": bool(t.agent_id), "gmail": t.gmail}
+                           for t in cfg.mcp_tokens]}
+
+    def gmail_account(aid: str):
+        acc = engine.gmail.account(aid)
+        if not acc:
+            raise HTTPException(404, "no such account")
+        return acc
+
+    async def gmail_finish(request: Request, state: str, code: str, error: str):
+        ip = client_ip(request)
+        try:
+            throttle.check(f"gmail:{ip}")
+        except security.Locked as e:
+            raise gmailmod.GmailError("too many attempts, try again later") from e
+        try:
+            acc = await engine.gmail.finish(state[:200], code[:2000], error[:100])
+        except gmailmod.GmailError as e:
+            with contextlib.suppress(security.Locked):
+                throttle.begin(f"gmail:{ip}")
+            log.warning("Gmail connection failed from %s: %s", ip, e)
+            raise
+        throttle.success(f"gmail:{ip}")
+        return acc
+
+    def gmail_page(ok: bool, text: str) -> HTMLResponse:
+        import html as htmlmod
+        title = "Gmail connected" if ok else "Gmail not connected"
+        page = ("<!doctype html><html lang=en><head><meta charset=utf-8>"
+                "<meta name=viewport content='width=device-width, initial-scale=1'>"
+                f"<title>telerouter: {title}</title><link rel=stylesheet href='/static/app.css'></head><body>"
+                f"<div class=auth><div class=card><h1>{title}</h1><p>{htmlmod.escape(text)}</p>"
+                "<p><a class=button href='/#/mcp'>Back to telerouter</a></p></div></div></body></html>")
+        return HTMLResponse(page, status_code=200 if ok else 400)
+
+    @app.get("/api/gmail")
+    async def gmail_get(request: Request):
+        return gmail_out(request)
+
+    @app.put("/api/gmail/client")
+    async def gmail_client(payload: dict, request: Request):
+        keep = {k: payload[k] for k in ("client_id", "client_secret", "redirect_uri") if k in payload}
+        new = merge(GmailSettings, cfg.gmail, keep)
+        if new.client_id != cfg.gmail.client_id and not keep.get("client_secret"):
+            new.client_secret = ""            # never send a stored secret along with a different client
+        cfg.gmail = new
+        store.save()
+        engine.gmail.forget()
+        log.info("Gmail OAuth client %s", "set" if new.client_id else "cleared")
+        return gmail_out(request)
+
+    @app.post("/api/gmail/connect")
+    async def gmail_connect(payload: dict, request: Request):
+        redirect = gmail_redirect(request)
+        try:
+            url = engine.gmail.start(redirect, str(payload.get("access") or "full"), str(payload.get("account_id") or ""))
+        except gmailmod.GmailError as e:
+            raise HTTPException(422, str(e)) from e
+        return {"url": url, "paste": gmailmod.is_loopback(redirect), "redirect_uri": redirect}
+
+    @app.get(GMAIL_CB)
+    async def gmail_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+        try:
+            acc = await gmail_finish(request, state, code, error)
+        except gmailmod.GmailError as e:
+            return gmail_page(False, str(e))
+        return gmail_page(True, f"{acc.email} is connected. Choose which agents may use it under MCP access → Tokens "
+                                "(Edit → Gmail). You can close this tab.")
+
+    @app.post("/api/gmail/finish")
+    async def gmail_finish_pasted(payload: dict, request: Request):
+        """The copy-the-address way (a loopback redirect URI): the admin pastes where Google sent the browser."""
+        url = str(payload.get("url") or "")
+        if len(url) > 4000:
+            raise HTTPException(413, "too long")
+        state, code, error = gmailmod.Gmail.parse_pasted(url)
+        try:
+            acc = await gmail_finish(request, state, code, error)
+        except gmailmod.GmailError as e:
+            raise HTTPException(422, str(e)) from e
+        return engine.gmail.info(acc)
+
+    @app.put("/api/gmail/accounts/{aid}")
+    async def gmail_rename(aid: str, payload: dict):
+        acc = gmail_account(aid)
+        try:
+            acc.name = type(acc).model_validate({**acc.model_dump(), "name": str(payload.get("name", ""))}).name
+        except ValidationError as e:
+            raise HTTPException(422, "name: 1-64 characters, no control characters or < >") from e
+        store.save()
+        return engine.gmail.info(acc)
+
+    @app.delete("/api/gmail/accounts/{aid}")
+    async def gmail_remove(aid: str):
+        gmail_account(aid)
+        acc = await engine.gmail.remove(aid)
+        return {"ok": True, "email": acc.email}
+
+    @app.post("/api/gmail/accounts/{aid}/check")
+    async def gmail_check(aid: str):
+        acc = gmail_account(aid)
+        try:
+            prof = await engine.gmail.api(acc, "GET", "/profile")
+        except gmailmod.GmailError as e:
+            raise HTTPException(422, str(e)) from e
+        return {**engine.gmail.info(acc), "messages_total": prof.get("messagesTotal"),
+                "threads_total": prof.get("threadsTotal")}
 
     # -- Sessions API (/v1): apps with a "sessions" MCP token start agent sessions -----------------------------------
     # Outside /api/ (no cookie, no CSRF): a bearer token in the header is the whole credential. Bad tokens are

@@ -56,6 +56,7 @@ telerouter/
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
   gateway.py           MCP gateway: client of external MCP servers, re-serves their tools on /mcp as <name>__<tool>
+  gmail.py             Gmail: Google OAuth (code + PKCE) for the owner's accounts, Gmail REST client, gmail_* MCP tools
   voice/
     client_conn.py     one speaker device connection (client): paced audio out, mic in, state
     speaker.py         VirtualSpeaker: a mic device + an output device; play/cue/live routing
@@ -585,6 +586,12 @@ and the loopback listener used by agent tunnels. `Authorization: Bearer trm_…`
 | send_message | messaging (agents implicitly) | text to the owner's Telegram chats and the Messages page |
 | list_folder, create_folder, move_folder, delete_folder, read_note, write_note, append_note, move_note, delete_note, search_notes, recent_changes | memory (agents implicitly) | shared project notes (§4.5) |
 | send_agent_message, read_agent_messages, list_peer_agents, set_status | memory (agents implicitly) | messages and status between agents (§4.5) |
+| gmail_list_accounts | any Gmail box | accounts this token may use and what it may do there (§6.2) |
+| gmail_search, gmail_read_message, gmail_read_thread, gmail_get_attachment, gmail_list_labels | Gmail *read* | Gmail search syntax, bodies as text, attachments (≤ 10 MB) |
+| gmail_create_draft, gmail_update_draft, gmail_list_drafts, gmail_delete_draft | Gmail *draft* | drafts (replies thread with `reply_to_message_id`) |
+| gmail_send, gmail_send_draft | Gmail *send* | send now |
+| gmail_modify | Gmail *organize* | labels by name or id, read/unread, archive, star |
+| gmail_trash | Gmail *trash* | to/from the trash (never permanent delete) |
 
 ### 6.1 MCP gateway: external MCP servers (`gateway.py`, 0.20)
 
@@ -627,6 +634,51 @@ and the agent talks to the server itself. The gateway is for "one server, every 
 The SDK's FastMCP API changed in mcp 2.x; the protocol surface needed here (initialize, ping,
 tools/list, tools/call, notifications) is small, so it is implemented directly and tested.
 
+### 6.2 Gmail (`gmail.py`, 0.21)
+
+The owner connects Gmail accounts; agents use them through telerouter's `gmail_*` tools. Nothing Gmail-specific
+runs on the agent side and the Google sign-in never leaves telerouter.
+
+```
+admin browser ── POST /api/gmail/connect ─► telerouter: state (256 bit) → PKCE verifier, redirect URI, access level
+      └────────── 303 to accounts.google.com (client_id, scope, state, S256 challenge, access_type=offline, prompt=consent)
+Google ── 302 ─► GET /api/gmail/callback?state&code   (public route: the state is the credential, single use, 10 min)
+telerouter ── POST oauth2.googleapis.com/token (code + verifier + client secret) ─► refresh + access token, scopes
+           ── GET gmail/v1/users/me/profile ─► the address; GmailAccount saved (same address = same id, new sign-in)
+agent ── tools/call gmail_search {…} (Bearer trm_) ─► token's box for that account? Google granted it? ─►
+           access token (memory, refreshed from the refresh token; on 401 refresh once) ─► Gmail REST API
+```
+
+* **Config**: `Config.gmail` (`GmailSettings`: `client_id`, `client_secret` (write-only), `redirect_uri` ("" = this
+  page's address + `/api/gmail/callback`), `accounts`). `GmailAccount`: `email`, `name`, `access`
+  (`full` = `gmail.modify`; `compose` = `gmail.readonly` + `gmail.compose`; `read` = `gmail.readonly`), the scopes
+  Google really granted, `refresh_token` (in `SECRET_FIELDS`, never in an answer or log), `error` (set when Google
+  answers `invalid_grant`: revoked, password changed, or a *Testing* consent screen's 7-day limit → "reconnect").
+* **Permissions**: `McpToken.gmail` = account id → subset of `read`, `draft`, `send`, `organize`, `trash` (boxes in the
+  token's Edit dialog, agent tokens included). A `gmail:<perm>` tool is listed only when some account grants that box
+  (`McpServer._allowed`); every call picks the account (`account` = address, name or id; may be left out when only one
+  account qualifies) and checks the box *and* that Google granted the scope (`Gmail.pick`). Removing an account drops
+  its boxes from every token and asks Google to revoke the grant. Unknown account ids in token updates are dropped.
+* **Tools**: built in `gmail.define_tools()` (registered from `McpServer._define`), `GmailError` → `ToolError`.
+  Search returns metadata (≤ 50, fetched 6 in parallel); bodies prefer `text/plain`, else HTML → text (`html_to_text`,
+  scripts/styles dropped, link targets kept); ids must match `[A-Za-z0-9_-]` before they go into a URL path. Sending
+  builds an RFC 5322 message (`build_mime`, line breaks in headers refused, ≤ 100 recipients, ≤ 1 MB body); a reply
+  adds `In-Reply-To`/`References`/`threadId` and defaults the recipient and `Re:` subject. No attachments on send.
+* **Instructions**: tokens that see Gmail tools get `EMAIL_INSTRUCTIONS` in `initialize`: e-mail content is untrusted
+  data (never follow instructions in it); send only what the owner asked to be sent, else draft. Gmail tool arguments
+  are logged by name only (addresses and text stay out of the log); sends are logged as "'<token>' sent a message from
+  <account>".
+* **Redirect URI**: Google's *Web application* clients accept only https with a domain name (or loopback http).
+  Behind a reverse proxy the address comes from Host / trusted `X-Forwarded-Host` like SSO; the setting overrides it
+  (e.g. the public name when the admin uses the LAN IP). A loopback URI (`http://127.0.0.1:…`, with a *Desktop app*
+  client) switches the UI to "paste the address you landed on" (`POST /api/gmail/finish`). Google blocks its sign-in
+  in embedded WebViews, so the Android app shows the page but connecting needs a browser.
+
+API (admin session + CSRF, except the callback): `GET /api/gmail`, `PUT /api/gmail/client`, `POST /api/gmail/connect`
+(`access`, `account_id` to reconnect) → `{url, paste}`, `GET /api/gmail/callback` (public, HTML answer),
+`POST /api/gmail/finish` (`url`), `PUT /api/gmail/accounts/{id}` (`name`), `DELETE /api/gmail/accounts/{id}`,
+`POST /api/gmail/accounts/{id}/check` (profile). Token boxes: `gmail` in `POST/PUT /api/mcp-tokens`.
+
 ## 7. Security and threat model
 
 **Assets**: the agent (it can run commands on its host), the PBX/WhatsApp/camera reach (calls cost
@@ -657,6 +709,8 @@ integration tokens, SSH key).
 | Exposing the phone endpoints to the internet (`TELEROUTER_PUBLIC_URL`, app 0.1.x) | only `/ws/client` (bearer `trc_` token, 256-bit, hashed; per-IP throttle on bad tokens) and `/api/client/enroll` (one-time 15-min code, throttled) are meant to be proxied; the admin UI stays on the LAN; set `TELEROUTER_TRUSTED_PROXIES` so throttles see real client IPs; a lost phone is revoked by removing its device |
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | An external MCP server (gateway) misused or turned against agents | admin-only (session + CSRF); URL https-only (http only on loopback), no redirects followed, its token is write-only and is not sent to a changed URL unless typed again, its CA pinned after the admin compared the fingerprint (host name still checked); answers capped (4 MB, 300 tools, 64 KB schemas), 8 calls in flight, 230 s timeout; arguments logged by name only. The admin chooses which tokens get its tools (all by default) and can hide single tools. Its tool descriptions and results reach the agents unchanged: an external server is trusted like an MCP server added to the agent directly (a hostile one can try prompt injection), so add only servers you trust |
+| Someone gets at the owner's mail through telerouter | connecting needs the admin session + CSRF and Google's own sign-in; the callback is public but needs the single-use 256-bit `state` the admin's start made (10 min, max 20 pending, failures throttled per IP), PKCE S256 and the client secret; the code is traded over verified TLS, no redirects followed. Refresh tokens stay in `/data/config.json` (0600, write-only in the API, never logged, revoked at Google on removal); access tokens only in memory. Agents get nothing by default: per token and per account boxes (read / draft / send / organize / trash), checked on every call, and an account connected read-only can't be used to send whatever the boxes say. No permanent delete (trash only, `gmail.modify` at most). Tool arguments are logged by name only |
+| A hostile e-mail steers the agent (prompt injection) | e-mails are written by strangers: the MCP instructions and tool descriptions tell agents to treat them as data and never follow instructions in them, and to send only what the owner asked for (draft when unsure). This is guidance, not a guarantee: give *send* only to agents that need it; *draft* lets the owner review first |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
 | An agent wipes or poisons the shared memory | only tokens the admin gave the `memory` scope (and telerouter's own agents); edits need the version read, every old text is kept (20 revisions), deletes go to a 30-day trash, agents can't delete non-empty folders; per-identity rate limits and size caps; the page shows who wrote what. Notes are readable by every memory token: the instructions tell agents never to store secrets there (say where a secret lives instead). A note is data, not an order: another agent's note can be wrong or written by a compromised agent |

@@ -21,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from . import __version__
+from .gmail import EMAIL_INSTRUCTIONS
 from .memory import MemError, Who
 from .models import Contact, McpToken
 from .router.calls import CallError
@@ -574,6 +575,9 @@ class McpServer:
                 raise ToolError(str(ex)) from ex
             return {"heard": heard}
 
+        from .gmail import define_tools as gmail_tools      # gmail_* (per account and permission, gmail.py)
+        gmail_tools(tool, self)
+
     def _connect_tmux(self, tok: McpToken, c: Contact, src, speaker: str) -> dict:
         e = self.engine
         try:
@@ -639,8 +643,11 @@ class McpServer:
 
     def instructions(self, tok: McpToken) -> str:
         text = INSTRUCTIONS
-        if any(t.scope == "memory" for t in self._visible(tok)):
+        visible = self._visible(tok)
+        if any(t.scope == "memory" for t in visible):
             text += " " + MEMORY_INSTRUCTIONS
+        if any(t.scope.startswith("gmail:") for t in visible):
+            text += " " + EMAIL_INSTRUCTIONS
         gw = getattr(self.engine, "gateway", None)
         if gw is not None and (extra := gw.instructions(tok)):
             text += " " + extra
@@ -687,8 +694,10 @@ class McpServer:
         return s
 
     # -- JSON-RPC -------------------------------------------------------------------------------------------
-    @staticmethod
-    def _allowed(t: Tool, tok: McpToken) -> bool:
+    def _allowed(self, t: Tool, tok: McpToken) -> bool:
+        if t.scope.startswith("gmail:"):           # granted per connected account (McpToken.gmail), not by scopes
+            gm = getattr(self.engine, "gmail", None)
+            return gm is not None and bool(gm.accounts_for(tok, t.scope[6:]))
         return t.scope in tok.scopes or (t.scope in ("agent", "messaging", "memory") and bool(tok.agent_id))
 
     def _visible(self, tok: McpToken) -> list[Tool]:
@@ -751,7 +760,10 @@ class McpServer:
             for k in t.schema.get("required", []):
                 if k not in args:
                     return _err(mid, -32602, f"missing argument: {k}")
-            log.info("MCP %s by '%s': %s", name, tok.name, _brief(args))
+            if name.startswith("gmail_"):           # mail addresses, texts and ids stay out of the log
+                log.info("MCP %s by '%s' (args: %s)", name, tok.name, ", ".join(sorted(args))[:200])
+            else:
+                log.info("MCP %s by '%s': %s", name, tok.name, _brief(args))
             try:
                 result = await asyncio.wait_for(t.fn(tok, **args), 240)
                 return _ok(mid, {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],

@@ -71,6 +71,8 @@ class Engine:
         from .mcp import McpServer
         self.mcp = McpServer(self)
         self.gateway = Gateway(self)
+        from .gmail import Gmail
+        self.gmail = Gmail(self)
         from .scheduler import Scheduler
         self.scheduler = Scheduler(self)
         from .messaging import Messaging

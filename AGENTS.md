@@ -57,6 +57,9 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 - External MCP servers (gateway, 0.20): telerouter's own tools win on a name clash, so external ones always carry
   the `<name>__` prefix; never forward an upstream redirect or put its token in a log/error text; tool arguments
   are logged by name only. Who sees them is `ExternalMcpServer.tokens`, not token scopes.
+- Gmail tools (0.21) live in `gmail.define_tools()`, not in `McpServer._define()` itself (the call to it sits at the
+  end of `_define`); their scope is `gmail:<perm>` and visibility comes from `McpToken.gmail` (per account), never
+  from `scopes`. Raise `GmailError` there; never put a refresh/access token into an error text or log line.
 - New agent kinds: a `Driver` subclass in `agents/drivers.py` (files, launch script, prompt text,
   start-up dialogs) and event matching in `AgentRuntime._on_event`.
 - When you change env vars, API or behaviour, update README.md, `.env.example`, `docker-compose.yml`,
@@ -66,7 +69,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 ## Where things live
 
 `telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
-mcp.py, gateway.py = external MCP servers re-served on /mcp, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
+mcp.py, gateway.py = external MCP servers re-served on /mcp, gmail.py = Gmail accounts + gmail_* tools, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
 helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
 (telerouter-android) that shows this web UI.
 
@@ -312,18 +315,34 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   `claude -p`). Agents only see new external tools after reconnecting (we announce `listChanged: false`, stateless).
   The python `mcp` 2.x renamed FastMCP to MCPServer; pin `mcp<2` for quick test servers.
 
+- **Gmail (0.21, `gmail.py`)**: Google's *Web application* OAuth clients take only https redirect URIs with a domain
+  name (no IPs; loopback http is for *Desktop* clients), hence `GmailSettings.redirect_uri` and the paste flow. A consent
+  screen left in *Testing* makes refresh tokens die after 7 days (`invalid_grant` → `GmailAccount.error`, "reconnect").
+  `prompt=consent` + `access_type=offline` is what makes Google send a refresh token every time. The callback is in
+  `PUBLIC` because the session cookie is `SameSite=Strict` and Google's redirect is cross-site; the `state` protects it.
+  Google blocks OAuth in embedded WebViews (`disallowed_useragent`): the Android app can't connect accounts. Tests use a
+  fake Google behind `httpx.MockTransport` (`tests/test_gmail.py`); not yet run against the real Google APIs.
 - **Sessions API (0.17, `apisessions.py`)**: `/v1/*` is outside `/api/` on purpose (bearer token, no cookie/CSRF), so
   never add a `/v1` route without `api_token()`. A `sessions` token sees only its own sessions (404 for others). Per-session
   MCP files go through `_write_remote` (stdin) into `~/.telerouter/api/<name>/` and are passed as `--settings`/`--mcp-config`;
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.20.0, 2026-11-18)
+## Status (v0.21.0, 2026-11-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.21.0 (2026-11-19, owner: "add gmail mcp feature to telerouter where i can click an link to authanticate with google
+and then agents that have the gmail section or sub boxes like send mail see mails create drafts ... can use the telerouter
+mcp to controll my gmail. it should support multiple acounts"): **Gmail** (`gmail.py`, ARCHITECTURE §6.2): *MCP access
+→ Gmail* (own Google OAuth client, connect/reconnect/rename/check/remove accounts), per-token per-account boxes (read /
+draft / send / organize / trash, agent tokens editable now) and 14 `gmail_*` tools. 12 new tests (OAuth flow with PKCE,
+replay/forged state, refused code, multiple accounts, reconnect as another address, tools following the boxes,
+search/read/HTML body/attachment, send/reply/header injection/drafts, labels + trash, access level vs. boxes, refresh
+and revoked sign-in, MIME/HTML helpers, the admin API with CSRF/write-only secret/public callback/paste flow/removal);
+297 tests pass. UI checked in Chromium (desktop and 360 px, no overflow). Not yet run against the real Google APIs.
 0.20.0 (2026-11-18, owner: "add external mcp support to telerouter so i can connect an external mcp to telerouter and it
 is available to all agents that already have the telerouter mcp"): **MCP gateway** (`gateway.py`, ARCHITECTURE §6.1):
 *MCP access → External MCP servers*; telerouter connects as an MCP client (Streamable HTTP, JSON or SSE, sessions,
