@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .. import gmail as gmailmod
+from .. import screens as screensmod
 from .. import security
 from .. import sso as ssomod
 from .. import tmux as tmuxmod
@@ -37,7 +38,7 @@ from ..logbuffer import LogBuffer
 from ..memory import MemError, Who
 from ..models import (SECRET_FIELDS, TelegramBot, Admin, Agent, CallSettings, CastDevice, Client, Contact, Enrollment, ExternalMcpServer,
                       GmailSettings, Integration, Machine, McpToken, Pbx, QuietHours, ScheduledTask, SecuritySettings, Speaker, SsoSettings,
-                      VoiceSettings)
+                      VoiceSettings, FONTS, Screen)
 from ..router.calls import CallError
 from ..router.integrations import IntegrationError, fetch_ca, fetch_certificate
 from ..settings import Settings
@@ -735,6 +736,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     async def delete_client(cid: str):
         c = find(cfg.clients, cid)
         cfg.clients.remove(c)
+        cfg.screens = [x for x in cfg.screens if x.client_id != cid]
         drop_device_refs(mic=cid, output=f"client:{cid}")
         store.save()
         conn = engine.clients.get(cid)
@@ -1098,6 +1100,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         replace(cfg.tasks, new)
         store.save()
         engine.scheduler.plan(new)
+        screensmod.task_changed(engine, new.id)
         return task_out(new)
 
     @app.delete("/api/tasks/{tid}")
@@ -1107,7 +1110,64 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
         cfg.tasks.remove(t)
         store.save()
         engine.scheduler.forget(tid)
+        screensmod.task_changed(engine, tid)
         return {"ok": True}
+
+    # -- smart display screens (0.23) ----------------------------------------------------------------------
+    def screen_out(c: Client) -> dict:
+        sc = screensmod.screen_for(cfg, c.id)
+        conn = engine.clients.get(c.id)
+        return {"client_id": c.id, "name": c.name, "room": c.room, "online": conn is not None,
+                "display": bool(c.display or (conn is not None and getattr(conn, "display", False))),
+                "client_version": c.client_version, "platform": c.platform, "last_seen": c.last_seen,
+                "stored": any(x.client_id == c.id for x in cfg.screens), "screen": redact(sc)}
+
+    @app.get("/api/screens")
+    async def list_screens():
+        shown = [c for c in cfg.clients if c.display or any(x.client_id == c.id for x in cfg.screens)]
+        return {"screens": [screen_out(c) for c in shown],
+                "other_devices": [{"id": c.id, "name": c.name} for c in cfg.clients if c not in shown],
+                "tasks": [{"id": t.id, "name": t.name} for t in cfg.tasks],
+                "fonts": [{"id": k, "family": v} for k, v in FONTS.items()],
+                "defaults": Screen(client_id="").model_dump(exclude={"client_id"})}
+
+    @app.put("/api/screens/{cid}")
+    async def save_screen(cid: str, payload: dict):
+        c = find(cfg.clients, cid)
+        old = next((x for x in cfg.screens if x.client_id == cid), None)
+        data = {k: v for k, v in payload.items() if k not in ("client_id", "width", "height")}
+        if isinstance(data.get("panels"), list):
+            data["panels"] = [{k: v for k, v in p.items() if k != "password_set"} if isinstance(p, dict) else p
+                              for p in data["panels"]]
+        base = old.model_dump() if old else {}
+        try:
+            new = Screen.model_validate({**base, **data, "client_id": cid,
+                                         "width": old.width if old else 0, "height": old.height if old else 0})
+        except ValidationError as e:
+            msg = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors())
+            raise HTTPException(422, msg) from e
+        known = {t.id for t in cfg.tasks}
+        if any(p.kind == "task" and p.task_id not in known for p in new.panels):
+            raise HTTPException(422, "a section shows a scheduled task that does not exist")
+        new = screensmod.merge_secrets(new, old)
+        if old:
+            cfg.screens[cfg.screens.index(old)] = new
+        else:
+            if len(cfg.screens) >= 50:
+                raise HTTPException(422, "too many screens")
+            cfg.screens.append(new)
+        store.save()
+        sent = await screensmod.push(engine, cid)
+        log.info("screen '%s' saved (%d sections)%s", c.name, len(new.panels), ", sent to the device" if sent else "")
+        return {**screen_out(c), "sent": sent}
+
+    @app.delete("/api/screens/{cid}")
+    async def reset_screen(cid: str):
+        c = find(cfg.clients, cid)
+        cfg.screens = [x for x in cfg.screens if x.client_id != cid]
+        store.save()
+        await screensmod.push(engine, cid)
+        return screen_out(c)
 
     @app.post("/api/tasks/{tid}/run")
     async def run_task(tid: str):
@@ -2018,10 +2078,18 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                     conn.device_stt = obj.get("stt") == "device"
                     client.platform = str(obj.get("platform") or "")[:64]
                     client.client_version = str(obj.get("version") or "")[:32]
+                    conn.display = obj.get("display") is True
+                    if conn.display:
+                        client.display = True
                     store.save()
+                    if conn.display:
+                        await conn.send_json(screensmod.message(engine, client.id))
                     vs = engine.speaker_for_mic(client.id)
                     if vs and conn.device_stt:    # the phone connects the moment it hears "Hey Jarvis"
                         engine.voice.phone_woke(vs)
+                elif t == "display_size":         # the smart display page's size, for the layout editor
+                    if conn.display:
+                        screensmod.set_size(engine, client.id, obj.get("width"), obj.get("height"))
                 elif t == "wake":                 # the phone started listening itself on an open connection
                     vs = engine.speaker_for_mic(client.id)
                     if vs and conn.device_stt:

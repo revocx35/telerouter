@@ -148,6 +148,7 @@ class Client(BaseModel):
     # disconnect), so an agent that finishes late can decide to phone them instead (mcp.list_speakers).
     assistant_open: bool | None = None
     assistant_changed: float = 0.0            # when the device last opened or closed it
+    display: bool = False                     # its client serves a smart display page (hello "display": true)
 
     @field_validator("name")
     @classmethod
@@ -919,6 +920,158 @@ class TelegramBot(BaseModel):
         return v
 
 
+# -- smart display screens (0.23) -------------------------------------------------------------------------------
+# A screen is a speaker device whose client serves the smart display page (client 0.12, hello "display": true).
+# Its home screen is a layout of a clock and sections (website / VNC viewer / a scheduled task's last summary),
+# positioned in percent of the screen so it fits any resolution. The client renders it; telerouter only stores it.
+FONTS = {
+    "system": 'system-ui, -apple-system, "Segoe UI", sans-serif',
+    "inter": '"Inter", "Helvetica Neue", Arial, sans-serif',
+    "serif": 'Georgia, "DejaVu Serif", "Times New Roman", serif',
+    "mono": '"DejaVu Sans Mono", "SF Mono", Menlo, Consolas, monospace',
+    "rounded": '"Nunito", "Varela Round", "Arial Rounded MT Bold", system-ui, sans-serif',
+    "condensed": '"Roboto Condensed", "Arial Narrow", "DejaVu Sans Condensed", sans-serif',
+    "custom": "",
+}
+FONT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{0,40}$")
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+URL_RE = re.compile(r"^https?://[^\s<>\"'`\\]{1,2000}$")
+
+
+def _color(v: str) -> str:
+    if not COLOR_RE.match(v):
+        raise ValueError("a colour like #1a2b3c")
+    return v.lower()
+
+
+class ScreenClock(BaseModel):
+    show: bool = True
+    x: float = Field(default=50.0, ge=0, le=100)        # centre of the clock, % of the screen
+    y: float = Field(default=45.0, ge=0, le=100)
+    size: float = Field(default=22.0, ge=2, le=60)       # height of the time, % of the screen height
+    font: str = "system"
+    font_name: str = ""                                  # font: "custom" = a font installed on the screen's machine
+    weight: int = Field(default=200, ge=100, le=900)
+    color: str = "#e8eef8"
+    seconds: bool = False
+    hour12: bool = False
+    date: bool = True
+
+    @field_validator("color")
+    @classmethod
+    def _color_ok(cls, v: str) -> str:
+        return _color(v)
+
+    @field_validator("font")
+    @classmethod
+    def _font(cls, v: str) -> str:
+        if v not in FONTS:
+            raise ValueError("unknown font")
+        return v
+
+    @field_validator("font_name")
+    @classmethod
+    def _font_name(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not FONT_NAME_RE.match(v):
+            raise ValueError("a font name: letters, digits, spaces, _ . - (up to 40)")
+        return v
+
+
+class ScreenPanel(BaseModel):
+    """One section of the home screen."""
+    id: str = Field(default_factory=new_id)
+    kind: Literal["web", "vnc", "task"] = "web"
+    title: str = ""                                      # shown above the section ("" = none)
+    x: float = Field(default=5.0, ge=0, le=100)          # top-left corner and size, % of the screen
+    y: float = Field(default=5.0, ge=0, le=100)
+    w: float = Field(default=40.0, ge=3, le=100)
+    h: float = Field(default=40.0, ge=3, le=100)
+    font_size: float = Field(default=2.4, ge=0.8, le=10)  # text sections: % of the screen height
+    # web: a page in a frame (the site must allow being framed)
+    url: str = ""
+    refresh_minutes: int = Field(default=0, ge=0, le=24 * 60)   # 0 = never reload
+    zoom: int = Field(default=100, ge=25, le=400)
+    # vnc: a view-only VNC (RFB) viewer that the speaker client runs itself (e.g. a camera's or NVR's screen)
+    host: str = ""
+    port: int = Field(default=5900, ge=1, le=65535)
+    password: str = ""                                   # secret: write-only in the API, sent only to the client
+    fps: float = Field(default=2.0, ge=0.2, le=10)
+    fit: Literal["contain", "cover", "fill"] = "contain"
+    # task: the last summary of a scheduled task
+    task_id: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, v: str) -> str:
+        if not re.match(r"^[A-Za-z0-9_-]{1,32}$", v):
+            raise ValueError("letters, digits, _ -")
+        return v
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if v and not NAME_RE.match(v):
+            raise ValueError("1-64 characters, no control characters or < >")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _url(cls, v: str) -> str:
+        v = v.strip()
+        if v and not URL_RE.match(v):
+            raise ValueError("an http:// or https:// address")
+        return v
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, v: str) -> str:
+        v = v.strip()
+        if v and not HOST_RE.match(v):
+            raise ValueError("a host name or IP address")
+        return v
+
+    @model_validator(mode="after")
+    def _kind(self):
+        if self.kind == "web" and not self.url:
+            raise ValueError("a website section needs its address")
+        if self.kind == "vnc" and not self.host:
+            raise ValueError("a VNC section needs the VNC server's address")
+        if self.kind == "task" and not self.task_id:
+            raise ValueError("pick the scheduled task to show")
+        self.w = min(self.w, 100 - self.x) if self.x + self.w > 100 else self.w
+        self.h = min(self.h, 100 - self.y) if self.y + self.h > 100 else self.h
+        return self
+
+
+class Screen(BaseModel):
+    """Settings and home screen of one smart display (keyed by its device = `Client.id`)."""
+    client_id: str
+    background: str = "#05080f"
+    accent: str = "#5aa2ff"
+    header: bool = True                                  # device name + connection dot in the corner
+    conversation: bool = True                            # show what is heard / answered during a turn
+    idle_after_s: int = Field(default=45, ge=5, le=3600)  # back to the home screen this long after the answer
+    clock: ScreenClock = Field(default_factory=ScreenClock)
+    panels: list[ScreenPanel] = Field(default_factory=list, max_length=12)
+    # what the page last reported (for the editor's aspect ratio); not settings
+    width: int = 0
+    height: int = 0
+
+    @field_validator("background", "accent")
+    @classmethod
+    def _colors_ok(cls, v: str) -> str:
+        return _color(v)
+
+    @field_validator("panels")
+    @classmethod
+    def _ids(cls, v: list[ScreenPanel]) -> list[ScreenPanel]:
+        if len({p.id for p in v}) != len(v):
+            raise ValueError("section ids must be unique")
+        return v
+
+
 class Config(BaseModel):
     version: int = 1
     admin: Admin | None = None
@@ -942,5 +1095,6 @@ class Config(BaseModel):
     telegram_bots: list[TelegramBot] = Field(default_factory=list, max_length=5)
     external_mcp: list[ExternalMcpServer] = Field(default_factory=list, max_length=20)   # MCP gateway
     gmail: GmailSettings = Field(default_factory=GmailSettings)
+    screens: list[Screen] = Field(default_factory=list, max_length=50)   # smart displays (0.23)
     # Contact user of telerouter's direct SIP address (wa2sip rings sip:<this>@telerouter:5080)
     inbound_secret: str = Field(default_factory=lambda: "in-" + secrets.token_urlsafe(18).replace("-", "x").replace("_", "y"))

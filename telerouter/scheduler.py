@@ -174,7 +174,16 @@ class Scheduler:
         task = asyncio.create_task(self._run(t, run))
         self.running[t.id] = task
         task.add_done_callback(lambda _: self.running.pop(t.id, None))
+        self._screens(t.id)
         return run
+
+    def _screens(self, tid: str) -> None:
+        """Smart displays that show this task's summary get the new state."""
+        try:
+            from . import screens
+            screens.task_changed(self.engine, tid)
+        except Exception:
+            log.exception("could not update the screens")
 
     def _record(self, t: ScheduledTask, run: dict) -> None:
         s = self.st(t.id)
@@ -201,6 +210,8 @@ class Scheduler:
         finally:
             run["ended"] = time.time()
             self._save()
+            self.running.pop(t.id, None)
+            self._screens(t.id)
         if t.messages == "always" and run.get("status") in ("ok", "error"):
             await self._send_result(t, run)
 

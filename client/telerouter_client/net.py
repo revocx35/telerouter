@@ -124,6 +124,7 @@ class Session:
                              "platform": f"{platform.system()} {platform.machine()}"}
                     if self.display is not None:
                         hello["transcript"] = True       # a screen: show what was heard and answered
+                        hello["display"] = True          # and ask for its home screen (layout, sections)
                     await ws.send(json.dumps(hello))
                     while not self.mic_q.empty():
                         self.mic_q.get_nowait()
@@ -157,6 +158,19 @@ class Session:
                 await ws.send(block)
 
         sender = asyncio.create_task(up())
+        if self.display is not None:
+            async def send_size(w: int, h: int) -> None:
+                try:
+                    await ws.send(json.dumps({"type": "display_size", "width": w, "height": h}))
+                except Exception:
+                    pass
+
+            def size(w: int, h: int) -> None:
+                asyncio.get_running_loop().create_task(send_size(w, h))
+            self.display.on_size = size
+            if self.display.size:
+                await ws.send(json.dumps({"type": "display_size", "width": self.display.size[0],
+                                          "height": self.display.size[1]}))
         try:
             async for msg in ws:
                 if isinstance(msg, (bytes, bytearray)):
@@ -183,7 +197,12 @@ class Session:
                         self.player.volume = 1.0       # the server applies the volume; keep local at 100 %
                     if self.display is not None:
                         self.display.set_name(str(obj.get("name") or ""), str(obj.get("assistant") or ""))
+                elif t == "display":
+                    if self.display is not None:
+                        self.display.set_screen(obj)
                 elif t == "ping":
                     await ws.send(json.dumps({"type": "pong"}))
         finally:
             sender.cancel()
+            if self.display is not None:
+                self.display.on_size = None

@@ -269,3 +269,331 @@ def test_session_asks_for_transcripts_and_feeds_the_display():
     asyncio.run(s._session(ws))
     assert (d.name, d.assistant, d.state) == ("iMac", "Jarvis", "idle")
     assert [t["text"] for t in d.turns] == ["hello", "Hi."]
+
+
+# -- smart display home screen + VNC viewer (client 0.12) ----------------------------------------------------------
+def _cpix(rgb) -> bytes:
+    return bytes((int(rgb[2]), int(rgb[1]), int(rgb[0])))            # CPIXEL of our pixel format: B, G, R
+
+
+def _runlen(n: int) -> bytes:
+    n -= 1
+    return b"\xff" * (n // 255) + bytes([n % 255])
+
+
+def _zrle_tile(tile: np.ndarray, kind: str) -> bytes:
+    th, tw, _ = tile.shape
+    flat = tile.reshape(-1, 3)
+    if kind == "raw":
+        return b"\x00" + b"".join(_cpix(p) for p in flat)
+    if kind == "solid":
+        return b"\x01" + _cpix(flat[0])
+    pal = []
+    for p in map(tuple, flat):
+        if p not in pal:
+            pal.append(p)
+    if kind == "packed":
+        bits = 1 if len(pal) == 2 else 2 if len(pal) <= 4 else 4
+        out = bytes([len(pal)]) + b"".join(_cpix(p) for p in pal)
+        for row in tile:
+            acc, nb, rb = 0, 0, bytearray()
+            for p in map(tuple, row):
+                acc = (acc << bits) | pal.index(p)
+                nb += bits
+                if nb == 8:
+                    rb.append(acc)
+                    acc, nb = 0, 0
+            if nb:
+                rb.append(acc << (8 - nb))
+            out += bytes(rb)
+        return out
+    runs, prev = [], None
+    for p in map(tuple, flat):
+        if runs and p == prev:
+            runs[-1][1] += 1
+        else:
+            runs.append([p, 1])
+        prev = p
+    if kind == "rle":
+        return b"\x80" + b"".join(_cpix(p) + _runlen(n) for p, n in runs)
+    out = bytes([128 + len(pal)]) + b"".join(_cpix(p) for p in pal)        # palette RLE
+    for p, n in runs:
+        out += bytes([pal.index(p)]) if n == 1 else bytes([128 | pal.index(p)]) + _runlen(n)
+    return out
+
+
+class _FakeVnc:
+    """A tiny RFB 3.8 server: VNC auth, then a ZRLE update, a CopyRect, a Raw rect, and a DesktopSize."""
+
+    def __init__(self, password="secret", version=b"RFB 003.008\n"):
+        import zlib
+        self.password, self.version, self.z = password, version, zlib.compressobj()
+        self.requests, self.shared, self.server = [], None, None
+        rng = np.random.default_rng(1)
+        self.img = np.zeros((70, 130, 3), np.uint8)
+        self.img[:64, :64] = rng.integers(0, 255, (64, 64, 3), dtype=np.uint8)           # raw
+        self.img[:64, 64:128] = (10, 200, 30)                                           # solid
+        self.img[:64, 128:] = [[(255, 0, 0) if (x + y) % 2 else (0, 0, 255) for x in range(2)] for y in range(64)]
+        self.img[64:, :64] = [[(x % 13 * 19, 7, 9) for x in range(64)] for _ in range(6)]  # packed (4 bpp)
+        self.img[64:, 64:128] = [[(1, 2, 3) if x < 30 else (200, 100, 50) for x in range(64)] for _ in range(6)]
+        self.img[64:, 128:] = [[(5, 5, 5)] * 2, [(9, 9, 9)] * 2] * 3
+
+    def zrle(self, x, y, w, h) -> bytes:
+        import zlib
+        kinds = {(0, 0): "raw", (64, 0): "solid", (128, 0): "palrle", (0, 64): "packed", (64, 64): "rle",
+                 (128, 64): "packed"}
+        data = b""
+        for ty in range(y, y + h, 64):
+            for tx in range(x, x + w, 64):
+                data += _zrle_tile(self.img[ty:min(ty + 64, y + h), tx:min(tx + 64, x + w)], kinds[(tx, ty)])
+        comp = self.z.compress(data) + self.z.flush(zlib.Z_SYNC_FLUSH)
+        return struct.pack(">HHHHiI", x, y, w, h, 16, len(comp)) + comp
+
+    async def handle(self, r, w):
+        import asyncio
+        from telerouter_client.vnc import vnc_auth_response
+        w.write(self.version)
+        await r.readexactly(12)
+        w.write(b"\x01\x02")                                  # one security type: VNC auth
+        assert (await r.readexactly(1)) == b"\x02"
+        ch = bytes(range(16))
+        w.write(ch)
+        ok = (await r.readexactly(16)) == vnc_auth_response(self.password, ch)
+        if not ok:
+            w.write(struct.pack(">II", 1, 14) + b"Authentication")
+            await w.drain()
+            w.close()
+            return
+        w.write(struct.pack(">I", 0))
+        self.shared = await r.readexactly(1)
+        w.write(struct.pack(">HH", 130, 70) + bytes(16) + struct.pack(">I", 4) + b"cams")
+        assert (await r.readexactly(20))[0] == 0                      # SetPixelFormat
+        hdr = await r.readexactly(4)
+        await r.readexactly(4 * struct.unpack(">H", hdr[2:])[0])      # SetEncodings
+        self.requests.append(await r.readexactly(10))
+        w.write(struct.pack(">BxH", 0, 1) + self.zrle(0, 0, 130, 70))
+        await w.drain()
+        self.requests.append(await r.readexactly(10))
+        raw = np.zeros((2, 3, 4), np.uint8)
+        raw[..., 0], raw[..., 1], raw[..., 2] = 11, 22, 33               # B, G, R, X
+        w.write(struct.pack(">BxH", 0, 2) + struct.pack(">HHHHiHH", 100, 66, 4, 4, 1, 0, 0)
+                + struct.pack(">HHHHi", 0, 0, 3, 2, 0) + raw.tobytes())
+        await w.drain()
+        self.requests.append(await r.readexactly(10))
+        w.write(struct.pack(">BxH", 0, 1) + struct.pack(">HHHHi", 0, 0, 200, 100, -223))
+        await w.drain()
+        try:
+            await asyncio.sleep(30)
+        finally:
+            w.close()
+
+    async def start(self):
+        import asyncio
+        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+        return self.server.sockets[0].getsockname()[1]
+
+
+import struct  # noqa: E402  (used by the fake VNC server above)
+
+
+def _png_decode(png: bytes) -> np.ndarray:
+    import zlib
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    i, idat, w, h = 8, b"", 0, 0
+    while i < len(png):
+        n, kind = struct.unpack(">I4s", png[i:i + 8])
+        data = png[i + 8:i + 8 + n]
+        assert struct.unpack(">I", png[i + 8 + n:i + 12 + n])[0] == zlib.crc32(kind + data)
+        if kind == b"IHDR":
+            w, h = struct.unpack(">II", data[:8])
+        elif kind == b"IDAT":
+            idat += data
+        i += 12 + n
+    raw = np.frombuffer(zlib.decompress(idat), np.uint8).reshape(h, w * 3 + 1)
+    out = np.zeros((h, w * 3), np.uint8)
+    for y in range(h):
+        f, row = raw[y, 0], raw[y, 1:]
+        assert f in (0, 2)
+        out[y] = row if f == 0 or y == 0 else row + out[y - 1]
+    return out.reshape(h, w, 3)
+
+
+def test_vnc_auth_and_png():
+    from telerouter_client.vnc import des_encrypt, encode_png, vnc_auth_response
+    assert des_encrypt(bytes.fromhex("133457799BBCDFF1"), bytes.fromhex("0123456789ABCDEF")).hex() == "85e813540f0ab405"
+    # the RFB spec's key twist: each password byte is bit-reversed (checked against a real VNC server's answer)
+    assert len(vnc_auth_response("pw", bytes(16))) == 16
+    assert vnc_auth_response("pw", bytes(16)) != vnc_auth_response("px", bytes(16))
+    img = np.random.default_rng(3).integers(0, 255, (37, 53, 3), dtype=np.uint8)
+    assert (_png_decode(encode_png(img)) == img).all()
+
+
+@pytest.mark.asyncio
+async def test_vnc_viewer_decodes_zrle_raw_copyrect_and_resizes():
+    import asyncio
+
+    from telerouter_client.vnc import VncViewer
+    srv = _FakeVnc()
+    port = await srv.start()
+    v = VncViewer("127.0.0.1", port, "secret", fps=10)
+    v.start()
+    try:
+        for _ in range(100):
+            if v.seq >= 1:
+                break
+            await asyncio.sleep(0.02)
+        assert v.status == "connected" and v.name == "cams" and srv.shared == b"\x01"     # shared session
+        assert srv.requests[0][1] == 0                                # first request: the whole screen
+        assert (v.fb == srv.img).all()                                # every ZRLE tile type decoded
+        seq, png = await v.png()
+        assert (_png_decode(png) == srv.img).all()
+        for _ in range(100):
+            if v.seq >= 2:
+                break
+            await asyncio.sleep(0.02)
+        assert srv.requests[1][1] == 1                                # then incremental updates
+        assert (v.fb[66:70, 100:104] == srv.img[0:4, 0:4]).all()      # CopyRect
+        assert (v.fb[0:2, 0:3] == (33, 22, 11)).all()                 # Raw (BGRX -> RGB)
+        for _ in range(100):
+            if v.seq >= 3:
+                break
+            await asyncio.sleep(0.02)
+        assert v.fb.shape == (100, 200, 3)                            # DesktopSize
+        assert (await v.png())[0] == v.seq
+    finally:
+        v.stop()
+        srv.server.close()
+
+
+@pytest.mark.asyncio
+async def test_vnc_viewer_reports_a_wrong_password_and_bad_data():
+    import asyncio
+    import zlib
+
+    from telerouter_client.vnc import VncError, VncViewer
+    srv = _FakeVnc(password="right")
+    port = await srv.start()
+    v = VncViewer("127.0.0.1", port, "wrong")
+    v.start()
+    try:
+        for _ in range(100):
+            if v.status == "error":
+                break
+            await asyncio.sleep(0.02)
+        assert v.status == "error" and "wrong password" in v.error
+    finally:
+        v.stop()
+        srv.server.close()
+    # malformed ZRLE: a run past its tile, an unknown tile type, a zlib bomb
+    v = VncViewer("x", 1)
+    v._resize(64, 64)
+    for tile in (b"\x80" + b"\x01\x02\x03" + b"\xff" * 20 + b"\x00", b"\x80\x01", b"\x11"):
+        v._z = zlib.decompressobj()
+        z = zlib.compressobj()
+        with pytest.raises(VncError):
+            v.zrle(0, 0, 64, 64, z.compress(tile) + z.flush(zlib.Z_SYNC_FLUSH))
+    v._z = zlib.decompressobj()
+    with pytest.raises(VncError):
+        v.zrle(0, 0, 4, 4, zlib.compress(b"\x00" * 10_000_000))
+
+
+@pytest.mark.asyncio
+async def test_display_home_screen_keeps_secrets_allows_only_its_frames_and_serves_vnc():
+    import asyncio
+    import json as _json
+
+    from telerouter_client.display import Display, clean_screen, frame_origin
+    assert frame_origin("https://ha.lan:8123/lovelace/0") == "https://ha.lan:8123"
+    for bad in ("javascript:alert(1)", "https://user:pw@x/", "data:text/html,x", "https://a b/", "ftp://x/"):
+        assert frame_origin(bad) == ""
+    assert clean_screen({"panels": [{"id": "x", "kind": "web", "url": "javascript:1"},
+                                    {"id": "<y>", "kind": "task", "task_id": "t"},
+                                    {"id": "z", "kind": "shell"}]})["panels"] == []
+    srv = _FakeVnc()
+    vport = await srv.start()
+    port = _free_port()
+    d = Display("127.0.0.1", port)
+    sizes = []
+    d.on_size = lambda w, h: sizes.append((w, h))
+    await d.start()
+    msg = {"type": "display", "font_family": 'Georgia, "DejaVu Serif", serif',
+           "screen": {"background": "#101010", "clock": {"x": 20, "y": 10, "size": 9},
+                      "panels": [{"id": "cam", "kind": "vnc", "host": "127.0.0.1", "port": vport, "password": "secret",
+                                  "fps": 10, "x": 50, "y": 0, "w": 50, "h": 50},
+                                 {"id": "ha", "kind": "web", "url": "https://ha.lan:8123/lovelace/0"},
+                                 {"id": "mail", "kind": "task", "task_id": "t1"}]},
+           "tasks": {"t1": {"name": "Mail summary", "status": "ok", "ended": 1.0, "text": "- 3 new mails"}}}
+    d.set_screen(msg)
+    assert not d.vnc                                         # no page open: no VNC connection
+    try:
+        page = await _http(port, f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        assert b"frame-src https://ha.lan:8123;" in page.partition(b"\r\n\r\n")[0]
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(f"GET /events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        await w.drain()
+        raw = await asyncio.wait_for(r.readuntil(b"\n\n"), 3)
+        raw = await asyncio.wait_for(r.readuntil(b"\n\n"), 3) if b"data: " not in raw else raw
+        snap = _json.loads(raw.split(b"data: ", 1)[1])
+        assert b"secret" not in raw and snap["screen"]["panels"][0]["id"] == "cam"
+        assert snap["tasks"]["t1"]["text"] == "- 3 new mails" and snap["screen"]["clock"]["x"] == 20
+        assert "cam" in d.vnc                                # a page is open: the viewer runs
+        got = b""
+        for _ in range(100):
+            got = await _http(port, f"GET /vnc/cam HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            if got.startswith(b"HTTP/1.1 200"):
+                break
+            assert got.startswith(b"HTTP/1.1 503")
+            await asyncio.sleep(0.03)
+        head, _, png = got.partition(b"\r\n\r\n")
+        assert b"Content-Type: image/png" in head and _png_decode(png).shape[2] == 3
+        seq = head.split(b"X-Seq: ")[1].split(b"\r\n")[0].decode()
+        same = await _http(port, f"GET /vnc/cam?since={seq} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        assert same.startswith(b"HTTP/1.1 204") or same.startswith(b"HTTP/1.1 200")
+        nope = await _http(port, f"GET /vnc/other HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        assert nope.startswith(b"HTTP/1.1 404")
+        foreign = await _http(port, f"GET /vnc/cam HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n".encode())
+        assert foreign.startswith(b"HTTP/1.1 403")
+        ok = await _http(port, f"GET /size?w=1920&h=1080 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        await _http(port, f"GET /size?w=1920&h=1080 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        await _http(port, f"GET /size?w=5&h=x HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        assert ok.startswith(b"HTTP/1.1 204") and sizes == [(1920, 1080)]
+        # the section goes away: its viewer stops
+        d.set_screen({"type": "display", "screen": {"panels": []}, "tasks": {}})
+        assert not d.vnc
+        w.close()
+    finally:
+        await d.stop()
+        srv.server.close()
+
+
+def test_session_asks_for_the_home_screen_and_passes_it_on():
+    import asyncio
+    import json as _json
+
+    from telerouter_client.display import Display
+    from telerouter_client.net import Session
+
+    class WS:
+        def __init__(self, frames):
+            self.frames, self.sent = frames, []
+
+        async def send(self, m):
+            self.sent.append(m)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.frames:
+                raise StopAsyncIteration
+            return self.frames.pop(0)
+
+    d = Display("127.0.0.1", 1)
+    d.size = (1280, 800)
+    s = Session({"server": "https://x:8443", "token": "t", "ca_pem": ""}, Player(), aec=False, display=d)
+    ws = WS([_json.dumps({"type": "display", "screen": {"panels": [{"id": "c", "kind": "vnc", "host": "h",
+                                                                     "password": "pw"}]}, "tasks": {}})])
+    asyncio.run(s._session(ws))
+    assert d.screen["panels"][0]["id"] == "c" and "password" not in d.screen["panels"][0]
+    assert d._vnc_cfg["c"][2] == "pw"
+    assert _json.loads(ws.sent[0]) == {"type": "display_size", "width": 1280, "height": 800}

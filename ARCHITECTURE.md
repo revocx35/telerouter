@@ -52,6 +52,7 @@ telerouter/
   messaging.py         written chat: web page + Telegram bots (pairing, /session, footers), send_message; /data/messages.json
   memory.py            shared memory between agents: messages, status, notes in folders; SQLite /data/memory.db
   scheduler.py         scheduled tasks: due runs, the three targets, the context reminder; /data/tasks.json
+  screens.py           smart display screens: the `display` message (layout, VNC credentials, task summaries)
   apisessions.py       Sessions API (/v1): apps start agent sessions with a task; /data/api_sessions.json
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
@@ -77,7 +78,8 @@ telerouter/
   web/app.py           FastAPI: auth, admin API, /ws/client, client installer, /mcp
   web/static/          vanilla JS SPA (no build step, no inline script/style: strict CSP)
 client/                telerouter-client (Python >= 3.9): enroll, run, devices, test-audio; install.sh;
-                       display.py = the smart display page (loopback HTTP + Server-Sent Events)
+                       display.py = the smart display page (loopback HTTP + Server-Sent Events);
+                       vnc.py = view-only VNC (RFB) viewer for the display's VNC sections
 tests/                 pytest (auth paths, MCP, agents, SIP, TLS, voice, client)
 tools/                 sip_phone.py (scriptable SIP phone), fake-agent/ (sshd + fake claude for tests)
 ```
@@ -142,6 +144,8 @@ FINISHED or 60 s, 16 connections max, 8 KiB request head, no other paths.
 | server -> client | binary | audio to play, 16 kHz mono PCM16 LE, ~100 ms chunks |
 | server -> client | `{"type":"state","state":...}` | idle, listening, thinking, speaking, ringing, call |
 | server -> client | `{"type":"flush"}` | drop queued playback now (barge-in, call ended) |
+| server -> client | `{"type":"display","screen","font_family","tasks"}` | (hello `"display": true`, 0.23) the smart display's settings + home screen; sent on connect, on save and when a shown task runs |
+| client -> server | `{"type":"display_size","width","height"}` | (display clients) the page's size, for the layout editor's aspect ratio |
 | server -> client | `{"type":"ping"}` / `{"type":"config","volume","server_version","client_id","name","assistant","language","features"}` | keep-alive, settings, which device this is; `features: ["utterance"]` since 0.16; `assistant` = the name of the agent that answers this speaker (0.19, for the smart display) |
 
 The server paces playback (≤250 ms ahead of real time), so it always knows when the client has
@@ -195,7 +199,28 @@ which the client now asks for with hello `"transcript": true`; answers are still
 true). The page gets a snapshot and then changes as Server-Sent Events (`/events`); the last 6 turns are kept in
 memory only. The server adds `assistant` (the speaker's agent name) to `config` so the page labels answers.
 `--display-on-listen CMD` runs a command (argv, no shell, at most every 5 s) when a turn starts listening, e.g.
-to switch the panel on. No server state, no new server endpoint.
+to switch the panel on.
+
+**Screens / home screen** (server 0.23 `screens.py`, client 0.12): a display client says hello `"display": true`
+(`Client.display` is remembered so the Screens page lists it). `Config.screens` holds one `Screen` per device
+(`client_id`): background/accent colours, header, whether the conversation takes over the screen, how long until
+the home screen returns, the clock (centre x/y in %, size in % of the screen height, font key from `models.FONTS`
+or a custom installed font name, weight, colour, date/seconds/12 h) and up to 12 `ScreenPanel` sections at
+x/y/w/h in % of the screen: `web` (a sandboxed iframe, optional reload and zoom), `vnc` (host/port/password/fps/fit)
+or `task` (a scheduled task's last successful `reply` + the newest error). The server sends the whole thing as one
+`display` message on hello, on `PUT /api/screens/{client_id}`, and when a run of a shown task starts or ends
+(`Scheduler._screens` -> `screens.task_changed`). Positions are percentages so one layout fits any resolution; the
+page reports its size (`/size` -> `display_size`) so the web editor (*Screens* page, pointer-event drag/resize,
+CSSOM positioning only) draws the screen to scale.
+
+On the client, `Display.set_screen` keeps the VNC credentials in the process (`_vnc_cfg`) and gives the page only
+`clean_screen()` (no passwords, numbers clamped, only http(s) frames). VNC viewers (`vnc.py`: RFB 3.3-3.8, security
+None / VNC auth with its own DES, ZRLE + Raw + CopyRect + DesktopSize, a shared session, never input events) run
+only while a page is connected; the page polls `/vnc/<section id>?since=<seq>` and gets a PNG (Up filter, zlib 1,
+downscaled to <= 1920 px wide, encoded in a thread at most once per update) or 204. The page's CSP `frame-src`
+lists exactly the website sections' origins; when that set changes the page reloads itself to get the new CSP.
+Long task summaries are rendered as light markdown (headings, bullets, **bold**, textContent only) and scroll
+slowly.
 
 Enrollment: the admin creates a one-time code (15 min); the install command pins the server's public
 key (`curl --pinnedpubkey`) and the CA fingerprint; the client downloads `/ca.pem`, checks its SHA-256,
@@ -717,6 +742,7 @@ integration tokens, SSH key).
 | XSS | strict CSP (`script-src 'self'`, no inline script/style), DOM built with `textContent` only |
 | Plain-text credentials on the wire | HTTPS only (self-signed CA; clients and the installer pin it); integrations over HTTPS with a pinned certificate; agent MCP inside SSH |
 | Stolen/leaked tokens | random 256-bit tokens, only SHA-256 stored, sent in headers, revocable (speaker removal, MCP token revoke, integration token rotation); agent MCP token rotates on every session start; secrets write-only in the API |
+| Smart display home screen (0.23) | layouts are admin-only (`/api/screens`, session + CSRF); a VNC password is a write-only secret (`SECRET_FIELDS`), kept when the section's server stays the same, sent only to that device over its authenticated TLS WebSocket and never to the page. Website sections: http(s) URLs only (validated on server and client), sandboxed iframes (`allow-scripts allow-same-origin allow-forms`, no referrer), CSP `frame-src` limited to their origins. VNC (RFB) itself is unencrypted with a DES challenge: the picture crosses the LAN in the clear, so use it on a trusted network with a view-only password; the viewer never sends input, asks for a shared session, caps sizes (8192 px, 64 MiB per update, zlib output bounded per rectangle) and backs off 5 min after a wrong password |
 | Someone reads the smart display's transcripts | the client's display listener binds to loopback only (non-loopback addresses are refused), checks that Host names that loopback address (DNS rebinding), serves GET/HEAD of three fixed assets + one event stream, caps the request head (8 KiB, 5 s) and connections (8, 4 streams); strict CSP, no inline script/style, DOM via `textContent`. Whoever can see the screen sees the conversation: that is the feature |
 | Rogue speaker client | needs an enrollment code (single use, 15 min, throttled); WebSocket frames size/rate capped; max clients |
 | Eavesdropping on Cast speaker audio | Cast receivers fetch media only over plain HTTP (no publicly trusted certificate on a LAN): what a Cast output plays (answers, announcements; never live calls or microphone audio) crosses the LAN unencrypted. Single-use 128-bit URLs, served only to that device's address, withdrawn after playback / 60 s; the listener runs only once a Cast output is used. The Cast control channel is TLS but unauthenticated (device certificates are self-signed and rotate; Cast device auth is not implemented), so a LAN attacker who impersonates the device can get those URLs too. Don't use Cast outputs for private answers on an untrusted network |

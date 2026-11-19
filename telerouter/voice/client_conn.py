@@ -29,6 +29,9 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
                                                 "language", "features": ["utterance"]}
                            {"type": "transcript", "role": "user"|"assistant", "text", "say"}  (hello transcript:
                            true; "say" = the answer as a voice reads it: no markdown, code or links)
+                           {"type": "display", "screen", "font_family", "tasks"}  (hello "display": true, 0.23):
+                           the smart display's settings + home-screen layout (screens.py)
+  client -> server  text   {"type": "display_size", "width", "height"}  (display clients) the page's size
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ class ClientConn:
         self.wants_text = False             # hello "transcript": true (a device with a screen)
         self.speech = True                  # hello "speech": false = answers as text only (with wants_text)
         self.device_stt = False             # hello "stt": "device" = sends utterances (text), not listening audio
+        self.display = False                # hello "display": true = serves a smart display page (screens.py)
 
     @property
     def name(self) -> str:

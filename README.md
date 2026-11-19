@@ -121,6 +121,21 @@ still spoken. The page listens on loopback only (transcripts are private) and re
 that address as Host. `--display-on-listen` runs a command (no shell) when a request starts, e.g. to switch the
 panel on when it was turned off.
 
+**Home screen (server 0.23, client 0.12).** Under **Screens** in the web UI, pick a screen and change its settings
+(colours, whether the conversation takes over the screen, how long until it goes back) and its home screen in an
+editor drawn to the screen's real size: drag the clock and change its size, font, weight and colour; add sections
+and drag/resize them:
+
+- **Website** - any page that allows being framed (Home Assistant dashboards, Grafana, a camera's web page),
+  optionally reloaded every N minutes and zoomed.
+- **VNC** - a live, view-only picture of a VNC server (an NVR showing security cameras, a remote desktop). The
+  speaker client connects itself (shared session, VNC password or none; ZRLE/Raw), so the password stays out of the
+  page. RFB isn't encrypted: keep it on your LAN and prefer a view-only password.
+- **Scheduled task summary** - the last summary of a scheduled task (e.g. a "summarise my mail" task), refreshed
+  after every run, with headings/bullets and slow scrolling for long ones.
+
+Saving sends the layout to the screen at once.
+
 ## Android app (dashboard and assistant)
 
 The [telerouter Android app](https://github.com/revocx35/telerouter-android) is telerouter on your phone:

@@ -69,7 +69,7 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 ## Where things live
 
 `telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
-mcp.py, gateway.py = external MCP servers re-served on /mcp, gmail.py = Gmail accounts + gmail_* tools (gmail_imap.py =
+mcp.py, gateway.py = external MCP servers re-served on /mcp, screens.py = smart display home screens, gmail.py = Gmail accounts + gmail_* tools (gmail_imap.py =
 the app-password IMAP/SMTP backend), sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
 helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
 (telerouter-android) that shows this web UI.
@@ -279,6 +279,15 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
 - **Smart display page** (client `display.py`): no inline script/style either (CSP) and loopback only; keep the
   page's JS in the `JS` string (no package data: `pyproject` ships only the module). Don't measure overflow with
   `scrollHeight` there: the bubbles' entry animation (`transform`) counts as overflow and dropped the "You" bubble.
+- **Screens / home screen (0.23)**: layouts live on the server (`Config.screens`, `models.Screen`), the client only
+  renders them; positions are % of the screen (never pixels). The page's CSP `frame-src` is computed per request
+  from the website sections, so the page must reload when that set changes (it compares `frames` in the events): a
+  site added later showed a blank frame before that. Position things with CSSOM (`el.style.left = …`), which CSP
+  allows; never `setAttribute("style")`. VNC passwords must never reach the page (`clean_screen`); VNC viewers run
+  only while a page is connected. `vnc.py` was checked against a real TigerVNC `Xvnc` (VncAuth, wrong + right
+  password, ZRLE); tests use a fake RFB server that sends every ZRLE tile type (`tests/test_client.py`). Calling
+  `screens.task_changed` outside the event loop is a no-op (tests use `c.portal.call`). Client 0.12 is needed for
+  screens; older display clients keep the 0.11 page.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - **Messaging** (0.13, `messaging.py`): a chat's footer comes from the target, not from the agent's reply; a text
   message header must contain "text message" (drivers and the agent instructions key off it). Telegram allows one
@@ -336,12 +345,23 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.22.0, 2026-11-19)
+## Status (v0.23.0, 2026-11-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.23.0 (2026-11-19, owner: "expand the home screen on the new smart display feature ... a screens section where i can
+select one and edit its settings ... an edit ui section ... move the clock change its size/font and add sections, in each
+section ... vnc ... an website or an scheduled task summary ... the summary of my mails"): **Screens** page + home-screen
+editor (`screens.py`, client `vnc.py`, ARCHITECTURE §3.3), client 0.12. 9 new tests (models validation, the screens API
+with CSRF/write-only VNC password/kept-or-cleared on server change/task validation/reset/device removal, the `display`
+message on hello and on a task run, task summaries with a newer error, DES vector + PNG round trip, the VNC viewer
+against a fake RFB server with every ZRLE tile type + Raw + CopyRect + DesktopSize, wrong password and broken ZRLE, the
+display's secrets/frame-src/VNC endpoint/size report, the session passing it on); 313 tests pass. End to end locally:
+server + real display client + TigerVNC + Chromium (Playwright): layout built in the editor (add, drag, resize, clock
+font/size), saved, shown on the kiosk at 1920x1080 with a live VNC picture, a framed site and the mail summary; editor at
+360 px without overflow, no console errors.
 0.22.0 (2026-11-19, owner: "can you implement the 1st option [IMAP + SMTP with a Google app password] as another way to
 connect rather then taking place of the existing setup"): **Gmail app passwords** (`gmail_imap.py`, ARCHITECTURE §6.2):
 *Connect with an app password* next to Google sign-in; the tools now go through `RestMail`/`ImapMail`. 7 new tests

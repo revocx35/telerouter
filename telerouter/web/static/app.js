@@ -209,7 +209,7 @@ function ssoForm(d) {
 
 // ---------------------------------------------------------------------------------------------- shell
 const PAGES = [
-  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["agents", "Agents & machines"], ["tmux", "tmux sessions"],
+  ["dashboard", "Dashboard"], ["speakers", "Speakers"], ["screens", "Screens"], ["agents", "Agents & machines"], ["tmux", "tmux sessions"],
   ["messages", "Messages"], ["memory", "Shared memory"], ["tasks", "Scheduled tasks"], ["connections", "Connections"],
   ["integrations", "Integrations"], ["voice", "Voice & calls"], ["mcp", "MCP access"], ["history", "History"],
   ["logs", "Logs"], ["account", "Account"],
@@ -247,7 +247,7 @@ function route() {
   if (t) t.textContent = p ? p[1] : "telerouter";
   if (S.dirty && S.dirty() && !confirm("Leave without saving your changes?")) { history.back(); return; }
   S.dirty = null;
-  const fn = { dashboard, speakers, agents, tmux: tmuxPage, messages: messagesPage, memory: memoryPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
+  const fn = { dashboard, speakers, screens: screensPage, agents, tmux: tmuxPage, messages: messagesPage, memory: memoryPage, tasks: tasksPage, connections: connectionsPage, contacts: connectionsPage, integrations, voice, mcp,
     history: historyPage, logs, account }[id] || dashboard;
   const main = $("#main");
   main.replaceChildren(el("div", { class: "muted" }, "Loading…"));
@@ -441,6 +441,241 @@ async function speakers(main) {
         el("button", { onclick: findCasts }, "Find on the network")),
       el("p", { class: "hint" }, "Chromecast built-in speakers (Google Nest, Mi Smart Speaker…) as outputs. They have no microphone telerouter can use, so pair one with a device's microphone in a speaker. Answers start in about 0.2 s; the first one after a few idle minutes takes ~1.5 s longer, and taking over the speaker stops whatever else it was casting. Cast speakers fetch the audio over plain HTTP on port " + (castD.port || 8480) + " (single-use links only they may fetch)."),
       castTable, el("h3", {}, "Add by address"), castForm));
+}
+
+// ---------------------------------------------------------------------------------------------- screens
+// Smart displays: a speaker device whose client serves the display page (client >= 0.12). Its home screen is a
+// clock plus sections (website / VNC / a scheduled task's summary), placed in percent of the screen.
+const PANEL_KINDS = [["web", "Website"], ["vnc", "VNC (camera, remote screen)"], ["task", "Scheduled task summary"]];
+const PANEL_LABEL = { web: "Website", vnc: "VNC", task: "Task summary" };
+
+async function screensPage(main, rest) {
+  const d = await api("GET", "/api/screens");
+  const fonts = Object.fromEntries(d.fonts.map(f => [f.id, f.family]));
+  const help = el("div", { class: "card" }, el("h2", {}, "Add a screen"),
+    el("p", { class: "hint" }, "Any speaker device can drive a screen: on its machine, turn on the smart display page and open it full-screen in a browser there (a kiosk). It needs the speaker client 0.12 or newer."),
+    copyBox("telerouter-client set --display 8770\nsystemctl --user restart telerouter-client   # or: sudo systemctl restart telerouter-client\n# then show http://127.0.0.1:8770/ full-screen, e.g. chromium --kiosk http://127.0.0.1:8770/"),
+    el("p", { class: "hint" }, "The screen appears here once its client connects. The page is served only on the machine itself (loopback)."));
+  if (!d.screens.length) {
+    main.replaceChildren(el("h1", {}, "Screens"), el("div", { class: "card" }, el("p", { class: "hint" }, "No screen yet.")), help);
+    return;
+  }
+  const cur = d.screens.find(x => x.client_id === rest[0]) || d.screens[0];
+  const sc = JSON.parse(JSON.stringify(cur.screen));
+  const saved = JSON.stringify(sc);
+  S.dirty = () => JSON.stringify(sc) !== saved;
+  let selected = "clock";
+
+  const tabs = el("div", { class: "tabs" }, d.screens.map(x => el("button", {
+    class: x.client_id === cur.client_id ? "on" : "", onclick: () => { location.hash = "#/screens/" + x.client_id; } },
+    stateDot(x.online ? "connected" : "offline"), x.name)));
+  const old = cur.client_version && !cur.display;
+  const status = el("div", { class: "row muted" },
+    el("span", {}, cur.online ? "connected" : `offline · last seen ${ago(cur.last_seen)}`),
+    cur.client_version ? el("span", {}, `client ${cur.client_version}`) : null,
+    sc.width ? el("span", {}, `screen ${sc.width} × ${sc.height}`) : null,
+    old ? el("span", { class: "err" }, "this client does not serve a display page (needs 0.12+ with --display)") : null);
+
+  // ---- settings
+  const color = (name, v) => el("input", { type: "color", name, value: v });
+  const settings = el("div", { class: "form2" },
+    field("Background", color("background", sc.background)),
+    field("Accent colour", color("accent", sc.accent), "Listening ring, bullets."),
+    field("Back to the home screen after (s)", num("idle_after_s", sc.idle_after_s, { min: 5, max: 3600 }), "Once the answer was given."));
+  const toggles = el("div", { class: "row" },
+    chk("conversation", sc.conversation, "Show the conversation while you talk"),
+    chk("header", sc.header, "Show the device name and connection dot"));
+  const onSetting = () => {
+    const f = formData(settings);
+    sc.background = f.background; sc.accent = f.accent; sc.idle_after_s = f.idle_after_s ?? 45;
+    sc.conversation = $("input[name=conversation]", toggles).checked; sc.header = $("input[name=header]", toggles).checked;
+    draw();
+  };
+  settings.addEventListener("input", onSetting); toggles.addEventListener("change", onSetting);
+
+  // ---- the editor canvas
+  const canvas = el("div", { class: "scr-canvas" });
+  const ratio = sc.width && sc.height ? sc.width / sc.height : 16 / 9;
+  canvas.style.aspectRatio = String(ratio);
+  const props = el("div", { class: "scr-props" });
+  let snap = true;
+  const snapBox = el("label", { class: "chk" }, el("input", { type: "checkbox", checked: true, onchange: e => { snap = e.target.checked; } }), "Snap to 1 %");
+  const r1 = v => Math.round(v * 10) / 10;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const snapV = v => snap ? Math.round(v) : r1(v);
+
+  function panelLabel(p) {
+    if (p.kind === "web") { try { return new URL(p.url).host; } catch { return p.url || "no address yet"; } }
+    if (p.kind === "vnc") return p.host ? `${p.host}:${p.port}` : "no server yet";
+    const t = d.tasks.find(x => x.id === p.task_id);
+    return t ? t.name : "pick a task";
+  }
+
+  function draw() {
+    canvas.style.background = sc.background;
+    const items = [];
+    sc.panels.forEach(p => {
+      const box = el("div", { class: "scr-item panel" + (selected === p.id ? " sel" : ""), "data-id": p.id },
+        el("div", { class: "scr-kind" }, PANEL_LABEL[p.kind]), el("div", { class: "scr-title" }, p.title || panelLabel(p)),
+        p.title ? el("div", { class: "scr-sub" }, panelLabel(p)) : null,
+        el("div", { class: "scr-handle", "data-handle": "1" }));
+      box.style.left = p.x + "%"; box.style.top = p.y + "%"; box.style.width = p.w + "%"; box.style.height = p.h + "%";
+      items.push(box);
+    });
+    const c = sc.clock;
+    if (c.show) {
+      const now = new Date();
+      const opt = { hour: "2-digit", minute: "2-digit", hour12: !!c.hour12 };
+      if (c.seconds) opt.second = "2-digit";
+      const ck = el("div", { class: "scr-item clock" + (selected === "clock" ? " sel" : ""), "data-id": "clock" },
+        el("div", {}, now.toLocaleTimeString([], opt)),
+        c.date ? el("div", { class: "scr-date" }, now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" })) : null);
+      ck.style.left = c.x + "%"; ck.style.top = c.y + "%"; ck.style.color = c.color;
+      ck.style.fontFamily = c.font === "custom" ? (c.font_name ? `"${c.font_name}", system-ui, sans-serif` : fonts.system) : fonts[c.font];
+      ck.style.fontWeight = String(c.weight);
+      ck.style.fontSize = (canvas.clientHeight * c.size / 100 || 40) + "px";
+      items.push(ck);
+    }
+    canvas.replaceChildren(...items);
+  }
+  new ResizeObserver(() => draw()).observe(canvas);
+
+  // drag to move, the corner handle resizes (pointer events: mouse and touch)
+  let drag = null;
+  canvas.addEventListener("pointerdown", e => {
+    const item = e.target.closest(".scr-item");
+    if (!item) return;
+    const id = item.dataset.id;
+    if (selected !== id) { selected = id; drawProps(); }
+    const target = id === "clock" ? sc.clock : sc.panels.find(p => p.id === id);
+    drag = { id, target, resize: !!e.target.dataset.handle, x0: e.clientX, y0: e.clientY,
+      start: { x: target.x, y: target.y, w: target.w, h: target.h }, rect: canvas.getBoundingClientRect() };
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    draw();
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const dx = (e.clientX - drag.x0) / drag.rect.width * 100, dy = (e.clientY - drag.y0) / drag.rect.height * 100;
+    const t = drag.target, s0 = drag.start;
+    if (drag.id === "clock") { t.x = clamp(snapV(s0.x + dx), 0, 100); t.y = clamp(snapV(s0.y + dy), 0, 100); }
+    else if (drag.resize) { t.w = clamp(snapV(s0.w + dx), 3, 100 - t.x); t.h = clamp(snapV(s0.h + dy), 3, 100 - t.y); }
+    else { t.x = clamp(snapV(s0.x + dx), 0, 100 - t.w); t.y = clamp(snapV(s0.y + dy), 0, 100 - t.h); }
+    draw();
+    syncProps();
+  });
+  const end = () => { drag = null; };
+  canvas.addEventListener("pointerup", end); canvas.addEventListener("pointercancel", end);
+
+  // ---- properties of the selected item
+  function syncProps() {
+    const t = selected === "clock" ? sc.clock : sc.panels.find(p => p.id === selected);
+    if (!t) return;
+    for (const k of ["x", "y", "w", "h"]) { const i = $(`input[name=${k}]`, props); if (i && document.activeElement !== i) i.value = t[k]; }
+  }
+  function bind(form, target, after) {
+    form.addEventListener("input", e => {
+      const i = e.target;
+      if (!i.name) return;
+      let v = i.type === "checkbox" ? i.checked : i.type === "number" || i.type === "range" ? Number(i.value) : i.value;
+      if ((i.type === "number" || i.type === "range") && (i.value === "" || isNaN(v))) return;
+      if (i.name === "weight") v = Number(v);
+      target[i.name] = v;
+      if (i.dataset.mirror) { const m = $(`input[name=${i.dataset.mirror}]`, form); if (m) m.value = i.value; }
+      if (after) after(i.name);
+      draw();
+    });
+  }
+  function drawProps() {
+    if (selected === "clock") {
+      const c = sc.clock;
+      const custom = inp("font_name", c.font_name, { placeholder: "e.g. Ubuntu, DejaVu Sans" });
+      const customF = field("Font name (installed on the screen's machine)", custom);
+      customF.classList.toggle("hidden", c.font !== "custom");
+      const f = el("div", {},
+        el("div", { class: "row" }, el("h2", {}, "Clock"), el("span", { class: "spacer" }), chk("show", c.show, "Show the clock")),
+        el("div", { class: "form2" },
+          field("Size (% of the screen height)", el("div", { class: "row" },
+            el("input", { type: "range", name: "size", min: 2, max: 60, step: 0.5, value: c.size, "data-mirror": "size_n", class: "grow" }),
+            el("input", { type: "number", name: "size_n", min: 2, max: 60, step: 0.5, value: c.size, class: "n4" }))),
+          field("Font", sel("font", c.font, d.fonts.map(x => [x.id, { system: "System", inter: "Inter / Helvetica", serif: "Serif", mono: "Monospace", rounded: "Rounded", condensed: "Condensed", custom: "Other font…" }[x.id] || x.id]))),
+          customF,
+          field("Weight", sel("weight", c.weight, [[100, "Thin"], [200, "Extra light"], [300, "Light"], [400, "Regular"], [500, "Medium"], [600, "Semibold"], [700, "Bold"], [800, "Extra bold"], [900, "Black"]])),
+          field("Colour", el("input", { type: "color", name: "color", value: c.color })),
+          field("Centre x %", num("x", c.x, { min: 0, max: 100, step: 0.5 })), field("Centre y %", num("y", c.y, { min: 0, max: 100, step: 0.5 }))),
+        el("div", { class: "row" }, chk("date", c.date, "Date"), chk("seconds", c.seconds, "Seconds"), chk("hour12", c.hour12, "12-hour")),
+        el("p", { class: "hint" }, "Drag the clock on the screen above to move it."));
+      bind(f, c, name => {
+        if (name === "size_n") { c.size = clamp(Number($("input[name=size_n]", f).value) || c.size, 2, 60); delete c.size_n; $("input[name=size]", f).value = c.size; }
+        if (name === "font") customF.classList.toggle("hidden", c.font !== "custom");
+      });
+      props.replaceChildren(f);
+      return;
+    }
+    const p = sc.panels.find(x => x.id === selected);
+    if (!p) { props.replaceChildren(el("p", { class: "hint" }, "Select the clock or a section to change it.")); return; }
+    const kindFields = p.kind === "web" ? [
+      field("Address", inp("url", p.url, { placeholder: "https://…" }), "The site must allow being shown in a frame (many big sites don't). Home Assistant dashboards, Grafana, camera web pages usually do."),
+      field("Reload every (minutes, 0 = never)", num("refresh_minutes", p.refresh_minutes, { min: 0, max: 1440 })),
+      field("Zoom %", num("zoom", p.zoom, { min: 25, max: 400 }))]
+      : p.kind === "vnc" ? [
+      field("VNC server", inp("host", p.host, { placeholder: "address of the camera / NVR / machine" })),
+      field("Port", num("port", p.port, { min: 1, max: 65535 })),
+      field("Password", el("input", { type: "password", name: "password", autocomplete: "new-password", placeholder: p.password_set ? "unchanged" : "none" }), "Kept in telerouter and sent only to this screen's client. Use a view-only password if the server has one."),
+      field("Pictures per second", num("fps", p.fps, { min: 0.2, max: 10, step: 0.1 })),
+      field("Fit", sel("fit", p.fit, [["contain", "whole picture"], ["cover", "fill, crop the edges"], ["fill", "stretch"]]))]
+      : [
+      field("Scheduled task", sel("task_id", p.task_id, [["", "pick a task…"], ...d.tasks.map(t => [t.id, t.name])]), "Shows the summary of its last successful run and updates after every run. Long summaries scroll slowly."),
+      field("Text size (% of the screen height)", num("font_size", p.font_size, { min: 0.8, max: 10, step: 0.1 }))];
+    const f = el("div", {},
+      el("div", { class: "row" }, el("h2", {}, PANEL_LABEL[p.kind] + " section"), el("span", { class: "spacer" }),
+        el("button", { class: "small", onclick: () => { sc.panels = sc.panels.filter(x => x !== p).concat([p]); draw(); } }, "Bring to front"),
+        el("button", { class: "small danger", onclick: () => { sc.panels = sc.panels.filter(x => x !== p); selected = "clock"; draw(); drawProps(); } }, "Delete")),
+      el("div", { class: "form2" }, field("Title (optional)", inp("title", p.title, { maxlength: 64 })), ...kindFields,
+        field("Left %", num("x", p.x, { min: 0, max: 97, step: 0.5 })), field("Top %", num("y", p.y, { min: 0, max: 97, step: 0.5 })),
+        field("Width %", num("w", p.w, { min: 3, max: 100, step: 0.5 })), field("Height %", num("h", p.h, { min: 3, max: 100, step: 0.5 }))),
+      el("p", { class: "hint" }, "Drag the section to move it; drag its bottom-right corner to resize it."));
+    bind(f, p, name => { if (name === "password") p.password_set = false; });
+    props.replaceChildren(f);
+  }
+
+  function addPanel(kind) {
+    if (sc.panels.length >= 12) { toast("At most 12 sections", true); return; }
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(4)), b => b.toString(16).padStart(2, "0")).join("");
+    const n = sc.panels.length;
+    const p = { id, kind, title: "", x: clamp(4 + n * 3, 0, 60), y: clamp(6 + n * 3, 0, 60), w: 36, h: 36, font_size: 2.4,
+      url: "", refresh_minutes: 0, zoom: 100, host: "", port: 5900, password: "", fps: 2, fit: "contain", task_id: "" };
+    if (kind === "task" && d.tasks.length) p.task_id = d.tasks[0].id;
+    sc.panels.push(p);
+    selected = id;
+    draw(); drawProps();
+  }
+
+  async function save() {
+    const body = JSON.parse(JSON.stringify(sc));
+    body.panels.forEach(p => delete p.password_set);
+    delete body.client_id; delete body.width; delete body.height;
+    const r = await act(() => api("PUT", `/api/screens/${cur.client_id}`, body));
+    toast(r.sent ? "Saved and shown on the screen" : "Saved; the screen gets it when it connects");
+    S.dirty = null;
+    route();
+  }
+
+  main.replaceChildren(el("h1", {}, "Screens"), tabs,
+    el("div", { class: "card" }, el("div", { class: "row" }, el("h2", {}, cur.name), cur.room ? el("span", { class: "muted" }, cur.room) : null), status,
+      el("h3", {}, "Settings"), settings, toggles),
+    el("div", { class: "card" },
+      el("div", { class: "row" }, el("h2", {}, "Home screen"), el("span", { class: "spacer" }), snapBox),
+      el("div", { class: "row scr-add" }, el("span", { class: "muted" }, "Add a section:"),
+        PANEL_KINDS.map(([k, t]) => el("button", { class: "small", onclick: () => addPanel(k) }, "+ " + t)),
+        el("button", { class: "small", onclick: () => { selected = "clock"; if (!sc.clock.show) sc.clock.show = true; draw(); drawProps(); } }, "Clock")),
+      canvas, props),
+    el("div", { class: "savebar" }, el("button", { class: "primary", onclick: save }, "Save"),
+      el("button", { onclick: () => { S.dirty = null; route(); } }, "Discard changes"),
+      el("span", { class: "spacer" }),
+      cur.stored ? el("button", { class: "danger", onclick: async () => { if (confirm("Reset this screen to the default (clock only)?")) { await act(() => api("DELETE", `/api/screens/${cur.client_id}`), "Reset"); S.dirty = null; route(); } } }, "Reset") : null),
+    help);
+  draw(); drawProps();
 }
 
 // ---------------------------------------------------------------------------------------------- agents
