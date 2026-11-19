@@ -14,8 +14,9 @@ The data comes from the speaker's own WebSocket session (hello `"transcript": tr
 
 Home screen (client 0.12, server 0.23): the server sends the screen's settings and layout (`display` message:
 clock position/size/font, sections showing a website, a VNC server or a scheduled task's last summary). Website
-sections are frames: only their origins are allowed (`frame-src`), sandboxed, no referrer. VNC sections are
-viewed by this client itself (vnc.py) and handed to the page as PNG snapshots on `/vnc/<section id>`; the VNC
+sections are frames: only their origins are allowed (`frame-src`), sandboxed, no referrer. VNC and camera (RTSP)
+sections are viewed by this client itself (vnc.py, camera.py) and handed to the page as PNG/JPEG pictures on
+`/feed/<section id>`; their credentials never reach the page. The VNC
 password never reaches the page. The page reports its size on `/size` so the editor in the web UI can match it.
 """
 
@@ -65,7 +66,7 @@ def _num(v, lo: float, hi: float, default: float) -> float:
 
 
 def clean_screen(sc) -> dict | None:
-    """What the page may see of the server's screen: no VNC passwords; numbers clamped, kinds known."""
+    """What the page may see of the server's screen: no VNC/camera credentials; numbers clamped, kinds known."""
     if not isinstance(sc, dict):
         return None
     clock = sc.get("clock") if isinstance(sc.get("clock"), dict) else {}
@@ -81,7 +82,7 @@ def clean_screen(sc) -> dict | None:
         "panels": [],
     }
     for p in (sc.get("panels") or [])[:MAX_PANELS]:
-        if not isinstance(p, dict) or p.get("kind") not in ("web", "vnc", "task"):
+        if not isinstance(p, dict) or p.get("kind") not in ("web", "vnc", "rtsp", "task"):
             continue
         pid = str(p.get("id") or "")
         if not PANEL_ID_RE.match(pid):
@@ -95,7 +96,7 @@ def clean_screen(sc) -> dict | None:
                 continue
             q.update(url=str(p["url"])[:2000], refresh_minutes=_num(p.get("refresh_minutes"), 0, 1440, 0),
                      zoom=_num(p.get("zoom"), 25, 400, 100))
-        elif p["kind"] == "vnc":
+        elif p["kind"] in ("vnc", "rtsp"):
             q.update(fps=_num(p.get("fps"), 0.2, 10, 2), fit=p.get("fit") if p.get("fit") in ("contain", "cover", "fill")
                      else "contain")
         else:
@@ -153,8 +154,8 @@ class Display:
         self.screen: dict | None = None          # what the page shows on the home screen (no secrets)
         self.font_family = ""
         self.tasks: dict = {}
-        self._vnc_cfg: dict[str, tuple] = {}     # section id -> (host, port, password, fps): stays in this process
-        self.vnc: dict = {}                      # section id -> vnc.VncViewer (only while a page is open)
+        self._feed_cfg: dict[str, tuple] = {}    # section id -> viewer key (with credentials): stays in this process
+        self.feeds: dict = {}                    # section id -> VncViewer / RtspViewer (only while a page is open)
         self.size: tuple[int, int] | None = None
         self.on_size = None                      # callback(width, height): the session tells the server
         names = {host, "localhost", "127.0.0.1", "[::1]"} if loopback(host) else {host}
@@ -167,7 +168,7 @@ class Display:
                 "tasks": self.tasks, "frames": self.frame_origins()}
 
     def set_screen(self, msg: dict) -> None:
-        """The server's `display` message: settings + home-screen layout (+ VNC credentials, kept here)."""
+        """The server's `display` message: settings + home-screen layout (+ VNC/camera credentials, kept here)."""
         sc = msg.get("screen") if isinstance(msg, dict) else None
         self.screen = clean_screen(sc)
         ff = str(msg.get("font_family") or "")[:200]
@@ -180,28 +181,34 @@ class Display:
                       for k, v in list(tasks.items())[:MAX_PANELS] if isinstance(v, dict)}
         cfg = {}
         for p in (sc.get("panels") or [])[:MAX_PANELS] if isinstance(sc, dict) else []:
-            if isinstance(p, dict) and p.get("kind") == "vnc" and PANEL_ID_RE.match(str(p.get("id") or "")) \
-                    and p.get("host"):
-                cfg[str(p["id"])] = (str(p["host"])[:253], int(_num(p.get("port"), 1, 65535, 5900)),
-                                     str(p.get("password") or "")[:64], _num(p.get("fps"), 0.2, 10, 2))
-        self._vnc_cfg = cfg
-        self._sync_vnc()
+            if not isinstance(p, dict) or not PANEL_ID_RE.match(str(p.get("id") or "")):
+                continue
+            fps = _num(p.get("fps"), 0.2, 10, 2)
+            if p.get("kind") == "vnc" and p.get("host"):
+                cfg[str(p["id"])] = ("vnc", str(p["host"])[:253], int(_num(p.get("port"), 1, 65535, 5900)),
+                                     str(p.get("password") or "")[:64], fps)
+            elif p.get("kind") == "rtsp" and re.match(r"^rtsps?://", str(p.get("rtsp_url") or "")):
+                cfg[str(p["id"])] = ("rtsp", str(p["rtsp_url"])[:1300], str(p.get("username") or "")[:128],
+                                     str(p.get("password") or "")[:256], fps)
+        self._feed_cfg = cfg
+        self._sync_feeds()
         self._push({"type": "screen", "screen": self.screen, "font_family": self.font_family, "tasks": self.tasks,
                     "frames": self.frame_origins()})
 
-    def _sync_vnc(self) -> None:
-        """Run a VNC viewer per VNC section while a page is open; stop the others."""
-        want = self._vnc_cfg if self._streams else {}
-        for pid in list(self.vnc):
-            if pid not in want or self.vnc[pid].key() != want[pid]:
-                self.vnc.pop(pid).stop()
+    def _sync_feeds(self) -> None:
+        """Run a viewer per VNC/camera section while a page is open; stop the others."""
+        want = self._feed_cfg if self._streams else {}
+        for pid in list(self.feeds):
+            if pid not in want or self.feeds[pid].key() != want[pid]:
+                self.feeds.pop(pid).stop()
         if not want:
             return
+        from .camera import RtspViewer
         from .vnc import VncViewer
-        for pid, (host, port, pw, fps) in want.items():
-            if pid not in self.vnc:
-                v = VncViewer(host, port, pw, fps)
-                self.vnc[pid] = v
+        for pid, k in want.items():
+            if pid not in self.feeds:
+                v = VncViewer(*k[1:]) if k[0] == "vnc" else RtspViewer(*k[1:])
+                self.feeds[pid] = v
                 try:
                     v.start()
                 except RuntimeError:                 # no running loop (unit tests that set a screen synchronously)
@@ -278,9 +285,9 @@ class Display:
                  self.port)
 
     async def stop(self) -> None:
-        for v in list(self.vnc.values()):
+        for v in list(self.feeds.values()):
             v.stop()
-        self.vnc.clear()
+        self.feeds.clear()
         if self._server:
             self._server.close()
             for q in list(self._streams):
@@ -316,8 +323,8 @@ class Display:
             path, _, query = target.partition("?")
             if path == "/events" and method == "GET":
                 return await self._events(writer)
-            if path.startswith("/vnc/"):
-                return await self._vnc(writer, path[5:], query, method == "HEAD")
+            if path.startswith(("/feed/", "/vnc/")):
+                return await self._feed(writer, path.split("/", 2)[2], query, method == "HEAD")
             if path == "/size":
                 q = parse_qs(query[:200])
                 self._report_size(q.get("w", [""])[0], q.get("h", [""])[0])
@@ -351,19 +358,19 @@ class Display:
             except Exception:
                 log.exception("display: could not report the size")
 
-    async def _vnc(self, writer, pid: str, query: str, head_only: bool) -> None:
-        v = self.vnc.get(pid)
+    async def _feed(self, writer, pid: str, query: str, head_only: bool) -> None:
+        v = self.feeds.get(pid)
         if v is None:
             return await self._send(writer, 404, b"not found")
-        st = {"X-Vnc-Status": v.status}
+        st = {"X-Feed-Status": v.status}
         if v.fb is None or v.seq == 0:
             body = json.dumps({"status": v.status, "error": v.error}).encode()
             return await self._send(writer, 503, body, "application/json", head_only, st)
         since = parse_qs(query[:100]).get("since", [""])[0]
         if since == str(v.seq):
             return await self._send(writer, 204, b"", extra={**st, "X-Seq": str(v.seq)})
-        seq, png = await v.png()
-        await self._send(writer, 200, png, "image/png", head_only, {**st, "X-Seq": str(seq)})
+        seq, img, ctype = await v.image()
+        await self._send(writer, 200, img, ctype, head_only, {**st, "X-Seq": str(seq)})
 
     @staticmethod
     def _csp(frames: str = "") -> str:
@@ -403,7 +410,7 @@ class Display:
             return await self._send(writer, 503, b"too many displays")
         q: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._streams.add(q)
-        self._sync_vnc()
+        self._sync_feeds()
         try:
             writer.write(self._headers(200, "text/event-stream; charset=utf-8", None))
             writer.write(b"retry: 2000\n\n" + _sse(self.snapshot()))
@@ -423,7 +430,7 @@ class Display:
             return
         finally:
             self._streams.discard(q)
-            self._sync_vnc()
+            self._sync_feeds()
 
 
 def _sse(ev: dict) -> bytes:
@@ -487,7 +494,7 @@ body.active #home { opacity:0; }
 .panel .body { flex:1; position:relative; overflow:hidden; min-height:0; }
 .panel iframe { position:absolute; left:0; top:0; width:100%; height:100%; border:0; transform-origin:0 0;
   background:#fff; }
-.panel img.vnc { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:block; }
+.panel img.feed { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:block; }
 .panel img.fit-cover { object-fit:cover; }
 .panel img.fit-fill { object-fit:fill; }
 .note { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
@@ -669,7 +676,7 @@ JS = r"""
     var bodyEl = el("div", "body");
     root.appendChild(bodyEl);
     if (p.kind === "web") return web(p, root, bodyEl);
-    if (p.kind === "vnc") return vnc(p, root, bodyEl);
+    if (p.kind === "vnc" || p.kind === "rtsp") return feed(p, root, bodyEl);
     return task(p, root, bodyEl, head, small);
   }
 
@@ -690,8 +697,9 @@ JS = r"""
     return { root: root, stop: function () { clearInterval(timer); f.src = "about:blank"; } };
   }
 
-  function vnc(p, root, box) {
-    var img = el("img", "vnc fit-" + (p.fit || "contain")), note = el("div", "note", "Connecting to VNC…");
+  function feed(p, root, box) {
+    var what = p.kind === "vnc" ? "VNC" : "the camera", label = p.kind === "vnc" ? "VNC: " : "Camera: ";
+    var img = el("img", "feed fit-" + (p.fit || "contain")), note = el("div", "note", "Connecting to " + what + "…");
     var badge = el("div", "badge", "reconnecting…"), seq = "", url = null, alive = true, timer = 0;
     img.alt = "";
     badge.hidden = true;
@@ -699,9 +707,9 @@ JS = r"""
     var every = Math.max(100, 1000 / (p.fps || 2));
     function later(ms) { if (alive) timer = setTimeout(step, ms); }
     function step() {
-      fetch("/vnc/" + encodeURIComponent(p.id) + "?since=" + encodeURIComponent(seq), { cache: "no-store" })
+      fetch("/feed/" + encodeURIComponent(p.id) + "?since=" + encodeURIComponent(seq), { cache: "no-store" })
         .then(function (r) {
-          badge.hidden = (r.headers.get("X-Vnc-Status") || "connected") === "connected" || r.status === 503;
+          badge.hidden = (r.headers.get("X-Feed-Status") || "connected") === "connected" || r.status === 503;
           if (r.status === 200) {
             seq = r.headers.get("X-Seq") || "";
             return r.blob().then(function (b) {
@@ -715,7 +723,7 @@ JS = r"""
           if (r.status === 204) { later(every); return; }
           if (r.status === 503) {
             return r.json().then(function (j) {
-              note.textContent = j.error ? "VNC: " + j.error : "Connecting to VNC…";
+              note.textContent = j.error ? label + j.error : "Connecting to " + what + "…";
               note.hidden = false;
               later(2000);
             });

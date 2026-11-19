@@ -147,7 +147,11 @@ class VncViewer:
         self._png_lock = asyncio.Lock()
 
     def key(self) -> tuple:
-        return (self.host, self.port, self.password, self.fps)
+        return ("vnc", self.host, self.port, self.password, self.fps)
+
+    async def image(self) -> tuple[int, bytes, str]:
+        seq, png = await self.png()
+        return seq, png, "image/png"
 
     def start(self) -> None:
         if self._task is None:

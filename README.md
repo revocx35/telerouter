@@ -126,6 +126,9 @@ panel on when it was turned off.
 editor drawn to the screen's real size: drag the clock and change its size, font, weight and colour; add sections
 and drag/resize them:
 
+- **Camera (RTSP)** - paste the camera's `rtsp://user:password@camera:554/stream1` address; telerouter takes the
+  user and password out and keeps the password write-only. The speaker client reads the stream with `ffmpeg`
+  (install it on that machine: `sudo apt install ffmpeg`) and shows a few pictures per second (client 0.13).
 - **Website** - any page that allows being framed (Home Assistant dashboards, Grafana, a camera's web page),
   optionally reloaded every N minutes and zoomed.
 - **VNC** - a live, view-only picture of a VNC server (an NVR showing security cameras, a remote desktop). The

@@ -288,6 +288,11 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   password, ZRLE); tests use a fake RFB server that sends every ZRLE tile type (`tests/test_client.py`). Calling
   `screens.task_changed` outside the event loop is a no-op (tests use `c.portal.call`). Client 0.12 is needed for
   screens; older display clients keep the 0.11 page.
+- **RTSP cameras (0.24, `camera.py`)**: ffmpeg's stderr and its "Impossible to open '<url>'" line contain the camera
+  password: never log stderr, only `_why(redact(...))`. Never put the URL with credentials on ffmpeg's command line:
+  it goes through the 0600 ffconcat file (`-f concat -safe 0 -protocol_whitelist file,rtsp,...`). Checked with real
+  ffmpeg 7.1 against mediamtx (auth, `@` in the password percent-encoded, wrong password, missing path). mediamtx
+  refuses `:` in passwords: test passwords must avoid it. The iMac host needed `apt install ffmpeg`.
 - Exit phrases for a tmux route must be short: "go back to the login page" is meant for the session.
 - **Messaging** (0.13, `messaging.py`): a chat's footer comes from the target, not from the agent's reply; a text
   message header must contain "text message" (drivers and the agent instructions key off it). Telegram allows one
@@ -345,12 +350,18 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.23.0, 2026-11-19)
+## Status (v0.24.0, 2026-11-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.24.0 (2026-11-19, owner: "yeah can you add rtsp" after pasting a camera's rtsp:// address): **Camera (RTSP)**
+sections (`camera.py`, client 0.13; the display's `/vnc/` endpoint became `/feed/`). 3 new tests (URL building,
+redaction and error mapping; the viewer with a fake ffmpeg: password not in argv, 0600 list removed after the first
+picture, wrong password; the display hiding camera credentials and starting/stopping the viewer) + RTSP cases in the
+screens API test; 316 tests pass. End to end: mediamtx + real ffmpeg + Chromium, address pasted with credentials in
+the editor, live picture on the kiosk, password nowhere in either page.
 0.23.0 (2026-11-19, owner: "expand the home screen on the new smart display feature ... a screens section where i can
 select one and edit its settings ... an edit ui section ... move the clock change its size/font and add sections, in each
 section ... vnc ... an website or an scheduled task summary ... the summary of my mails"): **Screens** page + home-screen

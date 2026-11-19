@@ -446,8 +446,8 @@ async function speakers(main) {
 // ---------------------------------------------------------------------------------------------- screens
 // Smart displays: a speaker device whose client serves the display page (client >= 0.12). Its home screen is a
 // clock plus sections (website / VNC / a scheduled task's summary), placed in percent of the screen.
-const PANEL_KINDS = [["web", "Website"], ["vnc", "VNC (camera, remote screen)"], ["task", "Scheduled task summary"]];
-const PANEL_LABEL = { web: "Website", vnc: "VNC", task: "Task summary" };
+const PANEL_KINDS = [["rtsp", "Camera (RTSP)"], ["web", "Website"], ["vnc", "VNC (remote screen, NVR)"], ["task", "Scheduled task summary"]];
+const PANEL_LABEL = { web: "Website", vnc: "VNC", rtsp: "Camera", task: "Task summary" };
 
 async function screensPage(main, rest) {
   const d = await api("GET", "/api/screens");
@@ -507,6 +507,7 @@ async function screensPage(main, rest) {
   function panelLabel(p) {
     if (p.kind === "web") { try { return new URL(p.url).host; } catch { return p.url || "no address yet"; } }
     if (p.kind === "vnc") return p.host ? `${p.host}:${p.port}` : "no server yet";
+    if (p.kind === "rtsp") { const m = /^rtsps?:\/\/([^/?]+)/.exec(p.rtsp_url || ""); return m ? m[1] : "no address yet"; }
     const t = d.tasks.find(x => x.id === p.task_id);
     return t ? t.name : "pick a task";
   }
@@ -618,6 +619,12 @@ async function screensPage(main, rest) {
       field("Address", inp("url", p.url, { placeholder: "https://…" }), "The site must allow being shown in a frame (many big sites don't). Home Assistant dashboards, Grafana, camera web pages usually do."),
       field("Reload every (minutes, 0 = never)", num("refresh_minutes", p.refresh_minutes, { min: 0, max: 1440 })),
       field("Zoom %", num("zoom", p.zoom, { min: 25, max: 400 }))]
+      : p.kind === "rtsp" ? [
+      field("Camera address", inp("rtsp_url", p.rtsp_url, { placeholder: "rtsp://camera:554/stream1" }), "Paste the camera's rtsp:// address. If it contains user:password@, telerouter takes them out and keeps the password like a secret."),
+      field("User name", inp("username", p.username, { autocomplete: "off" })),
+      field("Password", el("input", { type: "password", name: "password", autocomplete: "new-password", placeholder: p.password_set ? "unchanged" : "none" }), "Kept in telerouter and sent only to this screen's client, which reads the stream with ffmpeg (it must be installed there: sudo apt install ffmpeg)."),
+      field("Pictures per second", num("fps", p.fps, { min: 0.2, max: 10, step: 0.1 })),
+      field("Fit", sel("fit", p.fit, [["contain", "whole picture"], ["cover", "fill, crop the edges"], ["fill", "stretch"]]))]
       : p.kind === "vnc" ? [
       field("VNC server", inp("host", p.host, { placeholder: "address of the camera / NVR / machine" })),
       field("Port", num("port", p.port, { min: 1, max: 65535 })),
@@ -635,7 +642,22 @@ async function screensPage(main, rest) {
         field("Left %", num("x", p.x, { min: 0, max: 97, step: 0.5 })), field("Top %", num("y", p.y, { min: 0, max: 97, step: 0.5 })),
         field("Width %", num("w", p.w, { min: 3, max: 100, step: 0.5 })), field("Height %", num("h", p.h, { min: 3, max: 100, step: 0.5 }))),
       el("p", { class: "hint" }, "Drag the section to move it; drag its bottom-right corner to resize it."));
-    bind(f, p, name => { if (name === "password") p.password_set = false; });
+    bind(f, p, name => {
+      if (name === "password") p.password_set = false;
+      if (name === "rtsp_url") {          // user:password@ pasted with the address: split it out right away
+        const m = /^(rtsps?:\/\/)([^/@]*)@(.*)$/.exec(p.rtsp_url);
+        if (m) {
+          const [user, ...pw] = m[2].split(":");
+          p.rtsp_url = m[1] + m[3];
+          try { p.username = decodeURIComponent(user); } catch { p.username = user; }
+          if (pw.length) { try { p.password = decodeURIComponent(pw.join(":")); } catch { p.password = pw.join(":"); } p.password_set = false; }
+          $("input[name=rtsp_url]", f).value = p.rtsp_url;
+          $("input[name=username]", f).value = p.username;
+          if (pw.length) { $("input[name=password]", f).value = ""; $("input[name=password]", f).placeholder = "set from the address"; }
+          toast("User name and password taken out of the address");
+        }
+      }
+    });
     props.replaceChildren(f);
   }
 
@@ -644,7 +666,8 @@ async function screensPage(main, rest) {
     const id = Array.from(crypto.getRandomValues(new Uint8Array(4)), b => b.toString(16).padStart(2, "0")).join("");
     const n = sc.panels.length;
     const p = { id, kind, title: "", x: clamp(4 + n * 3, 0, 60), y: clamp(6 + n * 3, 0, 60), w: 36, h: 36, font_size: 2.4,
-      url: "", refresh_minutes: 0, zoom: 100, host: "", port: 5900, password: "", fps: 2, fit: "contain", task_id: "" };
+      url: "", refresh_minutes: 0, zoom: 100, host: "", port: 5900, password: "", fps: 2, fit: "contain", task_id: "",
+      rtsp_url: "", username: "" };
     if (kind === "task" && d.tasks.length) p.task_id = d.tasks[0].id;
     sc.panels.push(p);
     selected = id;

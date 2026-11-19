@@ -936,6 +936,7 @@ FONTS = {
 FONT_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{0,40}$")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 URL_RE = re.compile(r"^https?://[^\s<>\"'`\\]{1,2000}$")
+RTSP_RE = re.compile(r"^rtsps?://[A-Za-z0-9.\-\[\]:]{1,300}(/[^\s<>\"'`\\@]{0,1000})?$")
 
 
 def _color(v: str) -> str:
@@ -981,7 +982,7 @@ class ScreenClock(BaseModel):
 class ScreenPanel(BaseModel):
     """One section of the home screen."""
     id: str = Field(default_factory=new_id)
-    kind: Literal["web", "vnc", "task"] = "web"
+    kind: Literal["web", "vnc", "rtsp", "task"] = "web"
     title: str = ""                                      # shown above the section ("" = none)
     x: float = Field(default=5.0, ge=0, le=100)          # top-left corner and size, % of the screen
     y: float = Field(default=5.0, ge=0, le=100)
@@ -997,7 +998,10 @@ class ScreenPanel(BaseModel):
     port: int = Field(default=5900, ge=1, le=65535)
     password: str = ""                                   # secret: write-only in the API, sent only to the client
     fps: float = Field(default=2.0, ge=0.2, le=10)
-    fit: Literal["contain", "cover", "fill"] = "contain"
+    fit: Literal["contain", "cover", "fill"] = "contain"   # vnc + rtsp
+    # rtsp: a camera stream the speaker client reads with ffmpeg (credentials kept apart from the address)
+    rtsp_url: str = ""
+    username: str = ""
     # task: the last summary of a scheduled task
     task_id: str = ""
 
@@ -1024,6 +1028,41 @@ class ScreenPanel(BaseModel):
             raise ValueError("an http:// or https:// address")
         return v
 
+    @model_validator(mode="before")
+    @classmethod
+    def _split_rtsp(cls, data):
+        """rtsp://user:password@host/path pasted whole: keep the user and password apart (password = a secret)."""
+        if isinstance(data, dict) and isinstance(data.get("rtsp_url"), str):
+            from urllib.parse import unquote, urlsplit
+            url = data["rtsp_url"].strip()
+            try:
+                u = urlsplit(url)
+            except ValueError:
+                return data
+            if u.scheme in ("rtsp", "rtsps") and "@" in u.netloc:
+                cred, _, hostport = u.netloc.rpartition("@")
+                user, sep, pw = cred.partition(":")
+                data = {**data, "rtsp_url": f"{u.scheme}://{hostport}{u.path}" + (f"?{u.query}" if u.query else ""),
+                        "username": unquote(user)}
+                if sep:
+                    data["password"] = unquote(pw)
+        return data
+
+    @field_validator("rtsp_url")
+    @classmethod
+    def _rtsp(cls, v: str) -> str:
+        v = v.strip()
+        if v and not RTSP_RE.match(v):
+            raise ValueError("an rtsp:// address (host, port, path)")
+        return v
+
+    @field_validator("username")
+    @classmethod
+    def _user(cls, v: str) -> str:
+        if len(v) > 128 or any(ord(ch) < 32 for ch in v):
+            raise ValueError("up to 128 characters")
+        return v
+
     @field_validator("host")
     @classmethod
     def _host(cls, v: str) -> str:
@@ -1038,6 +1077,8 @@ class ScreenPanel(BaseModel):
             raise ValueError("a website section needs its address")
         if self.kind == "vnc" and not self.host:
             raise ValueError("a VNC section needs the VNC server's address")
+        if self.kind == "rtsp" and not self.rtsp_url:
+            raise ValueError("a camera section needs the camera's rtsp:// address")
         if self.kind == "task" and not self.task_id:
             raise ValueError("pick the scheduled task to show")
         self.w = min(self.w, 100 - self.x) if self.x + self.w > 100 else self.w

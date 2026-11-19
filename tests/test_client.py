@@ -524,7 +524,7 @@ async def test_display_home_screen_keeps_secrets_allows_only_its_frames_and_serv
                                  {"id": "mail", "kind": "task", "task_id": "t1"}]},
            "tasks": {"t1": {"name": "Mail summary", "status": "ok", "ended": 1.0, "text": "- 3 new mails"}}}
     d.set_screen(msg)
-    assert not d.vnc                                         # no page open: no VNC connection
+    assert not d.feeds                                         # no page open: no VNC connection
     try:
         page = await _http(port, f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
         assert b"frame-src https://ha.lan:8123;" in page.partition(b"\r\n\r\n")[0]
@@ -536,10 +536,10 @@ async def test_display_home_screen_keeps_secrets_allows_only_its_frames_and_serv
         snap = _json.loads(raw.split(b"data: ", 1)[1])
         assert b"secret" not in raw and snap["screen"]["panels"][0]["id"] == "cam"
         assert snap["tasks"]["t1"]["text"] == "- 3 new mails" and snap["screen"]["clock"]["x"] == 20
-        assert "cam" in d.vnc                                # a page is open: the viewer runs
+        assert "cam" in d.feeds                                # a page is open: the viewer runs
         got = b""
         for _ in range(100):
-            got = await _http(port, f"GET /vnc/cam HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+            got = await _http(port, f"GET /feed/cam HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
             if got.startswith(b"HTTP/1.1 200"):
                 break
             assert got.startswith(b"HTTP/1.1 503")
@@ -547,9 +547,9 @@ async def test_display_home_screen_keeps_secrets_allows_only_its_frames_and_serv
         head, _, png = got.partition(b"\r\n\r\n")
         assert b"Content-Type: image/png" in head and _png_decode(png).shape[2] == 3
         seq = head.split(b"X-Seq: ")[1].split(b"\r\n")[0].decode()
-        same = await _http(port, f"GET /vnc/cam?since={seq} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        same = await _http(port, f"GET /feed/cam?since={seq} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
         assert same.startswith(b"HTTP/1.1 204") or same.startswith(b"HTTP/1.1 200")
-        nope = await _http(port, f"GET /vnc/other HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
+        nope = await _http(port, f"GET /feed/other HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n".encode())
         assert nope.startswith(b"HTTP/1.1 404")
         foreign = await _http(port, f"GET /vnc/cam HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n".encode())
         assert foreign.startswith(b"HTTP/1.1 403")
@@ -559,7 +559,7 @@ async def test_display_home_screen_keeps_secrets_allows_only_its_frames_and_serv
         assert ok.startswith(b"HTTP/1.1 204") and sizes == [(1920, 1080)]
         # the section goes away: its viewer stops
         d.set_screen({"type": "display", "screen": {"panels": []}, "tasks": {}})
-        assert not d.vnc
+        assert not d.feeds
         w.close()
     finally:
         await d.stop()
@@ -595,5 +595,108 @@ def test_session_asks_for_the_home_screen_and_passes_it_on():
                                                                      "password": "pw"}]}, "tasks": {}})])
     asyncio.run(s._session(ws))
     assert d.screen["panels"][0]["id"] == "c" and "password" not in d.screen["panels"][0]
-    assert d._vnc_cfg["c"][2] == "pw"
+    assert d._feed_cfg["c"][3] == "pw"
     assert _json.loads(ws.sent[0]) == {"type": "display_size", "width": 1280, "height": 800}
+
+
+# -- camera (RTSP) sections (client 0.13) ---------------------------------------------------------------------------
+FAKE_FFMPEG = r'''#!/usr/bin/env python3
+import os, sys, time
+argv = sys.argv[1:]
+listing = argv[argv.index("-i") + 1]
+text = open(listing).read()
+out = os.environ["FAKE_OUT"]
+open(out + ".argv", "w").write("\n".join(argv))
+open(out + ".list", "w").write(text)
+open(out + ".mode", "w").write(oct(os.stat(listing).st_mode & 0o777))
+if "wrong" in text:
+    url = text.split("'")[1]
+    sys.stderr.write(f"[concat] Impossible to open '{url}'\nServer returned 401 Unauthorized (authorization failed)\n")
+    sys.exit(1)
+for i in range(3):
+    sys.stdout.buffer.write(b"\xff\xd8JFIF-frame-%d\xff\xd9" % i)
+    sys.stdout.buffer.flush()
+    time.sleep(0.05)
+time.sleep(30)
+'''
+
+
+def test_camera_urls_and_redaction():
+    from telerouter_client.camera import _why, build_url, redact
+    assert build_url("rtsp://10.0.0.5:554/stream1", "us@r", "p:w/d") == "rtsp://us%40r:p%3Aw%2Fd@10.0.0.5:554/stream1"
+    assert build_url("rtsp://cam/s") == "rtsp://cam/s"
+    with pytest.raises(ValueError):
+        build_url("http://cam/", "u", "p")
+    with pytest.raises(ValueError):
+        build_url("rtsp://a:b@cam/", "u", "p")
+    msg = redact("Impossible to open 'rtsp://cam:Secret%21@10.0.0.5/x' Secret!", ("Secret!",))
+    assert "Secret" not in msg and "rtsp://***@10.0.0.5" in msg
+    assert _why("method DESCRIBE failed: 401Unauthorized") == "wrong user name or password"
+    assert _why("Connection to tcp://x failed: Connection refused").startswith("the camera refused")
+
+
+@pytest.mark.asyncio
+async def test_camera_viewer_keeps_the_password_off_the_command_line(tmp_path, monkeypatch):
+    import asyncio
+    import os
+
+    from telerouter_client.camera import RtspViewer
+    ff = tmp_path / "ffmpeg"
+    ff.write_text(FAKE_FFMPEG)
+    ff.chmod(0o755)
+    out = str(tmp_path / "run")
+    monkeypatch.setenv("FAKE_OUT", out)
+    v = RtspViewer("rtsp://10.0.0.5:554/stream1", "revo", "Sup3r$ecret", fps=4, ffmpeg=str(ff))
+    v.start()
+    try:
+        for _ in range(200):
+            if v.seq >= 3:
+                break
+            await asyncio.sleep(0.02)
+        assert v.status == "connected" and v.jpeg == b"\xff\xd8JFIF-frame-2\xff\xd9"
+        seq, img, ctype = await v.image()
+        assert ctype == "image/jpeg" and seq == v.seq
+        argv = open(out + ".argv").read()
+        assert "Sup3r" not in argv and "revo" not in argv          # never on the command line (ps)
+        assert "fps=4" in argv and "-protocol_whitelist" in argv
+        listing = open(out + ".list").read()
+        assert "rtsp://revo:Sup3r%24ecret@10.0.0.5:554/stream1" in listing and "rtsp_transport tcp" in listing
+        assert open(out + ".mode").read() == "0o600"
+        path = argv.split("\n")[argv.split("\n").index("-i") + 1]
+        assert not os.path.exists(path)                              # removed once the stream was open
+    finally:
+        v.stop()
+    # a wrong password: a readable error, the password nowhere in it, and no hammering
+    w = RtspViewer("rtsp://10.0.0.5/stream1", "revo", "wrong", ffmpeg=str(ff))
+    w.start()
+    try:
+        for _ in range(200):
+            if w.status == "error":
+                break
+            await asyncio.sleep(0.02)
+        assert w.error == "wrong user name or password"
+    finally:
+        w.stop()
+    none = RtspViewer("rtsp://10.0.0.5/stream1", ffmpeg="")
+    none.ffmpeg = ""
+    await none._once()
+    assert "ffmpeg is not installed" in none.error
+
+
+def test_display_runs_camera_sections_and_hides_their_credentials():
+    from telerouter_client.display import Display
+    d = Display("127.0.0.1", 1)
+    d.set_screen({"type": "display", "screen": {"panels": [
+        {"id": "door", "kind": "rtsp", "rtsp_url": "rtsp://10.0.0.5:554/stream1", "username": "revo",
+         "password": "Sup3r", "fps": 3, "fit": "cover"}]}, "tasks": {}})
+    p = d.screen["panels"][0]
+    assert p == {"id": "door", "kind": "rtsp", "title": "", "x": 0, "y": 0, "w": 30, "h": 30, "font_size": 2.4,
+                 "fps": 3, "fit": "cover"}                          # no address, user or password for the page
+    assert d._feed_cfg["door"] == ("rtsp", "rtsp://10.0.0.5:554/stream1", "revo", "Sup3r", 3)
+    d._streams.add(object())                                          # a page is open
+    d._sync_feeds()
+    from telerouter_client.camera import RtspViewer
+    assert isinstance(d.feeds["door"], RtspViewer) and d.feeds["door"].key()[1:] == d._feed_cfg["door"][1:]
+    d._streams.clear()
+    d._sync_feeds()
+    assert not d.feeds

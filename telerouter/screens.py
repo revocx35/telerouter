@@ -5,10 +5,10 @@ A screen is a speaker device whose client serves the smart display page (client 
 `Client.id`). telerouter sends them to the device as one `display` message when it connects, whenever the admin
 saves them, and again when a scheduled task shown on it finishes a run:
 
-  {"type": "display", "screen": {...Screen, VNC passwords included...}, "font_family": "<css stack>",
+  {"type": "display", "screen": {...Screen, VNC and camera passwords included...}, "font_family": "<css stack>",
    "tasks": {"<task id>": {"name", "status", "ended", "text", "error", "running"}}}
 
-VNC passwords go only to that device over its own authenticated TLS connection (the client keeps them in memory
+VNC and camera passwords go only to that device over its own authenticated TLS connection (the client keeps them in memory
 and never hands them to the page). Everything else here is pure data shaping, no I/O.
 """
 
@@ -85,16 +85,28 @@ def task_changed(engine: "Engine", task_id: str) -> None:
 
 
 def merge_secrets(new: Screen, old: Screen | None) -> Screen:
-    """An empty VNC password keeps the stored one of the same section, while it points at the same server."""
+    """An empty VNC/camera password keeps the stored one of the same section, while it points at the same server
+    (and, for a camera, the same user)."""
     if old is None:
         return new
     prev = {p.id: p for p in old.panels}
     for p in new.panels:
         o = prev.get(p.id)
-        if p.kind == "vnc" and not p.password and o is not None and o.kind == "vnc" \
-                and (o.host, o.port) == (p.host, p.port):
+        if p.password or o is None or o.kind != p.kind:
+            continue
+        if p.kind == "vnc" and (o.host, o.port) == (p.host, p.port):
+            p.password = o.password
+        elif p.kind == "rtsp" and _netloc(o.rtsp_url) == _netloc(p.rtsp_url) and o.username == p.username:
             p.password = o.password
     return new
+
+
+def _netloc(url: str) -> str:
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url).netloc.lower()
+    except ValueError:
+        return ""
 
 
 def set_size(engine: "Engine", client_id: str, width, height) -> bool:

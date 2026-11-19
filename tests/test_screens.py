@@ -129,6 +129,28 @@ def test_screens_api_device_message_and_task_summaries(settings):
             msg = _receive(ws, "display")
             assert msg["tasks"][mail.id]["name"] == "Mails" and "3 new mails" in msg["tasks"][mail.id]["text"]
 
+            # a camera pasted with its credentials: they are taken out of the address, the password is a secret
+            cam = {"id": "door", "kind": "rtsp", "rtsp_url": "rtsp://revo:Sup3r%21pw@10.1.2.3:554/stream1",
+                   "x": 0, "y": 0, "w": 40, "h": 40}
+            r = c.put(f"/api/screens/{cid}", json={"panels": [cam]}, headers=h)
+            assert r.status_code == 200, r.text
+            out = r.json()["screen"]["panels"][0]
+            assert out["rtsp_url"] == "rtsp://10.1.2.3:554/stream1" and out["username"] == "revo"
+            assert out["password"] == "" and out["password_set"] is True and "Sup3r" not in r.text
+            msg = _receive(ws, "display")["screen"]["panels"][0]
+            assert (msg["rtsp_url"], msg["username"], msg["password"]) == ("rtsp://10.1.2.3:554/stream1", "revo",
+                                                                             "Sup3r!pw")
+            keep = {**cam, "rtsp_url": "rtsp://10.1.2.3:554/stream2", "username": "revo", "password": ""}
+            c.put(f"/api/screens/{cid}", json={"panels": [keep]}, headers=h)
+            assert screens.screen_for(cfg, cid).panels[0].password == "Sup3r!pw"     # same camera: kept
+            _receive(ws, "display")
+            other = {**keep, "rtsp_url": "rtsp://10.9.9.9/stream1"}
+            c.put(f"/api/screens/{cid}", json={"panels": [other]}, headers=h)
+            assert screens.screen_for(cfg, cid).panels[0].password == ""              # another camera: not sent there
+            _receive(ws, "display")
+            assert c.put(f"/api/screens/{cid}", json={"panels": [{**cam, "rtsp_url": "http://x/"}]},
+                         headers=h).status_code == 422
+
             # validation
             bad = dict(body, panels=[{"kind": "task", "task_id": "nope"}])
             assert c.put(f"/api/screens/{cid}", json=bad, headers=h).status_code == 422

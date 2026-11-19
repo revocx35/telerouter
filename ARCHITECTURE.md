@@ -79,7 +79,7 @@ telerouter/
   web/static/          vanilla JS SPA (no build step, no inline script/style: strict CSP)
 client/                telerouter-client (Python >= 3.9): enroll, run, devices, test-audio; install.sh;
                        display.py = the smart display page (loopback HTTP + Server-Sent Events);
-                       vnc.py = view-only VNC (RFB) viewer for the display's VNC sections
+                       vnc.py = view-only VNC (RFB) viewer, camera.py = RTSP camera viewer (ffmpeg)
 tests/                 pytest (auth paths, MCP, agents, SIP, TLS, voice, client)
 tools/                 sip_phone.py (scriptable SIP phone), fake-agent/ (sshd + fake claude for tests)
 ```
@@ -206,8 +206,9 @@ to switch the panel on.
 (`client_id`): background/accent colours, header, whether the conversation takes over the screen, how long until
 the home screen returns, the clock (centre x/y in %, size in % of the screen height, font key from `models.FONTS`
 or a custom installed font name, weight, colour, date/seconds/12 h) and up to 12 `ScreenPanel` sections at
-x/y/w/h in % of the screen: `web` (a sandboxed iframe, optional reload and zoom), `vnc` (host/port/password/fps/fit)
-or `task` (a scheduled task's last successful `reply` + the newest error). The server sends the whole thing as one
+x/y/w/h in % of the screen: `web` (a sandboxed iframe, optional reload and zoom), `vnc` (host/port/password/fps/fit),
+`rtsp` (0.24: `rtsp_url` without credentials + `username` + `password`; a pasted `rtsp://user:pass@…` is split by
+`ScreenPanel._split_rtsp`, in the browser too) or `task` (a scheduled task's last successful `reply` + the newest error). The server sends the whole thing as one
 `display` message on hello, on `PUT /api/screens/{client_id}`, and when a run of a shown task starts or ends
 (`Scheduler._screens` -> `screens.task_changed`). Positions are percentages so one layout fits any resolution; the
 page reports its size (`/size` -> `display_size`) so the web editor (*Screens* page, pointer-event drag/resize,
@@ -216,8 +217,14 @@ CSSOM positioning only) draws the screen to scale.
 On the client, `Display.set_screen` keeps the VNC credentials in the process (`_vnc_cfg`) and gives the page only
 `clean_screen()` (no passwords, numbers clamped, only http(s) frames). VNC viewers (`vnc.py`: RFB 3.3-3.8, security
 None / VNC auth with its own DES, ZRLE + Raw + CopyRect + DesktopSize, a shared session, never input events) run
-only while a page is connected; the page polls `/vnc/<section id>?since=<seq>` and gets a PNG (Up filter, zlib 1,
-downscaled to <= 1920 px wide, encoded in a thread at most once per update) or 204. The page's CSP `frame-src`
+only while a page is connected; the page polls `/feed/<section id>?since=<seq>` (`/vnc/` is an alias) and gets a PNG
+(Up filter, zlib 1, downscaled to <= 1920 px wide, encoded in a thread at most once per update) or 204. Camera
+sections (`camera.py`, client 0.13) run `ffmpeg` (installed on the machine) as `-f concat` over a 0600 ffconcat list in
+a 0700 temp folder that holds the address with the credentials (`option rtsp_transport tcp`, 10 s socket timeout),
+so the password is never in ffmpeg's argv (`ps`); the list is deleted once the first picture arrives. ffmpeg writes
+MJPEG (`fps=N`, at most 1920 px wide) to a pipe, split at SOI/EOI; the newest JPEG is served on the same `/feed/`
+endpoint. ffmpeg's stderr contains the URL with the password, so it is only mapped to fixed messages (`_why`) after
+`redact()`; no picture for 25 s restarts it, a wrong password waits 5 min. The page's CSP `frame-src`
 lists exactly the website sections' origins; when that set changes the page reloads itself to get the new CSP.
 Long task summaries are rendered as light markdown (headings, bullets, **bold**, textContent only) and scroll
 slowly.
@@ -742,7 +749,7 @@ integration tokens, SSH key).
 | XSS | strict CSP (`script-src 'self'`, no inline script/style), DOM built with `textContent` only |
 | Plain-text credentials on the wire | HTTPS only (self-signed CA; clients and the installer pin it); integrations over HTTPS with a pinned certificate; agent MCP inside SSH |
 | Stolen/leaked tokens | random 256-bit tokens, only SHA-256 stored, sent in headers, revocable (speaker removal, MCP token revoke, integration token rotation); agent MCP token rotates on every session start; secrets write-only in the API |
-| Smart display home screen (0.23) | layouts are admin-only (`/api/screens`, session + CSRF); a VNC password is a write-only secret (`SECRET_FIELDS`), kept when the section's server stays the same, sent only to that device over its authenticated TLS WebSocket and never to the page. Website sections: http(s) URLs only (validated on server and client), sandboxed iframes (`allow-scripts allow-same-origin allow-forms`, no referrer), CSP `frame-src` limited to their origins. VNC (RFB) itself is unencrypted with a DES challenge: the picture crosses the LAN in the clear, so use it on a trusted network with a view-only password; the viewer never sends input, asks for a shared session, caps sizes (8192 px, 64 MiB per update, zlib output bounded per rectangle) and backs off 5 min after a wrong password |
+| Smart display home screen (0.23) | RTSP cameras (0.24): the password is a write-only secret like VNC's (kept only while the camera's host:port and user stay the same), never in ffmpeg's command line (0600 ffconcat file, deleted once streaming) and never in logs or error texts (ffmpeg's stderr is redacted and mapped to fixed messages); RTSP itself is usually unencrypted on the LAN. Layouts are admin-only (`/api/screens`, session + CSRF); a VNC password is a write-only secret (`SECRET_FIELDS`), kept when the section's server stays the same, sent only to that device over its authenticated TLS WebSocket and never to the page. Website sections: http(s) URLs only (validated on server and client), sandboxed iframes (`allow-scripts allow-same-origin allow-forms`, no referrer), CSP `frame-src` limited to their origins. VNC (RFB) itself is unencrypted with a DES challenge: the picture crosses the LAN in the clear, so use it on a trusted network with a view-only password; the viewer never sends input, asks for a shared session, caps sizes (8192 px, 64 MiB per update, zlib output bounded per rectangle) and backs off 5 min after a wrong password |
 | Someone reads the smart display's transcripts | the client's display listener binds to loopback only (non-loopback addresses are refused), checks that Host names that loopback address (DNS rebinding), serves GET/HEAD of three fixed assets + one event stream, caps the request head (8 KiB, 5 s) and connections (8, 4 streams); strict CSP, no inline script/style, DOM via `textContent`. Whoever can see the screen sees the conversation: that is the feature |
 | Rogue speaker client | needs an enrollment code (single use, 15 min, throttled); WebSocket frames size/rate capped; max clients |
 | Eavesdropping on Cast speaker audio | Cast receivers fetch media only over plain HTTP (no publicly trusted certificate on a LAN): what a Cast output plays (answers, announcements; never live calls or microphone audio) crosses the LAN unencrypted. Single-use 128-bit URLs, served only to that device's address, withdrawn after playback / 60 s; the listener runs only once a Cast output is used. The Cast control channel is TLS but unauthenticated (device certificates are self-signed and rotate; Cast device auth is not implemented), so a LAN attacker who impersonates the device can get those URLs too. Don't use Cast outputs for private answers on an untrusted network |
