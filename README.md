@@ -319,7 +319,15 @@ telerouter's `gmail_*` tools: search (Gmail's search syntax), read messages and 
 download attachments, list labels, write/update/list/delete drafts, send (also as a reply in a thread), change labels
 (read/unread, archive, star, your own labels) and move to/from the trash. Nothing is ever deleted for good.
 
-1. **Your own Google OAuth client** (once): in the Google Cloud console create a project, enable the *Gmail API*,
+There are two ways to connect an account; both give the same tools and boxes.
+
+* **App password (simplest, no Google Cloud project)**: turn on 2-Step Verification for the Google account, create an
+  app password at https://myaccount.google.com/apppasswords, then *Connect with an app password* and enter the address
+  and the 16 letters. telerouter uses Gmail's IMAP and SMTP servers with it. Works in the phone app too. Work/school
+  accounts may have app passwords turned off; changing the Google password revokes it.
+* **Google sign-in** (your own OAuth client, steps below): the access is limited by Google itself to what you chose.
+
+1. **Your own Google OAuth client** (once, only for Google sign-in): in the Google Cloud console create a project, enable the *Gmail API*,
    set up the *OAuth consent screen* (External, add your addresses as test users, then *Publish app*: in *Testing*
    Google ends the sign-in after 7 days; the "unverified app" warning is fine, it is your app), and create
    *Credentials → OAuth client ID → Web application* with the redirect URI telerouter shows
@@ -332,7 +340,7 @@ download attachments, list labels, write/update/list/delete drafts, send (also a
    *labels, archive, read/unread*, *move to the trash*. Agent tokens (Jarvis) can be edited too. A connected agent
    sees the new tools after it reconnects.
 
-Connecting needs a browser (Google blocks its sign-in inside apps such as the phone app). E-mail is written by other
+Google sign-in needs a browser (Google blocks it inside apps such as the phone app); app passwords work anywhere. E-mail is written by other
 people: agents are told never to follow instructions in it, but give *send* only to agents that need it.
 
 ## Sessions API (let other apps run agent tasks)

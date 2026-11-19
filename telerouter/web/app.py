@@ -1806,11 +1806,32 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
     async def gmail_check(aid: str):
         acc = gmail_account(aid)
         try:
-            prof = await engine.gmail.api(acc, "GET", "/profile")
+            prof = await engine.gmail.backend(acc).profile()
         except gmailmod.GmailError as e:
             raise HTTPException(422, str(e)) from e
-        return {**engine.gmail.info(acc), "messages_total": prof.get("messagesTotal"),
-                "threads_total": prof.get("threadsTotal")}
+        return {**engine.gmail.info(acc), **prof}
+
+    @app.post("/api/gmail/app-password")
+    async def gmail_app_password(payload: dict, request: Request):
+        """The second way to connect: address + Google app password (IMAP + SMTP), no Google Cloud project."""
+        ip = client_ip(request)
+        try:
+            throttle.check(f"gmail:{ip}")
+        except security.Locked as e:
+            raise HTTPException(429, "too many attempts, try again later",
+                                headers={"Retry-After": str(int(e.retry_after) + 1)}) from e
+        try:
+            acc = await engine.gmail.connect_app_password(
+                str(payload.get("email") or "")[:320], str(payload.get("app_password") or "")[:100],
+                str(payload.get("name") or "")[:64], str(payload.get("access") or "full"),
+                str(payload.get("account_id") or "")[:32])
+        except gmailmod.GmailError as e:
+            with contextlib.suppress(security.Locked):
+                throttle.begin(f"gmail:{ip}")
+            log.warning("Gmail app-password connection failed from %s: %s", ip, e)
+            raise HTTPException(422, str(e)) from e
+        throttle.success(f"gmail:{ip}")
+        return engine.gmail.info(acc)
 
     # -- Sessions API (/v1): apps with a "sessions" MCP token start agent sessions -----------------------------------
     # Outside /api/ (no cookie, no CSRF): a bearer token in the header is the whole credential. Bad tokens are

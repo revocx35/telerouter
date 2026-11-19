@@ -23,7 +23,7 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9._:/\[\]-]{0,80}$")
 WAKE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 SECRET_FIELDS = {"password", "token", "password_hash", "totp_secret", "token_hash", "code_hash", "client_secret",
-                 "refresh_token"}
+                 "refresh_token", "app_password"}
 
 
 def _name(v: str) -> str:
@@ -816,14 +816,18 @@ GMAIL_ACCESS = ("full", "compose", "read")      # what telerouter asks Google fo
 
 
 class GmailAccount(BaseModel):
-    """A Gmail mailbox connected with Google's OAuth consent; agents reach it through telerouter's MCP tools.
-    The refresh token is write-only (SECRET_FIELDS) and never leaves telerouter."""
+    """A Gmail mailbox, connected with Google's OAuth consent or with an app password; agents reach it through
+    telerouter's MCP tools. The refresh token / app password is write-only (SECRET_FIELDS), never leaves telerouter."""
     id: str = Field(default_factory=new_id)
     email: str
     name: str = ""                    # optional label ("work", "home"), told to agents
+    # "oauth" = Google sign-in with the owner's OAuth client (Gmail REST API); "app_password" = IMAP + SMTP with a
+    # Google app password (gmail_imap.py), no Google Cloud project needed
+    kind: Literal["oauth", "app_password"] = "oauth"
     access: Literal["full", "compose", "read"] = "full"
-    scopes: list[str] = Field(default_factory=list)      # what Google actually granted
+    scopes: list[str] = Field(default_factory=list)      # what Google granted (oauth) / what the admin allowed (app pw)
     refresh_token: str = ""
+    app_password: str = ""
     added: float = Field(default_factory=time.time)
     last_used: float = 0.0
     error: str = ""                   # set when Google refuses the stored sign-in ("reconnect")

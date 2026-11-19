@@ -69,7 +69,8 @@ docker run --rm --network host -v $PWD:/src -w /src telerouter-dev python tools/
 ## Where things live
 
 `telerouter/` server (web/app.py API + UI routes, web/static/ the UI, voice/, agents/, router/ calls, sip/ + media/,
-mcp.py, gateway.py = external MCP servers re-served on /mcp, gmail.py = Gmail accounts + gmail_* tools, sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
+mcp.py, gateway.py = external MCP servers re-served on /mcp, gmail.py = Gmail accounts + gmail_* tools (gmail_imap.py =
+the app-password IMAP/SMTP backend), sso.py, scheduler.py, quiet.py, tmux.py = the tmux page's commands and parsers), `client/` the Linux/macOS speaker client, `tests/` pytest, `tools/` test
 helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §2. The Android app is a separate repo
 (telerouter-android) that shows this web UI.
 
@@ -322,18 +323,33 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   `PUBLIC` because the session cookie is `SameSite=Strict` and Google's redirect is cross-site; the `state` protects it.
   Google blocks OAuth in embedded WebViews (`disallowed_useragent`): the Android app can't connect accounts. Tests use a
   fake Google behind `httpx.MockTransport` (`tests/test_gmail.py`); not yet run against the real Google APIs.
+- **Gmail app passwords (0.22, `gmail_imap.py`)**: Gmail lists `MOVE`/`UIDPLUS` only *after* LOGIN and imaplib keeps the
+  pre-login list, so `_session` re-reads CAPABILITY (checked against the real imap.gmail.com: pre-login it shows only
+  IMAP4rev1 + X-GM-EXT-1). Never fall back to `\Deleted` + `EXPUNGE` (can delete for good). Python 3.13's imaplib quotes
+  mailbox args itself but leaves already-quoted ones alone: pass names through `q()` (quoted + modified UTF-7). Folder
+  names are localized ("[Gmail]/Tüm Postalar"): find them by special-use flags. Keep REST and IMAP behind the same
+  `RestMail`/`ImapMail` methods; tools must not branch on the account kind. Tests: `tests/fake_imap.py` is a Gmail-like
+  IMAP server over TCP (so the real imaplib parses real wire data). Not yet run against a real mailbox.
 - **Sessions API (0.17, `apisessions.py`)**: `/v1/*` is outside `/api/` on purpose (bearer token, no cookie/CSRF), so
   never add a `/v1` route without `api_token()`. A `sessions` token sees only its own sessions (404 for others). Per-session
   MCP files go through `_write_remote` (stdin) into `~/.telerouter/api/<name>/` and are passed as `--settings`/`--mcp-config`;
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.21.0, 2026-11-19)
+## Status (v0.22.0, 2026-11-19)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
 
+0.22.0 (2026-11-19, owner: "can you implement the 1st option [IMAP + SMTP with a Google app password] as another way to
+connect rather then taking place of the existing setup"): **Gmail app passwords** (`gmail_imap.py`, ARCHITECTURE §6.2):
+*Connect with an app password* next to Google sign-in; the tools now go through `RestMail`/`ImapMail`. 7 new tests
+against a Gmail-like IMAP server (connect + wrong password, search/read/thread/attachment with a localized All Mail and
+non-ASCII labels, labels/read/star/archive, trash + restore with MOVE seen after login, send with Bcc on the envelope,
+reply, drafts create/update/send/delete, a revoked password and recovery, the admin API); 304 tests pass. Checked against
+the real imap.gmail.com / smtp.gmail.com: TLS, capabilities, a wrong password gives the readable error. Not yet run with
+a real mailbox.
 0.21.0 (2026-11-19, owner: "add gmail mcp feature to telerouter where i can click an link to authanticate with google
 and then agents that have the gmail section or sub boxes like send mail see mails create drafts ... can use the telerouter
 mcp to controll my gmail. it should support multiple acounts"): **Gmail** (`gmail.py`, ARCHITECTURE §6.2): *MCP access

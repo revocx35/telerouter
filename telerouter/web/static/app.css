@@ -184,3 +184,4 @@ p.desc { white-space: pre-wrap; margin: 10px 0; }
 .ext-tools { max-height: 40vh; overflow-y: auto; } .ext-url { word-break: break-all; }
 .gmail-perms { margin-top: 8px; } .gmail-acc { padding: 6px 0; border-top: 1px solid var(--line); }
 ol.steps { padding-left: 20px; } ol.steps li { margin: 4px 0; }
+.gmail-connect { margin: 12px 0 8px; }

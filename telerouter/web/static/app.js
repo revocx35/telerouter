@@ -1483,24 +1483,56 @@ function gmailCard(gd) {
     } }, "Finish")]);
   };
   const access = sel("access", "full", gd.access_levels.map(a => [a.id, a.label]));
+  // the second way: address + Google app password (IMAP + SMTP), no Google Cloud project
+  const appPassword = a => {
+    const link = (href, t) => el("a", { href, target: "_blank", rel: "noopener" }, t);
+    const f = el("form", {},
+      el("ol", { class: "hint steps" },
+        el("li", {}, "Turn on 2-Step Verification for the Google account: ", link("https://myaccount.google.com/signinoptions/twosv", "myaccount.google.com → Security"), "."),
+        el("li", {}, "Create an app password (call it telerouter): ", link("https://myaccount.google.com/apppasswords", "myaccount.google.com/apppasswords"), "."),
+        el("li", {}, "Paste the 16 letters here (spaces don't matter). telerouter checks it with Gmail's IMAP and SMTP servers.")),
+      el("div", { class: "form2" },
+        field("Gmail address", inp("email", a ? a.email : "", { placeholder: "you@gmail.com", required: true, readonly: !!a, autocomplete: "off" })),
+        field("App password", el("input", { type: "password", name: "app_password", required: true, autocomplete: "new-password", placeholder: "abcd efgh ijkl mnop" })),
+        field("Name (optional, told to the agents)", inp("name", a ? a.name : "", { placeholder: "e.g. home, work" })),
+        field("What telerouter may do there", sel("access", a ? a.access : "full", gd.access_levels.map(x => [x.id, x.label])))),
+      el("p", { class: "hint" }, "An app password opens the whole mailbox; telerouter keeps it write-only and only does what you allow here and per token. Work or school accounts may have app passwords turned off by their admin. Changing your Google password revokes it."));
+    f.addEventListener("submit", e => e.preventDefault());
+    modal(a ? `Reconnect ${a.email}` : "Connect with an app password", f, close => [el("button", { class: "primary", onclick: async ev => {
+      if (!f.reportValidity()) return;
+      const d = formData(f);
+      ev.target.disabled = true;
+      try {
+        const r = await act(() => api("POST", "/api/gmail/app-password", { email: d.email, app_password: d.app_password, name: d.name, access: d.access, account_id: a ? a.id : "" }));
+        toast(`${r.email} connected`); close(); route();
+      } catch { ev.target.disabled = false; }
+    } }, "Connect")]);
+  };
   const rows = gd.accounts.map(a => el("tr", {},
     el("td", {}, stateDot(a.connected ? "connected" : "error"), " ", el("b", {}, a.email), a.name ? el("div", { class: "hint" }, a.name) : null),
+    el("td", {}, a.kind === "app_password" ? "app password" : "Google sign-in"),
     el("td", {}, a.access_label),
     el("td", {}, a.error ? el("span", { class: "err" }, a.error) : "connected"),
     el("td", {}, ago(a.last_used)),
     el("td", {}, el("div", { class: "row" },
       el("button", { class: "small", onclick: async () => { const r = await act(() => api("POST", `/api/gmail/accounts/${a.id}/check`)); toast(`${r.email}: works (${r.messages_total} messages)`); } }, "Check"),
       el("button", { class: "small", onclick: async () => { const n = prompt("Name for this account (e.g. work, home), told to the agents:", a.name || ""); if (n !== null) { await act(() => api("PUT", `/api/gmail/accounts/${a.id}`, { name: n }), "Saved"); route(); } } }, "Rename"),
-      el("button", { class: "small", onclick: () => connect(access.value, a.id) }, "Reconnect"),
-      el("button", { class: "small danger", onclick: async () => { if (confirm(`Remove ${a.email}? telerouter forgets the sign-in and asks Google to revoke it; agents lose access.`)) { await act(() => api("DELETE", `/api/gmail/accounts/${a.id}`), "Removed"); route(); } } }, "Remove")))));
+      el("button", { class: "small", onclick: () => a.kind === "app_password" ? appPassword(a) : connect(access.value, a.id) }, "Reconnect"),
+      el("button", { class: "small danger", onclick: async () => {
+        const what = a.kind === "app_password" ? "telerouter forgets the app password (also delete it at myaccount.google.com/apppasswords)" : "telerouter forgets the sign-in and asks Google to revoke it";
+        if (confirm(`Remove ${a.email}? ${what}; agents lose access.`)) { await act(() => api("DELETE", `/api/gmail/accounts/${a.id}`), "Removed"); route(); }
+      } }, "Remove")))));
   return el("div", { class: "card" }, el("h2", {}, "Gmail"),
-    el("p", { class: "hint" }, "Connect Gmail accounts with Google's sign-in; agents then use them through telerouter's gmail_* tools (search, read, drafts, send, labels, trash). Which agent may do what in which account is set per token: Tokens → Edit → Gmail. The Google sign-in stays in telerouter."),
-    el("details", { open: !ready }, el("summary", {}, ready ? "Google OAuth client (set)" : "1. Set up your Google OAuth client"), client),
+    el("p", { class: "hint" }, "Connect Gmail accounts; agents then use them through telerouter's gmail_* tools (search, read, drafts, send, labels, trash). Which agent may do what in which account is set per token: Tokens → Edit → Gmail. The password or Google sign-in stays in telerouter."),
     gd.accounts.length ? el("div", { class: "table-wrap" }, el("table", {},
-      el("tr", {}, ["Account", "Access", "Status", "Last used", ""].map(t => el("th", {}, t))), rows)) : el("p", { class: "muted" }, "No account connected yet."),
-    ready ? el("div", { class: "row" }, field("Access telerouter asks Google for", access),
-      el("button", { class: "primary", onclick: () => connect(access.value, "") }, "Connect a Gmail account")) : null,
-    APP ? el("p", { class: "hint" }, "Connecting needs a browser (Google blocks its sign-in inside apps); everything else works here.") : null);
+      el("tr", {}, ["Account", "Connected with", "Access", "Status", "Last used", ""].map(t => el("th", {}, t))), rows)) : el("p", { class: "muted" }, "No account connected yet."),
+    el("div", { class: "row gmail-connect" }, el("button", { class: "primary", onclick: () => appPassword(null) }, "Connect with an app password"),
+      el("span", { class: "hint" }, "Simplest: a Google app password, no Google Cloud project.")),
+    el("details", { open: !!ready && !gd.accounts.length }, el("summary", {}, "Or connect with Google sign-in (needs your own Google Cloud OAuth client)"),
+      el("h3", {}, ready ? "Google OAuth client (set)" : "Set up your Google OAuth client"), client,
+      ready ? el("div", { class: "row" }, field("Access telerouter asks Google for", access),
+        el("button", { class: "primary", onclick: () => connect(access.value, "") }, "Connect with Google sign-in")) : null,
+      APP ? el("p", { class: "hint" }, "Google sign-in needs a browser (Google blocks it inside apps); app passwords work here too.") : null));
 }
 
 // ---------------------------------------------------------------------------------------------- tmux

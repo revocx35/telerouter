@@ -56,7 +56,8 @@ telerouter/
   cron.py              next run of a schedule (daily times, interval, once, 5-field cron)
   mcp.py               MCP server (Streamable HTTP, JSON responses, tools only)
   gateway.py           MCP gateway: client of external MCP servers, re-serves their tools on /mcp as <name>__<tool>
-  gmail.py             Gmail: Google OAuth (code + PKCE) for the owner's accounts, Gmail REST client, gmail_* MCP tools
+  gmail.py             Gmail: Google OAuth (code + PKCE) for the owner's accounts, Gmail REST client (RestMail), gmail_* MCP tools
+  gmail_imap.py        Gmail with an app password instead: IMAP (X-GM-EXT-1) + SMTP backend (ImapMail), same tools
   voice/
     client_conn.py     one speaker device connection (client): paced audio out, mic in, state
     speaker.py         VirtualSpeaker: a mic device + an output device; play/cue/live routing
@@ -674,6 +675,29 @@ agent ── tools/call gmail_search {…} (Bearer trm_) ─► token's box for 
   client) switches the UI to "paste the address you landed on" (`POST /api/gmail/finish`). Google blocks its sign-in
   in embedded WebViews, so the Android app shows the page but connecting needs a browser.
 
+**Two ways to connect (0.22)**: `GmailAccount.kind` = `oauth` (above) or `app_password` (`gmail_imap.py`: the address +
+a Google app password, no Google Cloud project). `Gmail.backend(acc)` returns `RestMail` or `ImapMail`; both have the
+same methods (search, message, thread, attachment, labels, reply_info, send, draft_*, modify, trash, profile) and the
+tools only talk to that interface, so ids, answers and permission boxes are the same:
+
+* IMAP: `imap.gmail.com:993`, SMTP: `smtp.gmail.com:465`, both TLS with certificate checks. Every operation is one short
+  IMAP session (login, work, logout) in a thread (imaplib is blocking), max 3 at a time per account. The capability
+  list is re-read after login (Gmail announces MOVE/UIDPLUS only then).
+* Folders by special-use flag (`\All`, `\Drafts`, `\Trash`, ...; the names are localized), names in modified UTF-7,
+  cached 10 min. Message/thread ids = hex of `X-GM-MSGID`/`X-GM-THRID` (the same ids the REST API uses). Search =
+  `UID SEARCH CHARSET UTF-8 X-GM-RAW <literal>` in All Mail (newest UID first, page token = offset); labels =
+  `X-GM-LABELS`; unread = no `\Seen`. Bodies are parsed with the e-mail library; attachment ids are `p<part index>`.
+* Sending = SMTP (`Bcc` only on the envelope, removed from the message; Gmail files the copy in Sent). Drafts =
+  `APPEND` to Drafts with `\Draft` (the id comes from `APPENDUID`); update = trash + append (new id); send a draft =
+  SMTP + trash it. Trash/delete = `UID MOVE` to Trash (never `\Deleted` + `EXPUNGE`: depending on Gmail's IMAP
+  settings that deletes for good); restore = MOVE back to INBOX.
+* `access` (full / compose / read) is enforced by telerouter for these accounts (`scopes` hold the matching OAuth
+  scope names so `perms_of` works the same); Google gives no narrower password than the whole mailbox. A refused
+  login sets `GmailAccount.error` (cleared on the next success).
+* `POST /api/gmail/app-password` (`email`, `app_password`, `name`, `access`, `account_id` to replace one) logs in to
+  IMAP and SMTP before saving; failures are throttled per IP. Switching an account between the two kinds keeps its id
+  (and the tokens' boxes); a Google grant it had is revoked.
+
 API (admin session + CSRF, except the callback): `GET /api/gmail`, `PUT /api/gmail/client`, `POST /api/gmail/connect`
 (`access`, `account_id` to reconnect) → `{url, paste}`, `GET /api/gmail/callback` (public, HTML answer),
 `POST /api/gmail/finish` (`url`), `PUT /api/gmail/accounts/{id}` (`name`), `DELETE /api/gmail/accounts/{id}`,
@@ -710,6 +734,7 @@ integration tokens, SSH key).
 | MITM of an extra MCP server with a private certificate | its CA is pinned per server after the admin compared the fingerprint; the agent still checks the host name; the pinned CA is trusted only by that agent's Claude Code process |
 | An external MCP server (gateway) misused or turned against agents | admin-only (session + CSRF); URL https-only (http only on loopback), no redirects followed, its token is write-only and is not sent to a changed URL unless typed again, its CA pinned after the admin compared the fingerprint (host name still checked); answers capped (4 MB, 300 tools, 64 KB schemas), 8 calls in flight, 230 s timeout; arguments logged by name only. The admin chooses which tokens get its tools (all by default) and can hide single tools. Its tool descriptions and results reach the agents unchanged: an external server is trusted like an MCP server added to the agent directly (a hostile one can try prompt injection), so add only servers you trust |
 | Someone gets at the owner's mail through telerouter | connecting needs the admin session + CSRF and Google's own sign-in; the callback is public but needs the single-use 256-bit `state` the admin's start made (10 min, max 20 pending, failures throttled per IP), PKCE S256 and the client secret; the code is traded over verified TLS, no redirects followed. Refresh tokens stay in `/data/config.json` (0600, write-only in the API, never logged, revoked at Google on removal); access tokens only in memory. Agents get nothing by default: per token and per account boxes (read / draft / send / organize / trash), checked on every call, and an account connected read-only can't be used to send whatever the boxes say. No permanent delete (trash only, `gmail.modify` at most). Tool arguments are logged by name only |
+| A Gmail app password leaks or is misused | it opens the whole mailbox (IMAP/SMTP; Google has no narrower kind), so it is write-only in the API (`SECRET_FIELDS`), never logged, stored like the other secrets in `/data/config.json` (0600); telerouter itself enforces the access level and the per-token boxes, never deletes for good (MOVE to Trash only), and only talks to imap.gmail.com / smtp.gmail.com with certificate checks. Connecting needs the admin session + CSRF; wrong passwords are throttled per IP. Revoke it at myaccount.google.com/apppasswords (or by changing the Google password) |
 | A hostile e-mail steers the agent (prompt injection) | e-mails are written by strangers: the MCP instructions and tool descriptions tell agents to treat them as data and never follow instructions in them, and to send only what the owner asked for (draft when unsure). This is guidance, not a guarantee: give *send* only to agents that need it; *draft* lets the owner review first |
 | MITM of the SSH connection | host key fetched once, shown as a fingerprint, pinned |
 | Agent host compromise reaching telerouter | its MCP token only reaches MCP tools; telerouter never accepts commands from the agent host otherwise |
