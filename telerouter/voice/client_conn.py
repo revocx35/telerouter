@@ -7,7 +7,7 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
 <client token>` when a reverse proxy in front uses the Authorization header itself):
 
   client -> server  text   {"type": "hello", "name", "version", "platform", "aec": bool, "transcript": bool,
-                            "speech": bool, "stt": "device"}   speech false = show answers as text only, don't
+                            "partial": bool, "speech": bool, "stt": "device"}   speech false = show answers as text only, don't
                            speak them (the phone reads them itself, or shows text only); stt "device" = the
                            phone recognises speech itself and sends utterances instead of listening audio
                     binary 16 kHz mono PCM16 LE microphone audio (any size up to 64 KiB, usually 20 ms)
@@ -29,6 +29,8 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
                                                 "language", "features": ["utterance"]}
                            {"type": "transcript", "role": "user"|"assistant", "text", "say"}  (hello transcript:
                            true; "say" = the answer as a voice reads it: no markdown, code or links)
+                           {"type": "partial", "text"}  (hello "partial": true, 0.25) the words so far while
+                           the person speaks (fast model, may change); the "user" transcript replaces them
                            {"type": "display", "screen", "font_family", "tasks"}  (hello "display": true, 0.23):
                            the smart display's settings + home-screen layout (screens.py)
   client -> server  text   {"type": "display_size", "width", "height"}  (display clients) the page's size
@@ -74,6 +76,7 @@ class ClientConn:
         self.mic_bytes = 0
         self.mic_level = -120.0
         self.wants_text = False             # hello "transcript": true (a device with a screen)
+        self.wants_partial = False          # hello "partial": true (shows the words live while someone speaks)
         self.speech = True                  # hello "speech": false = answers as text only (with wants_text)
         self.device_stt = False             # hello "stt": "device" = sends utterances (text), not listening audio
         self.display = False                # hello "display": true = serves a smart display page (screens.py)
@@ -107,6 +110,9 @@ class ClientConn:
         if say:
             msg["say"] = say[:4000]
         asyncio.create_task(self.send_json(msg))
+
+    def send_partial(self, text: str) -> None:
+        asyncio.create_task(self.send_json({"type": "partial", "text": text[:4000]}))
 
     # -- microphone ------------------------------------------------------------------------------
     def mic(self, data: bytes) -> None:

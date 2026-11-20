@@ -187,8 +187,16 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   garbled spoken names ("Tether Outer T-Max" -> telerouter).
 - **0.9 s of silence cut people off mid-sentence** ("…I usually close my…"). Endpointing now keeps a second
   listener running while Whisper transcribes; if the text looks unfinished (`vad.looks_unfinished`) or more
-  speech arrived within 3 s, the parts are joined and re-transcribed (max 2 times). Defaults: 1.2 s on
-  speakers, 1.5 s on phone calls, 45 s per request; old stored defaults are bumped by `store.migrate`.
+  speech arrived within 3 s, the parts are joined and re-transcribed (max 2 times). Defaults since 0.25: 1 s on
+  speakers and phone calls (the phone app's pause), 45 s per request; old stored defaults are moved once by
+  `store.migrate` (`VoiceSettings.pause_defaults`: never re-apply a migration on every start, it would undo the
+  owner's own choice).
+- **Whisper's cost is fixed, not per second of audio** (0.25): `small-int8` took ~2.2 s for 3 s *and* for 1.5 s
+  of audio on prod (30 s window); `tiny-int8` ~0.6 s, `base-int8` ~1.2 s. So latency comes from *when* Whisper
+  starts: `voice/live.py` starts it at a 0.35 s pause and reuses that text when nothing was said after it. The
+  live words for screens use the separate `whisper-live` container so they never queue in front of the accurate
+  request; wyoming-faster-whisper serves one request at a time per model. A cancelled request still finishes on
+  the Whisper side (only the connection closes), so don't start requests needlessly.
 - **Headless Linux speakers (no PulseAudio/PipeWire)**: Ubuntu's PortAudio includes the PulseAudio host API and
   fails to initialise at all without a sound server (`import sounddevice` raises). The client then falls back
   to `AlsaIO` (arecord/aplay, alsa-utils). Proxmox LXC: pass /dev/snd/controlC0, pcmC0D0p, pcmC0D0c, timer
@@ -287,7 +295,9 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   only while a page is connected. `vnc.py` was checked against a real TigerVNC `Xvnc` (VncAuth, wrong + right
   password, ZRLE); tests use a fake RFB server that sends every ZRLE tile type (`tests/test_client.py`). Calling
   `screens.task_changed` outside the event loop is a no-op (tests use `c.portal.call`). Client 0.12 is needed for
-  screens; older display clients keep the 0.11 page.
+  screens; older display clients keep the 0.11 page. Live words (0.25, client 0.14): `partial` events grow a "You"
+  bubble in place; the page must not re-run the bubbles' entry animation on every update (`t.shown`/`still`), and a
+  partial is accepted only while the state is `listening` (a late one after the final words would stick).
 - **RTSP cameras (0.24, `camera.py`)**: ffmpeg's stderr and its "Impossible to open '<url>'" line contain the camera
   password: never log stderr, only `_why(redact(...))`. Never put the URL with credentials on ffmpeg's command line:
   it goes through the 0600 ffconcat file (`-f concat -safe 0 -protocol_whitelist file,rtsp,...`). Checked with real
@@ -350,11 +360,21 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.24.0, 2026-11-19)
+## Status (v0.25.0, 2026-11-20)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
+
+0.25.0 (2026-11-20, owner: "in the new screens feature ... it only shows what i said after i finish speaking can you make
+it so that it shows what im saying live just like on the mobile app" + "the current wait time on android client is great
+can you make that wait time on other things like the smart speakers and when i call from phone extension"): **live words
+on the smart display** (hello `"partial": true`, client 0.14; `{"type":"partial"}` from the new `whisper-live` service,
+tiny-int8) and **shorter waits** (`voice/live.py`: Whisper starts at a 0.35 s pause and its text is reused at the end;
+default pause 1 s on speakers and phone calls like the phone app, old defaults moved once). Measured on prod with real
+Whisper (host overloaded at the time, swap full): text ready 2.7-3.2 s after the end of speech before, 0.0-0.3 s after.
+7 new tests (early request reused / redone after more speech, migration once, partials only for screens and never after
+the final words, display partial events + snapshot + session); 320 tests pass. Display page checked in Chromium.
 
 0.24.0 (2026-11-19, owner: "yeah can you add rtsp" after pasting a camera's rtsp:// address): **Camera (RTSP)**
 sections (`camera.py`, client 0.13; the display's `/vnc/` endpoint became `/feed/`). 3 new tests (URL building,

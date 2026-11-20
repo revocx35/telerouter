@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pysilero_vad import SileroVoiceActivityDetector
@@ -16,7 +17,7 @@ CHUNK_MS = CHUNK_BYTES * 1000 // (2 * RATE)
 @dataclass
 class EndpointConfig:
     start_timeout_ms: int = 6000      # no speech by then: give up
-    end_silence_ms: int = 900         # pause that ends the utterance
+    end_silence_ms: int = 1000        # pause that ends the utterance
     max_ms: int = 20000
     threshold: float = 0.5
     min_speech_ms: int = 160          # shorter blips (a cough, a click) don't count as speech
@@ -37,6 +38,8 @@ class Endpointer:
         self.silence_ms = 0
         self.started = False
         self.result: str | None = None
+        self.speech_end = 0           # len(audio) right after the last speech chunk (grows only while speaking)
+        self.on_feed: Callable[[], None] | None = None   # called after each feed (LiveTranscriber.poke)
 
     def feed(self, pcm: bytes) -> str | None:
         if self.result:
@@ -46,6 +49,8 @@ class Endpointer:
             chunk = bytes(self._buf[:CHUNK_BYTES])
             del self._buf[:CHUNK_BYTES]
             self._step(chunk)
+        if self.on_feed is not None:
+            self.on_feed()
         return self.result
 
     def _step(self, chunk: bytes) -> None:
@@ -59,6 +64,7 @@ class Endpointer:
                 self.started = True
                 keep = (c.pre_roll_ms + self.speech_ms) * 2 * RATE // 1000
                 del self.audio[: max(0, len(self.audio) - keep)]
+                self.speech_end = len(self.audio)
             elif self.elapsed_ms >= c.start_timeout_ms:
                 self.result = "timeout"
             else:
@@ -67,13 +73,15 @@ class Endpointer:
                     del self.audio[: len(self.audio) - keep]
             return
         self.silence_ms = 0 if speech else self.silence_ms + CHUNK_MS
+        if speech:
+            self.speech_end = len(self.audio)
         if self.silence_ms >= c.end_silence_ms:
             self.result = "speech"
         elif self.elapsed_ms >= c.max_ms:
             self.result = "max"
 
 
-CONTINUE_WAIT_MS = 3000      # after an end-of-speech, how long more speech may still join the utterance
+CONTINUE_WAIT_MS = 3000      # after an end-of-speech that looks unfinished, how long more speech may still join
 MAX_CONTINUATIONS = 2
 _DANGLING = {"and", "or", "but", "so", "because", "my", "the", "a", "an", "to", "of", "for", "with", "that",
              "if", "i", "in", "on", "at", "your", "his", "her", "our", "their", "is", "are", "was", "when", "then",

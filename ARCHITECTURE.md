@@ -19,10 +19,11 @@ flowchart LR
     app["telerouter (Python/asyncio)<br/>HTTPS :8443 UI + API + /ws/client + /mcp<br/>SIP UDP :5080 · RTP 18000-18199<br/>loopback :47700 (MCP for agent tunnels)"]
     oww["openWakeWord<br/>127.0.0.1:10400"]
     whisper["Whisper (faster-whisper)<br/>127.0.0.1:10300"]
+    wlive["Whisper live (tiny)<br/>127.0.0.1:10301"]
     piper["Piper<br/>127.0.0.1:10200"]
   end
   spk1["speaker client<br/>(Linux / macOS)"] -- "wss: mic PCM up / audio down" --> app
-  app -- Wyoming --> oww & whisper & piper
+  app -- Wyoming --> oww & whisper & wlive & piper
   app -- "SSH (key, pinned host key)<br/>tmux · hooks · reverse tunnel" --> agenthost["agent host<br/>Claude Code / Hermes in tmux"]
   agenthost -. "MCP over the tunnel<br/>127.0.0.1:47801 -> :47700" .-> app
   app -- "SIP/RTP (REGISTER, calls)" --> pbx["PBX (FreePBX)"]
@@ -66,6 +67,7 @@ telerouter/
     assistant.py       wake -> listen -> STT -> agent -> TTS turn; mic routing; speakable()
     speech.py          Wyoming clients (Whisper, Piper, openWakeWord WakeStream)
     vad.py             Silero endpointing
+    live.py            LiveTranscriber: Whisper starts at the first pause; live words for screens
   agents/
     ssh.py             telerouter's SSH key, host-key fetch/pin, connect
     drivers.py         Claude Code / Hermes: files, launch script, hook script, Hermes config edit
@@ -167,16 +169,29 @@ sequenceDiagram
   W-->>T: detection hey_jarvis
   T->>C: start blip, state listening
   C->>T: "call my dad"
-  Note over T: Silero VAD: speech, then 0.9 s pause
-  T->>C: end blip, state thinking
-  T->>S: utterance
+  Note over T: Silero VAD: a 0.35 s pause starts Whisper on the audio so far
+  T->>S: utterance (early)
+  Note over T: 1 s pause = end; no speech since the early request: its text is the answer
   S-->>T: "Call my dad."
+  T->>C: end blip, state thinking
   T->>A: tmux paste "[telerouter #a1b2 · Kitchen speaker] Call my dad."
   A->>T: MCP connect_call(contact="dad")  (through the SSH tunnel)
   T-->>C: "Calling dad", ring-back, then the call (state call)
   A-->>T: Stop hook: last_assistant_message
   Note over T: speaker is in a call: the reply is not spoken
 ```
+
+**Endpointing and latency (0.25, `voice/live.py`).** Whisper `small` costs a fixed ~2.2 s per request on the
+production CPU whatever the length (it always encodes a 30 s window), so waiting for the end of speech and only
+then transcribing made a turn feel slow (1.2 s + 2.2 s and more). `LiveTranscriber` hooks the endpointer
+(`Endpointer.on_feed`, `speech_end`): a 0.35 s pause starts the accurate model on the audio so far; if the pause
+becomes the end (1 s, same as the phone app; phone calls too) and no speech came after it, that request's text is
+used, otherwise a fresh one runs. Speakers with a screen (hello `"partial": true`) also get the words so far from
+the fast `whisper-live` model (`tiny-int8`, ~0.6 s per request, one at a time per utterance, never acted on) as
+`{"type":"partial","text"}`. The continuation logic is unchanged: a sentence that sounds unfinished, or more speech
+while the text was pending, still waits up to 3 s and is joined (each continuation round has its own
+LiveTranscriber with the earlier audio as `prefix`). Old stored default pauses (1200/1500 ms) are moved to 1000 once
+(`VoiceSettings.pause_defaults`); values the owner chose stay.
 
 Mic routing by state: `idle` -> wake word; `listening` -> endpointer; `call` -> SIP call + wake word
 (the wake word hangs up); `ringing` -> wake word (answers). While a call that is not on this speaker is in
@@ -256,6 +271,9 @@ On narrow screens the web UI has a top bar with the page name and a navigation d
 
 Protocol extensions the phone uses (all opt-in, old clients unaffected):
 
+- `hello` with `"partial": true` (with `"transcript": true`, the smart display since client 0.14): while the
+  person speaks the server sends `{"type":"partial","text"}` (the words so far, may change); the `user`
+  transcript replaces them. Only these devices make the server run the live model.
 - `hello` with `"transcript": true`: the server sends `{"type":"transcript","role":"user"|"assistant","text"}`
   when it has heard a request (`listen`) and when it answers (`speak`). `VirtualSpeaker.transcript` sends them
   to the client devices of that speaker that asked for them. `"speech": false` (the app's *Spoken answers* off):

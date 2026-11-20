@@ -1479,7 +1479,7 @@ async function voice(main) {
       field("Voice", voices),
       field("Blip volume %", num("beep_volume", v.beep_volume, { min: 0, max: 100 })),
       field("Wait for speech after the blip (s)", num("listen_timeout", v.listen_timeout, { step: 0.5 })),
-      field("Pause that ends a request (ms)", num("end_silence_ms", v.end_silence_ms, { step: 100 }), "Speakers. If more speech follows within 3 s, or the sentence sounds unfinished, it is joined."),
+      field("Pause that ends a request (ms)", num("end_silence_ms", v.end_silence_ms, { step: 100 }), "Speakers. Whisper already starts at the first pause. If the sentence sounds unfinished, or more speech follows while it works, it waits up to 3 s more and joins it."),
       field("…on phone calls (ms)", num("phone_end_silence_ms", v.phone_end_silence_ms, { step: 100 })),
       field("Longest request (s)", num("max_utterance", v.max_utterance)),
       field("Speech detection threshold", num("vad_threshold", v.vad_threshold, { step: 0.05, min: 0.1, max: 0.95 }))),

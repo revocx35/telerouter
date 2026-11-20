@@ -20,6 +20,7 @@ from ..agents.runtime import AgentError, Source
 from ..media import pcm as pcmmod
 from .speaker import VirtualSpeaker
 from .speech import SpeechError, WakeStream
+from .live import LiveTranscriber
 from .vad import MAX_CONTINUATIONS, EndpointConfig, Endpointer, continuation, looks_unfinished
 
 if TYPE_CHECKING:
@@ -298,6 +299,10 @@ class VoiceAssistant:
                 await asyncio.wait_for(ev.wait(), wait)
             return ep
 
+        lang, names = v.language, e.contact_names()
+        show = conn.partial if conn.wants_partial else None
+        live = LiveTranscriber(e.speech, first, lang, names, on_partial=show)
+        lives = [live]
         try:
             ep = await record(first, v.max_utterance + v.listen_timeout + 5)
             if ep.result == "timeout" or not ep.started:
@@ -308,9 +313,11 @@ class VoiceAssistant:
             for rounds in range(MAX_CONTINUATIONS + 1):
                 # keep recording while Whisper works: a pause is not always the end of the sentence
                 more = continuation(cfg)
+                nxt = LiveTranscriber(e.speech, more, lang, names, prefix=audio, on_partial=show)
+                lives.append(nxt)
                 waiter = asyncio.create_task(record(more, v.max_utterance + 5))
                 try:
-                    text = await e.speech.transcribe(audio, v.language, e.contact_names())
+                    text = await live.final()
                 except SpeechError as ex:
                     waiter.cancel()
                     log.warning("speech-to-text failed: %s", ex)
@@ -324,13 +331,16 @@ class VoiceAssistant:
                     break
                 log.info("[%s] the sentence went on after a pause (%s)", conn.name, text[-40:])
                 audio += bytes(more.audio)
+                live = nxt
         finally:
+            for lt in lives:
+                lt.close()
             self._listeners.pop(conn.id, None)
             self._listen_done.pop(conn.id, None)
         conn.set_state("thinking")
         conn.cue(pcmmod.cue("end", v.beep_volume))
-        log.info("[%s] heard (%.1f s audio, %.2f s stt): %s", conn.name, len(audio) / 32000,
-                 time.monotonic() - t0, text)
+        log.info("[%s] heard (%.1f s audio, %.2f s stt%s): %s", conn.name, len(audio) / 32000,
+                 time.monotonic() - t0, ", early" if live.early_used else "", text)
         conn.last_text = text
         conn.transcript("user", text)
         return text

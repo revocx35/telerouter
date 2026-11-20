@@ -191,7 +191,12 @@ async def test_display_streams_state_and_transcripts_and_wakes_the_screen(tmp_pa
         assert snap["state"] == "idle"                       # connected = idle until the server says more
         d.set_state("listening")
         assert (await event()) ["state"] == "listening"
+        d.set_partial("what's the")
+        d.set_partial("what's the")                         # unchanged: not sent again
+        p = await event()
+        assert (p["type"], p["text"]) == ("partial", "what's the") and d.partial == "what's the"
         d.add_transcript("user", "what's the weather")
+        assert d.partial == ""
         d.add_transcript("assistant", "Sunny, 21 degrees.")
         d.add_transcript("system", "ignored")              # unknown roles are dropped
         ev1, ev2 = await event(), await event()
@@ -200,6 +205,10 @@ async def test_display_streams_state_and_transcripts_and_wakes_the_screen(tmp_pa
         for _ in range(20):
             d.add_transcript("assistant", "x")
         assert len(d.turns) == 6                             # only the last few turns are kept
+        d.set_state("thinking")
+        await event()
+        d.set_partial("late words")                         # only while listening
+        assert d.partial == ""
         d.set_connected(False)
         assert d.state == "offline"
         w.close()
@@ -263,10 +272,15 @@ def test_session_asks_for_transcripts_and_feeds_the_display():
     s = Session({"server": "https://x:8443", "token": "t", "ca_pem": ""}, Player(), aec=False, display=d)
     ws = WS([_json.dumps({"type": "config", "name": "iMac", "assistant": "Jarvis", "volume": 100}),
              _json.dumps({"type": "state", "state": "listening"}),
+             _json.dumps({"type": "partial", "text": "hel"}),
              _json.dumps({"type": "transcript", "role": "user", "text": "hello"}),
              _json.dumps({"type": "transcript", "role": "assistant", "text": "Hi.", "say": "Hi."}),
              _json.dumps({"type": "state", "state": "idle"})])
+    seen = []
+    real = d.set_partial
+    d.set_partial = lambda t: (seen.append((t, d.state)), real(t))
     asyncio.run(s._session(ws))
+    assert seen == [("hel", "listening")] and d.partial == ""      # the final words replaced the live ones
     assert (d.name, d.assistant, d.state) == ("iMac", "Jarvis", "idle")
     assert [t["text"] for t in d.turns] == ["hello", "Hi."]
 

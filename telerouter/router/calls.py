@@ -23,6 +23,7 @@ from ..media import pcm as pcmmod
 from ..models import Contact
 from ..sip.message import SipUri
 from ..sip.ua import Account, AccountConfig, Call
+from ..voice.live import LiveTranscriber
 from ..voice.vad import MAX_CONTINUATIONS, EndpointConfig, Endpointer, continuation, looks_unfinished
 from .sipaudio import SipAudio
 
@@ -193,30 +194,43 @@ class CallManager:
                 gone.cancel()
             return ep
 
-        ep = await record(Endpointer(cfg))
+        lang, names = self.engine.store.config.voice.language, self.engine.contact_names()
+        ep = Endpointer(cfg)
+        live = LiveTranscriber(self.engine.speech, ep, lang, names)    # starts Whisper at the first pause
+        await record(ep)
         if s.call.state != "active" or ep.result == "timeout" or not ep.started:
+            live.close()
             s.endpointer = None
             return ""
         audio = bytes(ep.audio)
-        lang, names = self.engine.store.config.voice.language, self.engine.contact_names()
-        for rounds in range(MAX_CONTINUATIONS + 1):
-            more = continuation(cfg)
-            waiter = asyncio.create_task(record(more))       # keep recording while Whisper works
-            text = await self.engine.speech.transcribe(audio, lang, names)
-            if rounds == MAX_CONTINUATIONS or not (looks_unfinished(text) or more.started) or s.call.state != "active":
-                waiter.cancel()
-                break
-            await waiter
-            if not more.started:
-                break
-            log.info("[call %s] the sentence went on after a pause", s.id)
-            audio += bytes(more.audio)
+        lives = [live]
+        try:
+            for rounds in range(MAX_CONTINUATIONS + 1):
+                more = continuation(cfg)
+                nxt = LiveTranscriber(self.engine.speech, more, lang, names, prefix=audio)
+                lives.append(nxt)
+                waiter = asyncio.create_task(record(more))       # keep recording while Whisper works
+                text = await live.final()
+                if (rounds == MAX_CONTINUATIONS or not (looks_unfinished(text) or more.started)
+                        or s.call.state != "active"):
+                    waiter.cancel()
+                    break
+                await waiter
+                if not more.started:
+                    break
+                log.info("[call %s] the sentence went on after a pause", s.id)
+                audio += bytes(more.audio)
+                live = nxt
+        finally:
+            for lt in lives:
+                lt.close()
         s.endpointer = None
         if cue and s.call.state == "active":
             s.audio.play(pcmmod.cue("end", vol))
         if text:
             s.transcript.append({"who": s.label, "text": text})
-        log.info("[call %s] heard from %s: %s", s.id, s.label, text or "(nothing)")
+        log.info("[call %s] heard from %s%s: %s", s.id, s.label, " (early)" if live.early_used else "",
+                 text or "(nothing)")
         return text
 
     # -- dialing ------------------------------------------------------------------------------------

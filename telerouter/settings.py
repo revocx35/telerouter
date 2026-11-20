@@ -47,6 +47,8 @@ class Settings:
     # certificate in front of /ws/client); "" = only the address the admin UI was opened with
     public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
     whisper_uri: str = field(default_factory=lambda: _env("WHISPER_URI", "tcp://127.0.0.1:10300"))
+    # fast Whisper for the words while someone speaks (shown live on a smart display); "" = off
+    whisper_live_uri: str = field(default_factory=lambda: _env("WHISPER_LIVE_URI", ""))
     piper_uri: str = field(default_factory=lambda: _env("PIPER_URI", "tcp://127.0.0.1:10200"))
     wake_uri: str = field(default_factory=lambda: _env("WAKE_URI", "tcp://127.0.0.1:10400"))
     # reverse proxies whose X-Forwarded-For is trusted ("" = none, "private" = RFC 1918 + loopback)

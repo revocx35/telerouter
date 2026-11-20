@@ -139,6 +139,19 @@ class VirtualSpeaker:
                 seen.append(d)
                 d.send_text(role, text, say)
 
+    @property
+    def wants_partial(self) -> bool:
+        """A device of this speaker shows the words live while the person speaks (hello "partial": true)."""
+        return any(isinstance(d, ClientConn) and d.wants_partial for d in (self.mic_dev, self.out))
+
+    def partial(self, text: str) -> None:
+        """The words so far (fast live model, may still change) for devices that show them live."""
+        seen = []
+        for d in (self.mic_dev, self.out):
+            if isinstance(d, ClientConn) and d.wants_partial and all(d is not x for x in seen):
+                seen.append(d)
+                d.send_partial(text)
+
     async def close(self) -> None:
         self.closed.set()
         if self.busy_task and not self.busy_task.done():

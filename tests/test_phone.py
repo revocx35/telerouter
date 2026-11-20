@@ -64,6 +64,51 @@ async def test_a_turn_started_on_the_phone_keeps_the_audio_sent_right_after_it()
     assert len(played) == 0 or all(len(b) < 32000 for b in played)
 
 
+async def test_a_screen_shows_the_words_while_they_are_spoken():
+    vs, dev, texts, _ = phone()
+    dev.wants_partial = True                              # hello "partial": true (a smart display)
+    va, transcribe = assistant()
+
+    async def live(audio, language):
+        await asyncio.sleep(0)
+        return f"Turn on {len(audio)}"
+    va.engine.speech.transcribe_live, va.engine.speech.live_available = live, True
+
+    async def ask(conn, text):
+        return "Done."
+
+    async def speak(conn, text):
+        pass
+    va._ask_agent, va.speak = ask, speak
+    va.start_turn(vs, cue=False)
+    with wave.open(str(FIXTURES / "speech.wav")) as w:
+        speech = w.readframes(w.getnframes())
+    for i in range(0, len(speech) + 48000, 640):
+        va.mic(vs, speech[i:i + 640] or bytes(640))
+        await asyncio.sleep(0)                            # real frames arrive 20 ms apart
+    await asyncio.wait_for(vs.busy_task, 10)
+    await asyncio.sleep(0.01)
+    kinds = [t["type"] for t in texts if t["type"] in ("partial", "transcript")]
+    assert kinds[0] == "partial" and "transcript" in kinds
+    final = kinds.index("transcript")
+    assert "partial" not in kinds[final:]                 # nothing live after the final words
+    assert texts[[i for i, t in enumerate(texts) if t["type"] == "transcript"][0]]["text"] == "Turn on the light."
+    # a device that did not ask gets no live words, and nothing runs the live model for it
+    vs2, dev2, texts2, _ = phone()
+    va2, _ = assistant()
+
+    async def no_live(audio, language):
+        raise AssertionError("no screen asked for live words")
+    va2.engine.speech.transcribe_live, va2.engine.speech.live_available = no_live, True
+    va2._ask_agent, va2.speak = ask, speak
+    va2.start_turn(vs2, cue=False)
+    for i in range(0, len(speech) + 48000, 640):
+        va2.mic(vs2, speech[i:i + 640] or bytes(640))
+        await asyncio.sleep(0)
+    await asyncio.wait_for(vs2.busy_task, 10)
+    assert not [t for t in texts2 if t["type"] == "partial"]
+
+
 async def test_transcripts_only_go_to_devices_that_asked_for_them():
     vs, dev, texts, _ = phone(wants_text=False)
     vs.transcript("assistant", "Hello")

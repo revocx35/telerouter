@@ -80,3 +80,91 @@ def test_unfinished_transcripts_are_recognised():
         assert looks_unfinished(t), t
     for t in ("Turn off all of the lights.", "What time is it?", "Call my dad.", "Goodbye!", ""):
         assert not looks_unfinished(t), t
+
+
+class _LiveSpeech:
+    """Fake STT: counts requests; the live model answers with how much audio it got."""
+
+    live_available = True
+
+    def __init__(self):
+        self.finals, self.lives = [], []
+
+    async def transcribe(self, audio, language="", names=None):
+        self.finals.append(len(audio))
+        return "turn on the lights."
+
+    async def transcribe_live(self, audio, language=""):
+        self.lives.append(len(audio))
+        return f"words {len(audio)}"
+
+
+async def _feed(ep, chunks):
+    import asyncio
+    for c in chunks:
+        if ep.feed(c):
+            return ep.result
+        await asyncio.sleep(0)               # let the live tasks run, as between real 20 ms frames
+    return ep.result
+
+
+async def test_the_accurate_model_starts_at_the_first_pause_and_its_text_is_reused():
+    import asyncio
+
+    from telerouter.voice.live import LiveTranscriber
+    speech = read(FIXTURES / "speech.wav")
+    ep = Endpointer(EndpointConfig(start_timeout_ms=3000, end_silence_ms=1000, max_ms=10000))
+    stt, shown = _LiveSpeech(), []
+    live = LiveTranscriber(stt, ep, on_partial=shown.append)
+    chunks = [speech[i:i + 640] for i in range(0, len(speech), 640)] + [bytes(640)] * 100
+    assert await _feed(ep, chunks) == "speech"
+    assert ep.speech_end < len(ep.audio)                       # the closing pause is not speech
+    for _ in range(10):
+        await asyncio.sleep(0)
+    early = len(stt.finals)
+    assert early >= 1                                          # started during the pause, before the end
+    assert await live.final() == "turn on the lights."
+    assert live.early_used and len(stt.finals) == early        # no second request after the end
+    assert stt.lives and shown and shown[-1].startswith("words ")   # the words so far were shown
+    live.close()
+    assert ep.on_feed is None
+
+
+async def test_speech_after_a_pause_makes_the_final_text_fresh():
+    from telerouter.voice.live import LiveTranscriber
+    speech = read(FIXTURES / "speech.wav")
+    ep = Endpointer(EndpointConfig(start_timeout_ms=3000, end_silence_ms=4000, max_ms=20000))
+    stt = _LiveSpeech()
+    stt.live_available = False                                 # no live model: no partials at all
+    live = LiveTranscriber(stt, ep, on_partial=lambda t: None)
+    sp = [speech[i:i + 640] for i in range(0, len(speech), 640)]
+    await _feed(ep, sp + [bytes(640)] * 20)                    # a 0.4 s pause mid-utterance...
+    n = len(stt.finals)
+    assert n >= 1 and not stt.lives
+    before = ep.speech_end
+    for c in sp:                                               # ...then it goes on: stop right after new speech
+        await _feed(ep, [c])
+        if ep.speech_end > before and ep.silence_ms == 0:
+            break
+    assert len(stt.finals) == n
+    end = ep.speech_end
+    ep.result = "speech"                                       # ends before the next pause starts a request
+    assert await live.final() == "turn on the lights."
+    assert not live.early_used and len(stt.finals) == n + 1 and stt.finals[-1] == len(ep.audio) >= end
+    live.close()
+
+
+def test_old_default_pauses_become_one_second_once(tmp_path):
+    from telerouter.models import Config
+    from telerouter.store import migrate
+    cfg = Config()
+    cfg.voice.end_silence_ms, cfg.voice.phone_end_silence_ms, cfg.voice.pause_defaults = 1200, 1500, 0
+    assert migrate(cfg)
+    assert (cfg.voice.end_silence_ms, cfg.voice.phone_end_silence_ms, cfg.voice.pause_defaults) == (1000, 1000, 2)
+    cfg.voice.end_silence_ms = 1200                            # chosen by the owner afterwards: kept
+    migrate(cfg)
+    assert cfg.voice.end_silence_ms == 1200
+    custom = Config()
+    custom.voice.end_silence_ms, custom.voice.phone_end_silence_ms = 1700, 2000
+    migrate(custom)
+    assert (custom.voice.end_silence_ms, custom.voice.phone_end_silence_ms) == (1700, 2000)

@@ -49,7 +49,8 @@ class Engine:
         self.ports = PortAllocator(settings.rtp_port_min, settings.rtp_port_max)
         self.ua = UserAgent(settings.sip_port, self.ports, settings.advertise_ip,
                             user_agent=f"telerouter/{settings.version}", bind=settings.sip_bind)
-        self.speech = SpeechServices(settings.whisper_uri, settings.piper_uri, settings.wake_uri)
+        self.speech = SpeechServices(settings.whisper_uri, settings.piper_uri, settings.wake_uri,
+                                     settings.whisper_live_uri)
         self.ssh_keys = SshKeys(settings.data_dir)
         self.clients: dict[str, ClientConn] = {}          # connected speaker devices
         self.casts: dict[str, CastOutput] = {}            # enabled Google Cast speakers

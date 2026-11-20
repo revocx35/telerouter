@@ -497,14 +497,15 @@ class VoiceSettings(BaseModel):
     beep_volume: int = Field(default=40, ge=0, le=100)
     listen_timeout: float = Field(default=6.0, ge=2, le=30)     # wait for speech after the start beep
     max_utterance: float = Field(default=45.0, ge=3, le=120)
-    end_silence_ms: int = Field(default=1200, ge=300, le=4000)        # speakers
-    phone_end_silence_ms: int = Field(default=1500, ge=300, le=4000)  # phone calls (narrowband, people pause more)
+    end_silence_ms: int = Field(default=1000, ge=300, le=4000)        # speakers (same pause as the phone app)
+    phone_end_silence_ms: int = Field(default=1000, ge=300, le=4000)  # phone calls
     vad_threshold: float = Field(default=0.5, ge=0.1, le=0.95)
     follow_up: bool = False           # listen again (no wake word) right after a reply
     thinking_cue: bool = True         # soft tick while the agent works (every few seconds)
     # a phone call's audio (e.g. telerouter itself saying "Hey Jarvis" on your phone) must not start a turn
     # on a speaker that hears it: no new turns while a call that isn't on that speaker is going on
     wake_during_calls: bool = False
+    pause_defaults: int = 0           # store.migrate: which default pauses were applied (2 = 0.25's 1 s)
 
     @field_validator("wake_words")
     @classmethod

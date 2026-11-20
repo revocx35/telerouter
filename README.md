@@ -117,7 +117,9 @@ chromium --kiosk http://127.0.0.1:8770/       # the kiosk browser on that machin
 ```
 
 The client then asks the server for transcripts (`hello` `"transcript": true`) and shows them; the answers are
-still spoken. The page listens on loopback only (transcripts are private) and refuses requests that don't name
+still spoken. Since server 0.25 / client 0.14 your words also appear **live while you speak** (`"partial": true`):
+the server runs a small, fast Whisper model (`whisper-live`, `tiny-int8`) on the audio so far, and the accurate
+model's text replaces the live words when you finish. The page listens on loopback only (transcripts are private) and refuses requests that don't name
 that address as Host. `--display-on-listen` runs a command (no shell) when a request starts, e.g. to switch the
 panel on when it was turned off.
 
@@ -424,6 +426,7 @@ rejected by default; set a DTMF PIN in *Voice & calls* if your PBX takes outside
 | `TELEROUTER_PUBLIC_URL` | | only for Android app 0.1.x setup links (0.2+ signs in at your address instead) |
 | `TELEROUTER_SETUP_CODE` | random | fixed first-setup code |
 | `WHISPER_MODEL` | small-int8 | tiny/base/small/medium-int8 |
+| `WHISPER_LIVE_MODEL` / `WHISPER_LIVE_THREADS` | tiny-int8 / 2 | the fast model for the live words on a smart display (`whisper-live` service) |
 | `WHISPER_PROMPT` | "Hey Jarvis. Call dad…" | names Whisper should expect, e.g. your tmux session names ("Connect me to the wa_logger tmux.") |
 | `PIPER_VOICE` | en_US-lessac-medium | default voice |
 | `WAKE_THRESHOLD` | 0.5 | openWakeWord sensitivity |

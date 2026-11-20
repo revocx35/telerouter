@@ -60,8 +60,12 @@ def migrate(cfg: Config) -> bool:
     """0.3 -> 0.4: agents carried their own SSH target; now they run on a Machine."""
     changed = False
     v = cfg.voice                                  # 0.4.4 -> 0.4.5: old defaults cut people off mid-sentence
-    if v.end_silence_ms == 900:
-        v.end_silence_ms, changed = 1200, True
+    if v.pause_defaults < 2:                       # 0.25, once: old default pauses -> the phone app's 1 s
+        if v.end_silence_ms in (900, 1200):
+            v.end_silence_ms = 1000
+        if v.phone_end_silence_ms == 1500:
+            v.phone_end_silence_ms = 1000
+        v.pause_defaults, changed = 2, True
     if v.max_utterance == 20.0:
         v.max_utterance, changed = 45.0, True
     for a in cfg.agents:

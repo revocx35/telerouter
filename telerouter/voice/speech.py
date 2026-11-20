@@ -57,17 +57,33 @@ async def describe(uri: str) -> Info | None:
 class SpeechServices:
     """Stateless calls to Whisper and Piper; wake streams are per client (`WakeStream`)."""
 
-    def __init__(self, whisper_uri: str, piper_uri: str, wake_uri: str):
+    def __init__(self, whisper_uri: str, piper_uri: str, wake_uri: str, live_uri: str = ""):
         self.whisper_uri = whisper_uri
         self.piper_uri = piper_uri
         self.wake_uri = wake_uri
+        self.live_uri = live_uri            # a fast (small) Whisper model for the words while someone speaks
         self._stt_slots = asyncio.Semaphore(2)
+        self._live_slots = asyncio.Semaphore(2)
+
+    @property
+    def live_available(self) -> bool:
+        return bool(self.live_uri)
 
     async def transcribe(self, pcm: bytes, language: str = "", names: list[str] | None = None) -> str:
         """16 kHz PCM16 -> text ("" when nothing was understood)."""
-        async with self._stt_slots:
+        return await self._transcribe(self.whisper_uri, self._stt_slots, pcm, language, names)
+
+    async def transcribe_live(self, pcm: bytes, language: str = "") -> str:
+        """The words so far, with the fast live model: shown on a screen, never acted on."""
+        if not self.live_uri:
+            raise SpeechError("no live speech-to-text service")
+        return await self._transcribe(self.live_uri, self._live_slots, pcm, language, None)
+
+    async def _transcribe(self, uri: str, slots: asyncio.Semaphore, pcm: bytes, language: str,
+                          names: list[str] | None) -> str:
+        async with slots:
             try:
-                client = await _client(self.whisper_uri, STT_TIMEOUT)
+                client = await _client(uri, STT_TIMEOUT)
             except OSError as e:
                 raise SpeechError(f"speech-to-text service unreachable: {e}") from e
             try:

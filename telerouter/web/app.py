@@ -2074,6 +2074,7 @@ def create_app(settings: Settings, tls: TlsFiles, logbuf: LogBuffer | None = Non
                 if t == "hello":
                     conn.aec = bool(obj.get("aec"))
                     conn.wants_text = obj.get("transcript") is True
+                    conn.wants_partial = conn.wants_text and obj.get("partial") is True
                     conn.speech = obj.get("speech") is not False
                     conn.device_stt = obj.get("stt") == "device"
                     client.platform = str(obj.get("platform") or "")[:64]

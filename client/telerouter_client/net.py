@@ -124,6 +124,7 @@ class Session:
                              "platform": f"{platform.system()} {platform.machine()}"}
                     if self.display is not None:
                         hello["transcript"] = True       # a screen: show what was heard and answered
+                        hello["partial"] = True          # and the words live while the person speaks
                         hello["display"] = True          # and ask for its home screen (layout, sections)
                     await ws.send(json.dumps(hello))
                     while not self.mic_q.empty():
@@ -191,6 +192,9 @@ class Session:
                 elif t == "transcript":
                     if self.display is not None:
                         self.display.add_transcript(str(obj.get("role")), str(obj.get("text") or ""))
+                elif t == "partial":
+                    if self.display is not None:
+                        self.display.set_partial(str(obj.get("text") or ""))
                 elif t == "config":
                     vol = obj.get("volume")
                     if isinstance(vol, (int, float)):

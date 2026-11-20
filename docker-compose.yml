@@ -26,11 +26,12 @@ services:
         required: false
     environment:
       TELEROUTER_WHISPER_URI: tcp://127.0.0.1:10300
+      TELEROUTER_WHISPER_LIVE_URI: tcp://127.0.0.1:10301
       TELEROUTER_PIPER_URI: tcp://127.0.0.1:10200
       TELEROUTER_WAKE_URI: tcp://127.0.0.1:10400
     volumes:
       - ./data:/data
-    depends_on: [whisper, piper, openwakeword]
+    depends_on: [whisper, whisper-live, piper, openwakeword]
 
   # Speech services: reachable only from this host (127.0.0.1), never from the network.
   whisper:
@@ -46,6 +47,21 @@ services:
     volumes:
       - ./whisper-data:/data
     ports: ["127.0.0.1:10300:10300"]
+
+  # a fast model for the words while someone speaks (shown live on a smart display); answers use the one above
+  whisper-live:
+    <<: *hardening
+    image: rhasspy/wyoming-whisper:3.8.1
+    container_name: telerouter-whisper-live
+    user: "1000:1000"
+    command: ["--model", "${WHISPER_LIVE_MODEL:-tiny-int8}", "--cpu-threads", "${WHISPER_LIVE_THREADS:-2}",
+              "--beam-size", "1"]
+    environment:
+      HF_HOME: /data/hf
+      HOME: /data
+    volumes:
+      - ./whisper-data:/data
+    ports: ["127.0.0.1:10301:10300"]
 
   piper:
     <<: *hardening

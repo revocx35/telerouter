@@ -148,6 +148,7 @@ class Display:
         self.connected = False
         self.state = "offline"
         self.turns: list[dict] = []
+        self.partial = ""                     # the words so far while the person speaks
         self._streams: set[asyncio.Queue] = set()
         self._conns = 0
         self._server: asyncio.AbstractServer | None = None
@@ -164,7 +165,7 @@ class Display:
     # -- what the session reports -----------------------------------------------------------------
     def snapshot(self) -> dict:
         return {"type": "snapshot", "name": self.name, "assistant": self.assistant, "connected": self.connected,
-                "state": self.state, "turns": self.turns, "screen": self.screen, "font_family": self.font_family,
+                "state": self.state, "turns": self.turns, "partial": self.partial, "screen": self.screen, "font_family": self.font_family,
                 "tasks": self.tasks, "frames": self.frame_origins()}
 
     def set_screen(self, msg: dict) -> None:
@@ -242,7 +243,18 @@ class Display:
         self.state = state
         if state == "listening":
             self._wake_screen()
+        if state in ("idle", "offline"):
+            self.partial = ""
         self._push({"type": "state", "state": state, "t": time.time()})
+
+    def set_partial(self, text: str) -> None:
+        """The words so far while the person speaks (replaced by the "user" transcript)."""
+        if self.state != "listening":
+            return
+        text = str(text or "").strip()[:4000]
+        if text != self.partial:
+            self.partial = text
+            self._push({"type": "partial", "text": text})
 
     def add_transcript(self, role: str, text: str) -> None:
         if role not in ("user", "assistant"):
@@ -251,6 +263,8 @@ class Display:
         if not text:
             return
         turn = {"role": role, "text": text, "t": time.time()}
+        if role == "user":
+            self.partial = ""
         self.turns = (self.turns + [turn])[-KEEP_TURNS:]
         self._push({"type": "transcript", **turn})
 
@@ -526,6 +540,8 @@ body.active #talk { opacity:1; background:var(--bg); }
 .turn.assistant { align-self:flex-start; background:var(--bot); border:1px solid #1c2a44;
   border-bottom-left-radius:.8vh; }
 .turn.old { opacity:.45; font-size:2.6vh; }
+.turn.live, .turn.still { animation:none; }
+.turn.live { opacity:.8; }
 .turn.long { font-size:2.8vh; }
 .who { display:block; font-size:1.7vh; color:var(--dim); margin-bottom:.6vh; letter-spacing:.08em;
   text-transform:uppercase; }
@@ -559,7 +575,7 @@ JS = r"""
   var body = document.body, turnsEl = document.getElementById("turns"), statusEl = document.getElementById("status");
   var nameEl = document.getElementById("name"), dot = document.getElementById("dot");
   var clockEl = document.getElementById("clock"), panelsEl = document.getElementById("panels");
-  var state = "offline", turns = [], lastActivity = 0, assistant = "Assistant";
+  var state = "offline", turns = [], lastActivity = 0, assistant = "Assistant", partial = "";
   var screen = DEFAULT, tasks = {}, built = {};          // built: section id -> { key, root, update, stop }
   var frames = null;           // the websites' origins this page's CSP (frame-src) was served with
 
@@ -575,8 +591,16 @@ JS = r"""
     while (turnsEl.firstChild) turnsEl.removeChild(turnsEl.firstChild);
     var lastUser = -1;
     for (var i = 0; i < turns.length; i++) if (turns[i].role === "user") lastUser = i;
-    turns.forEach(function (t, i) {
-      var cls = "turn " + t.role + (i < lastUser ? " old" : "") + (t.text.length > 280 ? " long" : "");
+    var shown = turns.slice();
+    if (partial) {
+      // the words so far: a "You" bubble that grows in place (no entry animation on each update)
+      shown.push({ role: "user", text: partial, live: true });
+      lastUser = shown.length - 1;
+    }
+    shown.forEach(function (t, i) {
+      var cls = "turn " + t.role + (i < lastUser ? " old" : "") + (t.text.length > 280 ? " long" : "") +
+        (t.live ? " live" : "") + (t.still || t.shown ? " still" : "");
+      t.shown = true;                  // animate a bubble only the first time it appears
       var b = el("div", cls);
       b.appendChild(el("span", "who", t.role === "user" ? "You" : assistant));
       b.appendChild(document.createTextNode(t.text));
@@ -823,6 +847,7 @@ JS = r"""
       assistant = ev.assistant || "Assistant";
       dot.classList.toggle("on", !!ev.connected);
       turns = ev.turns || [];
+      partial = ev.partial || "";
       if (frames === null) frames = (ev.frames || []).join(" ");
       else if ((ev.frames || []).join(" ") !== frames) { location.reload(); return; }
       setScreen(ev.screen, ev.font_family, ev.tasks);
@@ -845,9 +870,21 @@ JS = r"""
         turns = turns.slice(-2);
         renderTurns();
       }
+      if ((ev.state === "idle" || ev.state === "offline") && partial) {
+        partial = "";
+        renderTurns();
+      }
       setState(ev.state);
+    } else if (ev.type === "partial") {
+      partial = ev.text || "";
+      lastActivity = Date.now();
+      renderTurns();
+      tick();
     } else if (ev.type === "transcript") {
-      turns.push({ role: ev.role, text: ev.text, t: ev.t });
+      // the final words replace the live bubble in place (no second entry animation)
+      var still = ev.role === "user" && !!partial;
+      if (ev.role === "user") partial = "";
+      turns.push({ role: ev.role, text: ev.text, t: ev.t, still: still });
       if (turns.length > 6) turns = turns.slice(-6);
       lastActivity = Date.now();
       renderTurns();
