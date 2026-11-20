@@ -270,8 +270,10 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   for pinning; opened through the owner's reverse proxy (a public name), the page presented Let's Encrypt and setup
   failed ("does not match"). Since 0.9.1 the link has `lan` (`own_address`) and the app enrolls through the internet address first.
 - **A phone and a speaker both woke on one "Hey Jarvis"** (0.9.2): the owner chose that the phone answers.
-  `VoiceAssistant._phone_wins` cancels speaker turns their wake word started within `SAME_WAKE_S`, and `_on_wake`
-  ignores speaker wake words within it after a phone's.
+  Since 0.26 it's a ranking the owner sets (Voice -> *Who answers*, `wake_order`; unlisted: phones first, so the
+  default is unchanged): `VoiceAssistant._claim` decides at every wake, `_stand_down` cancels a speaker's listening
+  turn or sends a phone `stand_down` and drops its late words (`_dropped`, 30 s). "Phone" = device stt or an
+  `android` platform (the test helpers must set it, or a phone ties with a speaker and the first one wins).
 - **The phone app is the web UI** (0.10, app 0.2): it shows `/` in a WebView, so every web UI change reaches the
   phone. Keep pages usable at 360 px wide (the ≤760 px layout: top bar + drawer, `main > h1` hidden because the top
   bar shows the page name). In the app (`APP`, user agent `telerouter-android/`) the UI adds `telerouter-app://talk`
@@ -360,11 +362,17 @@ helpers (SIP phone, fake agent, e2e). The full code map is in ARCHITECTURE.md §
   never put a server token on a command line. `MachineRuntime.new_session(by_api=True)` checks `allow_api_sessions`,
   not `allow_new_sessions`. Tests: `tests/test_apisessions.py` (FakeRT, no SSH).
 
-## Status (v0.25.0, 2026-11-20)
+## Status (v0.26.0, 2026-11-20)
 
 Releases: tag `vX.Y.Z` -> CI builds multi-arch `ghcr.io/revocx35/telerouter:X.Y.Z` and `:X.Y`; prod follows
 `TELEROUTER_VERSION=<major.minor>` (CLAUDE.local.md). Commit as `97547472+revocx35@users.noreply.github.com`, run the
 leak check (gitleaks + git grep over history) before every push.
+
+0.26.0 (2026-11-20, owner: "a priority setting so i can decide when i say hey jarvis and both my phone and an speaker
+picks it up which one answers"): **Who answers** card on Voice & calls (`VoiceSettings.wake_order`, up/down list;
+unlisted: phones first = the old default). `VoiceAssistant._claim` replaces `_phone_wins`; the loser stands down; a
+phone gets `stand_down` (app 0.3.3 closes its sheet) and its late words are dropped. Two speakers no longer both answer.
+2 new tests (+ app: 3); 322 tests pass. UI checked in Chromium at 1280 and 360 px.
 
 0.25.0 (2026-11-20, owner: "in the new screens feature ... it only shows what i said after i finish speaking can you make
 it so that it shows what im saying live just like on the mobile app" + "the current wait time on android client is great

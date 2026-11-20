@@ -161,6 +161,10 @@ the same sign-in: the device token travels in `X-Telerouter-Token` (the proxy ma
 the proxy's cookie with it, and an expired proxy sign-in is renewed in the background while the identity
 provider's session lasts.
 
+**Phone and speaker both hear "Hey Jarvis"?** Only one answers. By default it's the phone; under *Voice & calls ->
+Who answers* put your devices in the order you want (e.g. the speaker in the room first). The same order decides
+between two speakers. A phone that stands down closes its sheet (app 0.3.3 or newer).
+
 Behind a reverse proxy, turn on its WebSocket support (`/ws/client`) and set `TELEROUTER_TRUSTED_PROXIES` to its
 address, so throttling sees the real clients and the single sign-on redirect URI uses the name the browser
 used (`X-Forwarded-Host`).

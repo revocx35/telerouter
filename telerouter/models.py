@@ -505,7 +505,21 @@ class VoiceSettings(BaseModel):
     # a phone call's audio (e.g. telerouter itself saying "Hey Jarvis" on your phone) must not start a turn
     # on a speaker that hears it: no new turns while a call that isn't on that speaker is going on
     wake_during_calls: bool = False
+    # one "Hey Jarvis" heard by several devices: the first of these speaker ids answers, the others stand down;
+    # speakers not listed come after them, phones (the app) before the others
+    wake_order: list[str] = Field(default_factory=list, max_length=100)
     pause_defaults: int = 0           # store.migrate: which default pauses were applied (2 = 0.25's 1 s)
+
+    @field_validator("wake_order")
+    @classmethod
+    def _wo(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for x in v:
+            if not isinstance(x, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", x):
+                raise ValueError("invalid speaker id")
+            if x not in out:
+                out.append(x)
+        return out
 
     @field_validator("wake_words")
     @classmethod

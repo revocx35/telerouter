@@ -23,6 +23,7 @@ def phone(wants_text=True):
         sent_bytes.append(b)
     dev = ClientConn(Client(id="0000000f", name="Phone"), sb, st)
     dev.wants_text = wants_text
+    dev._texts = sent_text
     vs = VirtualSpeaker(Speaker(id="0000000f", name="Phone", mic="0000000f", output="client:0000000f"), dev, dev)
     return vs, dev, sent_text, sent_bytes
 
@@ -155,6 +156,7 @@ def test_device_enrollment_gives_the_android_app_a_setup_link(settings):
 
 def _two_devices():
     phone_vs, _, phone_text, _ = phone()
+    phone_vs.mic_dev.client.platform = "android"                  # the app's hello says so
     spk_vs, _, _, spk_played = phone(wants_text=False)
     spk_vs.cfg = Speaker(id="0000000e", name="Raqqa laptop", mic="0000000e", output="client:0000000e")
     spk_vs.id = "0000000e"
@@ -180,7 +182,7 @@ async def test_one_hey_jarvis_two_devices_the_phone_answers():
     va2._on_wake(spk2, "hey_jarvis")
     assert spk2.busy_task is None and spk2.state == "idle"
     # a wake word on the speaker later is a new request: it answers
-    va2._device_wake = (A.time.monotonic() - A.SAME_WAKE_S - 1, phone2.id)
+    va2._wakes = {k: at - A.SAME_WAKE_S - 1 for k, at in va2._wakes.items()}
     va2._on_wake(spk2, "hey_jarvis")
     await asyncio.sleep(0.05)
     assert spk2.state == "listening"
@@ -215,6 +217,66 @@ async def test_a_phone_with_its_own_recognition_wins_when_it_connects_not_when_i
     va2.phone_woke(phone2)
     va2._on_wake(spk2, "hey_jarvis")
     assert spk2.busy_task is None and spk2.state == "idle"
+
+
+async def test_who_answers_follows_the_voice_settings_order():
+    import telerouter.voice.assistant as A
+    # the speaker is put first: the phone (its own recognition) stands down, whichever woke first
+    for phone_first in (False, True):
+        va, phone_vs, spk = _two_devices()
+        phone_vs.mic_dev.device_stt = True
+        sent = phone_vs.mic_dev                                   # the phone's messages: phone()'s list
+        va.engine.store.config.voice.wake_order = [spk.id]
+        if phone_first:
+            va.phone_woke(phone_vs)
+            va._on_wake(spk, "hey_jarvis")
+        else:
+            va._on_wake(spk, "hey_jarvis")
+            va.phone_woke(phone_vs)
+        await asyncio.sleep(0.05)
+        assert spk.state == "listening", phone_first             # the speaker answers
+        texts = sent._texts
+        assert {"type": "stand_down", "by": spk.name} in texts    # the app closes its sheet
+        # the phone's words still arrive a few seconds later: dropped, no second turn
+        assert va.utterance(phone_vs, "Turn on the light.") is True
+        assert phone_vs.busy_task is None and phone_vs.state == "idle"
+        # a new "Hey Jarvis" on the phone later (nothing else heard it) is its own request again
+        va._wakes = {k: at - A.SAME_WAKE_S - 1 for k, at in va._wakes.items()}
+        va.phone_woke(phone_vs)
+        assert not va._dropped(phone_vs)
+        spk.busy_task.cancel()
+    # two speakers: the one ranked first answers, the other stands down
+    va, _, spk = _two_devices()
+    other, _, _, _ = phone(wants_text=False)
+    other.cfg = Speaker(id="0000000d", name="Kitchen", mic="0000000d", output="client:0000000d")
+    other.id = "0000000d"
+    va.engine.speakers[other.id] = other
+    va.engine.store.config.voice.wake_order = [other.id, spk.id]
+    va._on_wake(spk, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    va._on_wake(other, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    assert other.state == "listening" and spk.state == "idle"
+    other.busy_task.cancel()
+    # unlisted speakers: the first one keeps it (both used to answer)
+    va, _, spk = _two_devices()
+    va.engine.speakers[other.id] = other
+    other.busy_task = None
+    va._on_wake(spk, "hey_jarvis")
+    va._on_wake(other, "hey_jarvis")
+    await asyncio.sleep(0.05)
+    assert spk.state == "listening" and other.busy_task is None
+    spk.busy_task.cancel()
+
+
+def test_the_who_answers_order_is_validated():
+    import pytest
+    from pydantic import ValidationError
+
+    from telerouter.models import VoiceSettings
+    assert VoiceSettings(wake_order=["a1", "a1", "b2"]).wake_order == ["a1", "b2"]
+    with pytest.raises(ValidationError):
+        VoiceSettings(wake_order=["../x"])
 
 
 def test_the_phone_says_hello_and_wake_and_the_speaker_stands_down(settings):

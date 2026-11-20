@@ -271,6 +271,8 @@ On narrow screens the web UI has a top bar with the page name and a navigation d
 
 Protocol extensions the phone uses (all opt-in, old clients unaffected):
 
+- `{"type":"stand_down","by"}` (0.26): another device answers this "Hey Jarvis" (see *Who answers*); the phone
+  stops listening. Old apps ignore it; their words are dropped anyway.
 - `hello` with `"partial": true` (with `"transcript": true`, the smart display since client 0.14): while the
   person speaks the server sends `{"type":"partial","text"}` (the words so far, may change); the `user`
   transcript replaces them. Only these devices make the server run the live model.
@@ -304,6 +306,15 @@ A phone with its own speech recognition sends its words only once they are recog
 word, when the speaker is past that window (0.16.0 let both answer). Its `hello` (it connects the moment it hears
 "Hey Jarvis") and its `wake` message (listening again on an open connection) call `VoiceAssistant.phone_woke`,
 which runs the same stand-down at the wake word itself (0.16.1).
+
+**Who answers** (0.26, `VoiceAssistant._claim`): the owner ranks the devices in Voice & calls -> *Who answers*
+(`VoiceSettings.wake_order`, speaker ids; unlisted ones follow, phones before the others, which keeps the old
+"the phone answers" default). Every wake claims: a speaker's wake word (`_on_wake`), a phone's `hello`/`wake`
+(`phone_woke`), and a phone's utterance or `talk{cue:false}` (`start_turn`). Within `SAME_WAKE_S` of other claims,
+the better-ranked device keeps the request (a tie: the first one); the loser stands down (`_stand_down`): a
+speaker's listening turn is cancelled; a phone with on-device recognition is sent `{"type":"stand_down","by"}`
+(app 0.3.3 closes its sheet) and what it sends in the next `STOOD_DOWN_S` (30 s: its recognised words arrive
+late) is dropped, until it wins a later wake. Two speakers hearing one phrase no longer both answer.
 
 App 0.1.x (setup links with a pinned LAN CA, `TELEROUTER_PUBLIC_URL`) still works: `/api/clients/enroll` still
 returns `app_link`, and `Authorization: Bearer` still works on `/ws/client`.

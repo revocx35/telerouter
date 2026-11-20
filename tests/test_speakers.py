@@ -340,6 +340,7 @@ async def test_a_call_saying_the_wake_word_does_not_start_a_turn_on_a_speaker():
     va = VoiceAssistant(eng)
     dev = FakeOut("client", "Raqqa laptop")
     vs = VirtualSpeaker(Speaker(id="0000000a", name="Raqqa", mic="0000000a", output="client:0000000a"), dev, dev)
+    eng.speakers = {vs.id: vs}
     started = []
     va.start_turn = lambda conn: started.append(conn.name)
     calls.append(SimpleNamespace(state="active", client_id=""))       # telerouter phoning you (phone_message)

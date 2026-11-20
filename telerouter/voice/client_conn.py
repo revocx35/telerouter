@@ -29,6 +29,8 @@ Wire protocol (WebSocket, wss://.../ws/client, `Authorization: Bearer <client to
                                                 "language", "features": ["utterance"]}
                            {"type": "transcript", "role": "user"|"assistant", "text", "say"}  (hello transcript:
                            true; "say" = the answer as a voice reads it: no markdown, code or links)
+                           {"type": "stand_down", "by"}  (0.26) another device that heard the same "Hey Jarvis"
+                           answers (Voice -> Who answers): stop listening; what this device sends for it is dropped
                            {"type": "partial", "text"}  (hello "partial": true, 0.25) the words so far while
                            the person speaks (fast model, may change); the "user" transcript replaces them
                            {"type": "display", "screen", "font_family", "tasks"}  (hello "display": true, 0.23):

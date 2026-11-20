@@ -65,6 +65,8 @@ def sentences(text: str) -> list[str]:
 
 # a phone and a speaker that heard the same "Hey Jarvis" start their turns within this many seconds
 SAME_WAKE_S = 4.0
+# a phone that stood down: its words, recognised on the phone, can still arrive this long after (they are dropped)
+STOOD_DOWN_S = 30.0
 # a phone with its own speech recognition may still be reading the answer aloud when telerouter listens again
 DEVICE_GRACE_S = 120.0
 MAX_UTTERANCE_CHARS = 2000
@@ -76,10 +78,10 @@ class VoiceAssistant:
         self.wake: dict[str, WakeStream] = {}
         self._listeners: dict[str, Endpointer] = {}
         self._listen_done: dict[str, asyncio.Event] = {}
-        # one "Hey Jarvis", several devices: the phone (its own wake word) answers, speakers that heard the
-        # same phrase stand down (see _phone_wins)
-        self._wake_turns: dict[str, float] = {}       # speaker id -> when its wake word started a turn
-        self._device_wake: tuple[float, str] = (0.0, "")
+        # one "Hey Jarvis", several devices: the highest in Voice -> "Who answers" (`wake_order`; unlisted: phones
+        # first) answers, the others stand down (see _claim)
+        self._wakes: dict[str, float] = {}            # speaker id -> when it claimed the last "Hey Jarvis"
+        self._stood_down: dict[str, float] = {}       # phone speaker id -> when it was told to stand down
         # phones that recognise speech themselves (hello "stt": "device") answer a listen with an utterance
         self._utterances: dict[str, asyncio.Future] = {}
 
@@ -155,17 +157,14 @@ class VoiceAssistant:
         if st in ("idle", "speaking") and self._other_call(conn):
             log.info("wake word on %s ignored: a phone call is going on", conn.name)
             return
-        at, phone = self._device_wake
-        if phone != conn.id and time.monotonic() - at < SAME_WAKE_S:
-            log.info("wake word on %s ignored: %s heard it and answers", conn.name, self._name(phone))
+        if st not in ("idle", "speaking") or (st == "speaking" and not (conn.aec and conn.busy_task)):
             return
-        if st == "speaking" and conn.aec and conn.busy_task:
+        if not self._claim(conn):
+            return
+        if st == "speaking":
             conn.busy_task.cancel()
             conn.flush()
-        elif st != "idle":
-            return
         self.start_turn(conn)
-        self._wake_turns[conn.id] = time.monotonic()
 
     def _other_call(self, conn: VirtualSpeaker) -> bool:
         if self.engine.store.config.voice.wake_during_calls:
@@ -179,12 +178,12 @@ class VoiceAssistant:
         (an utterance), so the turn starts with the agent."""
         if not conn.has_mic or (conn.busy_task and not conn.busy_task.done()):
             return
+        if (text is not None or not cue) and (self._dropped(conn) or not self._claim(conn)):
+            return
         if text is not None:
-            self._phone_wins(conn)
             conn.busy_task = asyncio.create_task(self._turn(conn, False, first_text=text))
             return
         if not cue:
-            self._phone_wins(conn)
             conn.flush()
             conn.set_state("listening")
             self._listeners[conn.id] = Endpointer(self._endpoint_cfg(None))
@@ -193,25 +192,72 @@ class VoiceAssistant:
     def phone_woke(self, phone: VirtualSpeaker) -> None:
         """A phone that recognises speech itself started listening on its own (its wake word or a tap): it opens
         its connection (hello) or sends "wake" at that moment, while its words reach telerouter only once they
-        are recognised, seconds later. A speaker that the same "Hey Jarvis" woke stands down now, while it is
-        still listening, so only the phone answers."""
+        are recognised, seconds later. Who answers is decided now, while a speaker the same "Hey Jarvis" woke
+        is still listening (see _claim)."""
         if phone.has_mic and phone.state in ("idle", "speaking", "listening"):
-            self._phone_wins(phone)
+            self._claim(phone)
 
-    def _phone_wins(self, phone: VirtualSpeaker) -> None:
-        """The phone heard "Hey Jarvis" itself: a speaker that the same phrase woke (it reacts first, the phone
-        still has to connect) stops listening, so only the phone answers."""
+    # -- one "Hey Jarvis", several devices --------------------------------------------------------------------
+    def is_phone(self, conn: VirtualSpeaker) -> bool:
+        if conn.device_stt:
+            return True
+        client = getattr(conn.mic_dev, "client", None)
+        return str(getattr(client, "platform", "") or "").lower().startswith("android")
+
+    def _rank(self, conn: VirtualSpeaker) -> tuple[int, int]:
+        """Smaller answers first: the Voice settings' order, then phones, then the other speakers."""
+        order = self.engine.store.config.voice.wake_order
+        if conn.id in order:
+            return (0, order.index(conn.id))
+        return (1, 0 if self.is_phone(conn) else 1)
+
+    def _claim(self, conn: VirtualSpeaker) -> bool:
+        """conn heard "Hey Jarvis" (or a phone says it did). True: it answers. Devices that claimed the same phrase
+        (within SAME_WAKE_S) stand down if they rank lower; if one ranks higher, or the same and was first, conn
+        stands down instead."""
         now = time.monotonic()
-        self._device_wake = (now, phone.id)
-        for sid, at in list(self._wake_turns.items()):
-            other = self.engine.speakers.get(sid)
-            if sid == phone.id or now - at > SAME_WAKE_S or other is None:
-                continue
-            if other.state == "listening" and other.busy_task and not other.busy_task.done():
-                log.info("%s heard the wake word too: %s answers", other.name, phone.name)
-                other.busy_task.cancel()
-                other.flush()
-            self._wake_turns.pop(sid, None)
+        for sid, at in list(self._wakes.items()):
+            if now - at > SAME_WAKE_S or sid not in self.engine.speakers:
+                self._wakes.pop(sid, None)
+        if conn.id in self._wakes:                     # the same wake again (e.g. a phone's hello, then "wake")
+            return True
+        mine = self._rank(conn)
+        for sid in self._wakes:
+            other = self.engine.speakers[sid]
+            if self._rank(other) <= mine:
+                log.info("wake word on %s ignored: %s heard it too and answers", conn.name, other.name)
+                self._stand_down(conn, other)
+                return False
+        for sid in list(self._wakes):
+            other = self.engine.speakers[sid]
+            log.info("%s heard the wake word too: %s answers", other.name, conn.name)
+            self._stand_down(other, conn)
+            self._wakes.pop(sid, None)
+        self._wakes[conn.id] = now
+        self._stood_down.pop(conn.id, None)
+        return True
+
+    def _stand_down(self, loser: VirtualSpeaker, winner: VirtualSpeaker) -> None:
+        if loser.device_stt:
+            # the phone listens and recognises by itself: tell it to stop (app 0.3.3) and drop its words if they come
+            self._stood_down[loser.id] = time.monotonic()
+            dev = loser.mic_dev
+            if dev is not None and hasattr(dev, "send_json"):
+                asyncio.create_task(dev.send_json({"type": "stand_down", "by": winner.name}))
+        if loser.state == "listening" and loser.busy_task and not loser.busy_task.done():
+            loser.busy_task.cancel()
+            loser.flush()
+
+    def _dropped(self, conn: VirtualSpeaker) -> bool:
+        """A phone that stood down for this "Hey Jarvis": what it sends now belongs to it and is dropped."""
+        at = self._stood_down.get(conn.id)
+        if at is None:
+            return False
+        if time.monotonic() - at > STOOD_DOWN_S:
+            self._stood_down.pop(conn.id, None)
+            return False
+        log.info("[%s] stood down for another device: its request is dropped", conn.name)
+        return True
 
     def _name(self, sid: str) -> str:
         vs = self.engine.speakers.get(sid)
@@ -228,6 +274,8 @@ class VoiceAssistant:
             return True
         if not text or conn.state != "idle" or (conn.busy_task and not conn.busy_task.done()):
             return False
+        if self._dropped(conn):
+            return True
         log.info("[%s] utterance from the device", conn.name)
         self.start_turn(conn, text=text)
         return True

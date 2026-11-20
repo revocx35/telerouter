@@ -1463,8 +1463,8 @@ function integrationForm(i) {
 
 // ---------------------------------------------------------------------------------------------- voice & calls
 async function voice(main) {
-  const [settings, spCfg, ctCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/speakers"),
-    api("GET", "/api/contacts").catch(() => ({ contacts: [] }))]);
+  const [settings, spCfg, ctCfg, clCfg] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/speakers"),
+    api("GET", "/api/contacts").catch(() => ({ contacts: [] })), api("GET", "/api/clients").catch(() => ({ clients: [] }))]);
   let sp = { health: {}, wake_models: [], voices: [] };
   try { sp = await api("GET", "/api/speech"); } catch { }
   const v = settings.voice, c = settings.calls;
@@ -1546,8 +1546,30 @@ async function voice(main) {
     } catch (x) { qStatus.textContent = x.message; }
   }
   refreshQ();
+  // Who answers one "Hey Jarvis" that several devices heard: the saved order first, then phones, then the rest
+  const platformOf = Object.fromEntries((clCfg.clients || []).map(x => [x.id, (x.platform || "").toLowerCase()]));
+  const isPhone = x => (platformOf[x.mic] || "").startsWith("android");
+  const listening = spCfg.speakers.filter(x => x.mic);
+  const savedOrder = v.wake_order || [];
+  const rank = x => { const i = savedOrder.indexOf(x.id); return i >= 0 ? i : savedOrder.length + (isPhone(x) ? 0 : 1); };
+  let order = listening.slice().sort((a, b) => rank(a) - rank(b));
+  const orderList = el("ol", { class: "wake-order" });
+  const drawOrder = () => orderList.replaceChildren(...order.map((x, i) => el("li", {},
+    el("span", { class: "wo-n" }, `${i + 1}.`), el("span", { class: "wo-name" }, x.name, isPhone(x) ? el("span", { class: "hint" }, " · phone") : ""),
+    el("button", { class: "small", title: "Up", "aria-label": `Move ${x.name} up`, disabled: i === 0,
+      onclick: () => { [order[i - 1], order[i]] = [order[i], order[i - 1]]; drawOrder(); } }, "↑"),
+    el("button", { class: "small", title: "Down", "aria-label": `Move ${x.name} down`, disabled: i === order.length - 1,
+      onclick: () => { [order[i + 1], order[i]] = [order[i], order[i + 1]]; drawOrder(); } }, "↓"))));
+  drawOrder();
+  const whoCard = el("div", { class: "card" }, el("h2", {}, "Who answers"),
+    el("p", { class: "hint" }, "When several devices hear the same \"Hey Jarvis\" (within 4 s), the highest one in this list answers and the others stay quiet. A phone that stands down closes its assistant sheet (app 0.3.3 or newer)."),
+    listening.length < 2 ? el("p", { class: "hint" }, "Only one speaker has a microphone.") : orderList,
+    el("div", { class: "row" }, el("button", { class: "primary", onclick: async () => {
+      await act(() => api("PUT", "/api/settings", { voice: { wake_order: order.map(x => x.id) } }), "Saved");
+    } }, "Save order")));
   main.replaceChildren(el("h1", {}, "Voice & calls"),
     el("div", { class: "card" }, el("h2", {}, "Voice"), el("div", { class: "row" }, ["stt", "tts", "wake"].map(k => el("span", {}, stateDot(sp.health[k] ? "ready" : "down"), { stt: "Whisper", tts: "Piper", wake: "openWakeWord" }[k]))), vf),
+    whoCard,
     el("div", { class: "card" }, el("h2", {}, "Quiet hours"),
       el("p", { class: "hint" }, "During quiet hours speakers still answer quick requests (lights, mail, questions), but an answer that takes longer is not spoken: the agent keeps working silently. Calls are blocked: incoming calls are rejected and agents can't call you or talk through a speaker on their own, unless a desk sensor says you're at your desk. Calls you ask for yourself still work."),
       qf),
